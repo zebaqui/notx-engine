@@ -1,0 +1,57 @@
+# notx/1.0
+# note_urn:      notx:note:018e4f2a-9b1c-7d3e-8f2a-2c4d5e6f7a8d
+# name:          Project Planning with Snapshots
+# created_at:    2025-01-15T10:00:00Z
+# head_sequence: 10
+
+1:2025-01-15T10:00:00Z:notx:usr:7f3e9c1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b
+->
+1 | # Q1 2025 Project Planning
+2 |
+3 | Status: In Progress
+
+2:2025-01-15T10:15:00Z:notx:usr:7f3e9c1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b
+->
+4 | Timeline: Jan - Mar
+
+3:2025-01-15T10:30:00Z:notx:usr:8a4f0d2b-3c5e-5f7g-9b1c-2d3e4f5g6h7i
+->
+3 | Status: Active Review
+
+4:2025-01-15T10:45:00Z:notx:usr:7f3e9c1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b
+->
+5 | Budget: $50,000
+
+5:2025-01-15T11:00:00Z:notx:usr:8a4f0d2b-3c5e-5f7g-9b1c-2d3e4f5g6h7i
+=>
+1 | # Q1 2025 Project Planning
+2 |
+3 | Status: Active Review
+4 | Timeline: Jan - Mar
+5 | Budget: $50,000
+
+6:2025-01-15T11:15:00Z:notx:usr:9b5g1e3c-4d6f-6g8h-0c2d-3e4f5g6h7i8j
+->
+6 | Team Lead: Sarah Chen
+
+7:2025-01-15T11:30:00Z:notx:usr:7f3e9c1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b
+->
+2 | ## Objectives
+
+8:2025-01-15T11:45:00Z:notx:usr:8a4f0d2b-3c5e-5f7g-9b1c-2d3e4f5g6h7i
+->
+7 | Key Deliverables: API, Dashboard, Reports
+
+9:2025-01-15T12:00:00Z:notx:usr:9b5g1e3c-4d6f-6g8h-0c2d-3e4f5g6h7i8j
+->
+4 | Timeline: Jan 15 - Mar 31
+
+10:2025-01-15T12:15:00Z:notx:usr:7f3e9c1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b
+=>
+1 | # Q1 2025 Project Planning
+2 | ## Objectives
+3 | Status: Active Review
+4 | Timeline: Jan 15 - Mar 31
+5 | Budget: $50,000
+6 | Team Lead: Sarah Chen
+7 | Key Deliverables: API, Dashboard, Reports

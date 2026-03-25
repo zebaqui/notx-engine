@@ -1,0 +1,27 @@
+# notx/1.0
+# note_urn:      notx:note:018e4f2a-9b1c-7d3e-8f2a-2b4c5d6e7f8a
+# name:          Document with Gaps and Appends
+# created_at:    2025-01-15T09:00:00Z
+# head_sequence: 3
+
+1:2025-01-15T09:00:00Z:notx:usr:3a7b2c4d-5e6f-4a0b-8c1d-2e3f4a5b6c7d
+->
+1 | # Project Documentation
+
+2:2025-01-15T09:05:00Z:notx:usr:3a7b2c4d-5e6f-4a0b-8c1d-2e3f4a5b6c7d
+->
+1 | # Project Documentation
+2 |
+3 |
+4 |
+5 | ## Key Resources
+
+3:2025-01-15T09:10:00Z:notx:usr:3a7b2c4d-5e6f-4a0b-8c1d-2e3f4a5b6c7d
+->
+1 | # Project Documentation
+2 |
+3 |
+4 |
+5 | ## Key Resources
+6 |
+7 | - Database setup guide at /docs/db-setup

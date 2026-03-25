@@ -1,0 +1,11 @@
+# notx/1.0
+# note_urn:      notx:note:018e4f2a-9b1c-7d3e-8f2a-1b3c4d5e6f7a
+# name:          Simple Meeting Notes
+# created_at:    2025-01-15T09:00:00Z
+# head_sequence: 1
+
+1:2025-01-15T09:00:00Z:notx:usr:7f3e9c1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b
+->
+1 | # Meeting Notes
+2 |
+3 | Attendees: Alice, Bob

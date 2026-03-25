@@ -1,0 +1,17 @@
+# notx/1.0
+# note_urn:      notx:note:02c7d9e1-4a3f-5b8c-0d2e-3f5a7b9c1d3e
+# name:          Invalid File - Bad Sequence
+# created_at:    2025-01-15T08:00:00Z
+# head_sequence: 3
+
+1:2025-01-15T08:00:00Z:notx:usr:7f3e9c1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b
+->
+1 | First event
+
+---
+
+3:2025-01-15T08:05:00Z:notx:usr:7f3e9c1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b
+->
+1 | Third event (sequence jumped from 1 to 3)
+
+---

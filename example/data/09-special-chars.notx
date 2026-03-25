@@ -1,0 +1,65 @@
+# notx/1.0
+# note_urn:      notx:note:018e4f2a-9b1c-7d3e-8f2a-9c3d4e5f6a7b
+# name:          Special Characters & Formatting
+# created_at:    2025-01-15T10:30:00Z
+# head_sequence: 4
+
+1:2025-01-15T10:30:00Z:notx:usr:7f3e9c1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b
+->
+1 | # Project Kickoff 🚀
+2 |
+3 | ## Key Objectives
+4 | * Item 1: Setup & Configuration (α, β, γ testing phases)
+5 | * Item 2: User Authentication → OAuth2 flow
+6 | * Item 3: Database: PostgreSQL ≥ 14.0
+
+---
+
+2:2025-01-15T10:35:00Z:notx:usr:8a4f0d2b-3c5e-4f7a-9b1c-2d3e4f5a6b7c
+->
+1 | # Project Kickoff 🚀
+2 |
+3 | ## Key Objectives
+4 | * Item 1: Setup & Configuration (α, β, γ testing phases)
+5 | * Item 2: User Authentication → OAuth2 flow
+6 | * Item 3: Database: PostgreSQL ≥ 14.0
+7 |
+8 | ## Timeline
+9 | Q1 2025: Phase 1 (€50k budget)
+
+---
+
+3:2025-01-15T10:40:00Z:notx:usr:7f3e9c1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b
+->
+1 | # Project Kickoff 🚀
+2 |
+3 | ## Key Objectives
+4 | * Item 1: Setup & Configuration (α, β, γ testing phases)
+5 | * Item 2: User Authentication → OAuth2 flow
+6 | * Item 3: Database: PostgreSQL ≥ 14.0
+7 |
+8 | ## Timeline
+9 | Q1 2025: Phase 1 (€50k budget)
+10 |
+11 | ## Status: ✓ Active | ⚠ Risks: Delay? → Mitigation: +2 engineers
+12 | Last updated: 2025-01-15 @ 10:40 UTC ⏰
+
+---
+
+4:2025-01-15T10:45:00Z:notx:usr:9b5g1e3c-4d6f-5g8b-0c2d-3e4f5a6b7c8d
+->
+1 | # Project Kickoff 🚀
+2 |
+3 | ## Key Objectives
+4 | * Item 1: Setup & Configuration (α, β, γ testing phases)
+5 | * Item 2: User Authentication → OAuth2 flow
+6 | * Item 3: Database: PostgreSQL ≥ 14.0
+7 |
+8 | ## Timeline
+9 | Q1 2025: Phase 1 (€50k budget)
+10 | Q2 2025: Phase 2 (€75k budget)
+11 |
+12 | ## Status: ✓ Active | ⚠ Risks: Delay? → Mitigation: +2 engineers
+13 | Last updated: 2025-01-15 @ 10:45 UTC ⏰
+14 |
+15 | **Notes**: [IMPORTANT] Use "UTF-8" encoding, handle: <tags>, &entities;, "quotes" & 'apostrophes'
