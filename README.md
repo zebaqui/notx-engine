@@ -29,25 +29,25 @@ It's designed to be simple and focused — a building block you can use in large
 
 All notx documents and specifications are available here:
 
-- **[NOTX_FORMAT.md](./NOTX_FORMAT.md)** — The complete format specification
+- **[NOTX_FORMAT.md](./docs/NOTX_FORMAT.md)** — The complete format specification
   - How `.notx` files are structured
   - The line-by-line change format (called "lane format")
   - How to read and parse files
   - How to replay events to get any version of the document
 
-- **[NOTX_FILE_SEMANTICS.md](./NOTX_FILE_SEMANTICS.md)** — How files work in practice
+- **[NOTX_FILE_SEMANTICS.md](./docs/NOTX_FILE_SEMANTICS.md)** — How files work in practice
   - Metadata headers and what they contain
   - How versions and sequences work
   - Snapshot optimization for faster replay
   - Reading, writing, and recovering files
 
-- **[NOTX_URN_SPEC.md](./NOTX_URN_SPEC.md)** — Unique identifiers for everything
+- **[NOTX_URN_SPEC.md](./docs/NOTX_URN_SPEC.md)** — Unique identifiers for everything
   - How notes, users, projects, and organizations are identified
   - The URN format: `<namespace>:<type>:<uuid>`
   - Entity metadata schemas
   - How to resolve references
 
-- **[NOTX_NAMESPACE_CLARIFICATION.md](./NOTX_NAMESPACE_CLARIFICATION.md)** — Understanding instances
+- **[NOTX_NAMESPACE_CLARIFICATION.md](./docs/NOTX_NAMESPACE_CLARIFICATION.md)** — Understanding instances
   - The difference between the official notx platform and self-hosted instances
   - How instances can reference each other's documents
   - What data is shared and what stays private
@@ -69,7 +69,7 @@ notx supports multiple independent instances, each with its own namespace:
 
 Documents can reference each other across instances. When they do, the system resolves basic metadata (names, authors, timestamps) for display, but never syncs or copies the actual document data.
 
-See [NOTX_NAMESPACE_CLARIFICATION.md](./NOTX_NAMESPACE_CLARIFICATION.md) for more details.
+See [NOTX_NAMESPACE_CLARIFICATION.md](./docs/NOTX_NAMESPACE_CLARIFICATION.md) for more details.
 
 ## Why notx?
 
@@ -85,5 +85,5 @@ The format is simple, text-based, and designed to be understood and implemented 
 
 ## Resources
 
-- **Format Specifications**: Start with [NOTX_FORMAT.md](./NOTX_FORMAT.md)
+- **Format Specifications**: Start with [NOTX_FORMAT.md](./docs/NOTX_FORMAT.md)
 - **Issues & Questions**: [GitHub Issues](https://github.com/yourusername/notx-engine/issues)
