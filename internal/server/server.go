@@ -1,0 +1,252 @@
+package server
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net"
+	"os"
+	"os/signal"
+	"sync"
+	"syscall"
+
+	googlegrpc "google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/reflection"
+
+	"github.com/zebaqui/notx-engine/internal/repo"
+	"github.com/zebaqui/notx-engine/internal/server/config"
+	grpcsvc "github.com/zebaqui/notx-engine/internal/server/grpc"
+	httpsvc "github.com/zebaqui/notx-engine/internal/server/http"
+	pb "github.com/zebaqui/notx-engine/internal/server/proto"
+)
+
+// Server is the top-level orchestrator. It owns the lifecycle of the HTTP
+// and gRPC servers and coordinates graceful shutdown when a signal arrives.
+type Server struct {
+	cfg  *config.Config
+	repo repo.NoteRepository
+	log  *slog.Logger
+
+	httpHandler *httpsvc.Handler
+	grpcServer  *googlegrpc.Server
+}
+
+// New creates a Server from the given config and repository.
+// It wires all sub-components but does not start any listeners yet.
+func New(cfg *config.Config, r repo.NoteRepository, log *slog.Logger) (*Server, error) {
+	if log == nil {
+		log = slog.New(slog.NewTextHandler(os.Stderr, nil))
+	}
+
+	s := &Server{
+		cfg:  cfg,
+		repo: r,
+		log:  log,
+	}
+
+	if cfg.EnableHTTP {
+		s.httpHandler = httpsvc.New(cfg, r, log)
+	}
+
+	if cfg.EnableGRPC {
+		grpcSrv, err := buildGRPCServer(cfg, r, log)
+		if err != nil {
+			return nil, fmt.Errorf("server: build gRPC server: %w", err)
+		}
+		s.grpcServer = grpcSrv
+	}
+
+	return s, nil
+}
+
+// Run starts all configured servers and blocks until they all exit.
+// It listens for SIGINT / SIGTERM and initiates a graceful shutdown on receipt.
+// Run returns nil on clean shutdown and a non-nil error if any server fails to
+// start or exits unexpectedly.
+func (s *Server) Run() error {
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	return s.run(ctx)
+}
+
+// RunWithContext starts all configured servers and blocks until they all exit
+// or the supplied context is cancelled. It is the test-friendly counterpart to
+// Run: instead of waiting for an OS signal, shutdown is triggered by cancelling
+// ctx. RunWithContext returns nil on clean shutdown.
+func (s *Server) RunWithContext(ctx context.Context) error {
+	return s.run(ctx)
+}
+
+// run is the shared implementation used by both Run and RunWithContext.
+func (s *Server) run(ctx context.Context) error {
+	errCh := make(chan error, 2) // at most two servers
+	var wg sync.WaitGroup
+
+	// ── Start HTTP ───────────────────────────────────────────────────────────
+	if s.httpHandler != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := s.httpHandler.Serve(); err != nil {
+				errCh <- fmt.Errorf("http server: %w", err)
+			}
+		}()
+		s.log.Info("http server starting", "addr", s.cfg.HTTPAddr())
+	}
+
+	// ── Start gRPC ───────────────────────────────────────────────────────────
+	if s.grpcServer != nil {
+		ln, err := net.Listen("tcp", s.cfg.GRPCAddr())
+		if err != nil {
+			// HTTP may already be running; shut it down before returning.
+			s.initiateShutdown(context.Background())
+			wg.Wait()
+			return fmt.Errorf("grpc: listen on %s: %w", s.cfg.GRPCAddr(), err)
+		}
+
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			s.log.Info("grpc server starting", "addr", s.cfg.GRPCAddr())
+			if err := s.grpcServer.Serve(ln); err != nil {
+				errCh <- fmt.Errorf("grpc server: %w", err)
+			}
+		}()
+	}
+
+	// ── Wait for shutdown signal or a server error ───────────────────────────
+	select {
+	case <-ctx.Done():
+		s.log.Info("shutdown signal received")
+	case err := <-errCh:
+		s.log.Error("server error — initiating shutdown", "err", err)
+	}
+
+	// ── Graceful shutdown ────────────────────────────────────────────────────
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), s.cfg.ShutdownTimeout)
+	defer cancel()
+
+	s.initiateShutdown(shutdownCtx)
+	wg.Wait()
+
+	// Drain the error channel to report any remaining failures.
+	close(errCh)
+	var errs []error
+	for err := range errCh {
+		errs = append(errs, err)
+	}
+	return errors.Join(errs...)
+}
+
+// initiateShutdown stops all active servers, respecting the provided context
+// deadline. It is safe to call multiple times.
+func (s *Server) initiateShutdown(ctx context.Context) {
+	var wg sync.WaitGroup
+
+	if s.httpHandler != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			s.log.Info("shutting down http server")
+			if err := s.httpHandler.Shutdown(ctx); err != nil {
+				s.log.Warn("http shutdown error", "err", err)
+			}
+		}()
+	}
+
+	if s.grpcServer != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			s.log.Info("shutting down grpc server")
+			// GracefulStop drains in-flight RPCs; fall back to Stop if the
+			// context deadline is exceeded.
+			stopped := make(chan struct{})
+			go func() {
+				s.grpcServer.GracefulStop()
+				close(stopped)
+			}()
+			select {
+			case <-stopped:
+			case <-ctx.Done():
+				s.log.Warn("grpc graceful stop timed out — forcing stop")
+				s.grpcServer.Stop()
+			}
+		}()
+	}
+
+	wg.Wait()
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// gRPC server construction
+// ─────────────────────────────────────────────────────────────────────────────
+
+func buildGRPCServer(cfg *config.Config, r repo.NoteRepository, log *slog.Logger) (*googlegrpc.Server, error) {
+	opts := []googlegrpc.ServerOption{
+		googlegrpc.UnaryInterceptor(loggingUnaryInterceptor(log)),
+		googlegrpc.StreamInterceptor(loggingStreamInterceptor(log)),
+	}
+
+	if cfg.TLSEnabled() {
+		creds, err := credentials.NewServerTLSFromFile(cfg.TLSCertFile, cfg.TLSKeyFile)
+		if err != nil {
+			return nil, fmt.Errorf("load TLS credentials: %w", err)
+		}
+		opts = append(opts, googlegrpc.Creds(creds))
+		log.Info("gRPC TLS enabled", "cert", cfg.TLSCertFile)
+	} else {
+		log.Warn("gRPC TLS is disabled — suitable for development only")
+	}
+
+	srv := googlegrpc.NewServer(opts...)
+
+	// Register services.
+	pb.RegisterNoteServiceServer(srv, grpcsvc.NewNoteServiceServer(r, cfg.DefaultPageSize, cfg.MaxPageSize))
+	pb.RegisterDeviceServiceServer(srv, grpcsvc.NewDeviceServiceServer())
+
+	// Enable server reflection so grpcurl and other tools work out of the box.
+	reflection.Register(srv)
+
+	return srv, nil
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// gRPC interceptors
+// ─────────────────────────────────────────────────────────────────────────────
+
+func loggingUnaryInterceptor(log *slog.Logger) googlegrpc.UnaryServerInterceptor {
+	return func(
+		ctx context.Context,
+		req any,
+		info *googlegrpc.UnaryServerInfo,
+		handler googlegrpc.UnaryHandler,
+	) (any, error) {
+		resp, err := handler(ctx, req)
+		if err != nil {
+			log.Warn("grpc unary error", "method", info.FullMethod, "err", err)
+		} else {
+			log.Debug("grpc unary ok", "method", info.FullMethod)
+		}
+		return resp, err
+	}
+}
+
+func loggingStreamInterceptor(log *slog.Logger) googlegrpc.StreamServerInterceptor {
+	return func(
+		srv any,
+		ss googlegrpc.ServerStream,
+		info *googlegrpc.StreamServerInfo,
+		handler googlegrpc.StreamHandler,
+	) error {
+		err := handler(srv, ss)
+		if err != nil {
+			log.Warn("grpc stream error", "method", info.FullMethod, "err", err)
+		} else {
+			log.Debug("grpc stream ok", "method", info.FullMethod)
+		}
+		return err
+	}
+}

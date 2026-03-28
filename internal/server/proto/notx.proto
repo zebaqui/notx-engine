@@ -1,0 +1,333 @@
+syntax = "proto3";
+
+package notx.v1;
+
+option go_package = "github.com/zebaqui/notx-engine/internal/server/proto;notxpb";
+
+import "google/protobuf/timestamp.proto";
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Shared message types
+// ─────────────────────────────────────────────────────────────────────────────
+
+// NoteType mirrors the core.NoteType enum.
+enum NoteType {
+  NOTE_TYPE_UNSPECIFIED = 0;
+  NOTE_TYPE_NORMAL      = 1;
+  NOTE_TYPE_SECURE      = 2;
+}
+
+// NoteHeader carries the identifying metadata for a note without its full
+// event stream. Used in list responses and lightweight lookups.
+message NoteHeader {
+  string   urn         = 1;  // notx:note:<uuid>
+  string   name        = 2;
+  NoteType note_type   = 3;
+  string   project_urn = 4;  // optional
+  string   folder_urn  = 5;  // optional
+  bool     deleted     = 6;
+
+  google.protobuf.Timestamp created_at = 7;
+  google.protobuf.Timestamp updated_at = 8;
+}
+
+// LineEntryProto mirrors core.LineEntry.
+message LineEntryProto {
+  // Op values: 0 = SET, 1 = SET_EMPTY, 2 = DELETE
+  int32  op          = 1;
+  int32  line_number = 2;
+  string content     = 3;
+}
+
+// EventProto mirrors core.Event.
+message EventProto {
+  string   urn        = 1;  // optional; notx:event:<uuid>
+  string   note_urn   = 2;
+  int32    sequence   = 3;
+  string   author_urn = 4;
+
+  google.protobuf.Timestamp created_at = 5;
+
+  // For normal notes: line entries are populated.
+  repeated LineEntryProto entries = 6;
+
+  // For secure notes: entries is empty; the encrypted blob is here instead.
+  EncryptedEventProto encrypted = 7;
+}
+
+// EncryptedEventProto carries the opaque encrypted payload for secure note
+// events. The server stores and relays this verbatim — it never inspects
+// payload or derives any key from per_device_keys.
+message EncryptedEventProto {
+  bytes  nonce   = 1;  // AES-GCM nonce (12 bytes)
+  bytes  payload = 2;  // AES-256-GCM ciphertext of the serialised line entries
+
+  // per_device_keys maps device URN strings to their ECDH-wrapped CEK copy.
+  // Key:   "notx:device:<uuid>"
+  // Value: wrapped CEK bytes (X25519 ECDH + HKDF derived, then AES-GCM wrapped)
+  map<string, bytes> per_device_keys = 3;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// NoteService — primary CRUD + relay service
+// ─────────────────────────────────────────────────────────────────────────────
+
+service NoteService {
+  // GetNote returns the full header + all events for a note.
+  rpc GetNote(GetNoteRequest) returns (GetNoteResponse);
+
+  // ListNotes returns all note headers visible to the caller.
+  rpc ListNotes(ListNotesRequest) returns (ListNotesResponse);
+
+  // CreateNote registers a new note (header only; events follow via AppendEvent).
+  rpc CreateNote(CreateNoteRequest) returns (CreateNoteResponse);
+
+  // DeleteNote soft-deletes a note by URN.
+  rpc DeleteNote(DeleteNoteRequest) returns (DeleteNoteResponse);
+
+  // AppendEvent appends a single event to an existing note.
+  // For normal notes the server stores the plaintext entries and advances the
+  // index. For secure notes it stores the encrypted blob verbatim.
+  rpc AppendEvent(AppendEventRequest) returns (AppendEventResponse);
+
+  // StreamEvents opens a server-side stream that pushes all events for a note
+  // starting from a given sequence number. Used by clients to catch up after
+  // reconnect. For secure note events the server streams the encrypted blob
+  // without decrypting it.
+  rpc StreamEvents(StreamEventsRequest) returns (stream EventProto);
+
+  // SearchNotes performs a server-side full-text search over normal note
+  // content. Secure notes are never included in results.
+  rpc SearchNotes(SearchNotesRequest) returns (SearchNotesResponse);
+
+  // ShareSecureNote re-wraps the CEK for one or more additional target
+  // devices. The server updates the per_device_keys map in the stored
+  // encrypted blobs and returns the updated event list. Only secure notes
+  // can be shared via this RPC.
+  rpc ShareSecureNote(ShareSecureNoteRequest) returns (ShareSecureNoteResponse);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Request / Response messages
+// ─────────────────────────────────────────────────────────────────────────────
+
+// --- GetNote ---
+
+message GetNoteRequest {
+  string urn = 1;  // notx:note:<uuid>
+}
+
+message GetNoteResponse {
+  NoteHeader       header = 1;
+  repeated EventProto events = 2;
+}
+
+// --- ListNotes ---
+
+message ListNotesRequest {
+  // Optional filters.
+  string   project_urn = 1;
+  string   folder_urn  = 2;
+  NoteType note_type   = 3;  // NOTE_TYPE_UNSPECIFIED = return all types
+  bool     include_deleted = 4;
+
+  // Pagination.
+  int32  page_size  = 5;  // 0 = server default (50)
+  string page_token = 6;
+}
+
+message ListNotesResponse {
+  repeated NoteHeader notes          = 1;
+  string              next_page_token = 2;  // empty = last page
+}
+
+// --- CreateNote ---
+
+message CreateNoteRequest {
+  // The caller supplies a fully formed header; the server validates and
+  // persists it. The URN must be globally unique.
+  NoteHeader header = 1;
+}
+
+message CreateNoteResponse {
+  NoteHeader header = 1;
+}
+
+// --- DeleteNote ---
+
+message DeleteNoteRequest {
+  string urn = 1;
+}
+
+message DeleteNoteResponse {
+  bool deleted = 1;
+}
+
+// --- AppendEvent ---
+
+message AppendEventRequest {
+  EventProto event = 1;
+}
+
+message AppendEventResponse {
+  // The server-assigned sequence number of the stored event.
+  int32 sequence = 1;
+}
+
+// --- StreamEvents ---
+
+message StreamEventsRequest {
+  string note_urn       = 1;
+  int32  from_sequence  = 2;  // inclusive; 0 = stream from first event
+}
+
+// Response is a stream of EventProto (defined inline via `returns (stream ...)`).
+
+// --- SearchNotes ---
+
+message SearchNotesRequest {
+  string query      = 1;
+  int32  page_size  = 2;
+  string page_token = 3;
+}
+
+message SearchNotesResponse {
+  repeated SearchResult results        = 1;
+  string                next_page_token = 2;
+}
+
+message SearchResult {
+  NoteHeader header  = 1;
+  string     excerpt = 2;  // short snippet of matching content
+}
+
+// --- ShareSecureNote ---
+
+message ShareSecureNoteRequest {
+  string          note_urn           = 1;
+  // Each entry maps a target device URN to its newly wrapped CEK copy.
+  // The sending device is responsible for performing the X25519 ECDH +
+  // HKDF derivation before calling this RPC.
+  map<string, bytes> wrapped_keys    = 2;
+}
+
+message ShareSecureNoteResponse {
+  // Number of events whose per_device_keys map was updated.
+  int32 events_updated = 1;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DeviceService — device registration and pairing (Phase 2+)
+// ─────────────────────────────────────────────────────────────────────────────
+
+service DeviceService {
+  // RegisterDevice registers a new device by storing its public key.
+  // The private key must never appear in this request.
+  rpc RegisterDevice(RegisterDeviceRequest) returns (RegisterDeviceResponse);
+
+  // GetDevicePublicKey retrieves the public key for a registered device.
+  // Used by other devices when wrapping a CEK for that device.
+  rpc GetDevicePublicKey(GetDevicePublicKeyRequest) returns (GetDevicePublicKeyResponse);
+
+  // ListDevices returns all devices registered to the authenticated user.
+  rpc ListDevices(ListDevicesRequest) returns (ListDevicesResponse);
+
+  // RevokeDevice removes a device from the registry. Future secure note
+  // shares will not include the revoked device.
+  rpc RevokeDevice(RevokeDeviceRequest) returns (RevokeDeviceResponse);
+
+  // InitiatePairing starts the browser-pairing flow and returns a short-lived
+  // session token that the browser embeds in its QR code.
+  rpc InitiatePairing(InitiatePairingRequest) returns (InitiatePairingResponse);
+
+  // CompletePairing is called by an already-trusted device after scanning the
+  // browser QR code. It registers the browser device and closes the session.
+  rpc CompletePairing(CompletePairingRequest) returns (CompletePairingResponse);
+}
+
+// --- RegisterDevice ---
+
+message RegisterDeviceRequest {
+  string device_urn  = 1;  // notx:device:<uuid>
+  bytes  public_key  = 2;  // Ed25519 public key (32 bytes)
+  string device_name = 3;  // human-readable label (e.g. "iPhone 15 Pro")
+  string owner_urn   = 4;  // notx:usr:<uuid>
+}
+
+message RegisterDeviceResponse {
+  string device_urn  = 1;
+
+  google.protobuf.Timestamp registered_at = 2;
+}
+
+// --- GetDevicePublicKey ---
+
+message GetDevicePublicKeyRequest {
+  string device_urn = 1;
+}
+
+message GetDevicePublicKeyResponse {
+  string device_urn = 1;
+  bytes  public_key = 2;  // Ed25519 public key (32 bytes)
+}
+
+// --- ListDevices ---
+
+message ListDevicesRequest {
+  string owner_urn = 1;
+}
+
+message ListDevicesResponse {
+  repeated DeviceInfo devices = 1;
+}
+
+message DeviceInfo {
+  string device_urn  = 1;
+  string device_name = 2;
+  bytes  public_key  = 3;
+
+  google.protobuf.Timestamp registered_at = 4;
+  google.protobuf.Timestamp last_seen_at  = 5;
+}
+
+// --- RevokeDevice ---
+
+message RevokeDeviceRequest {
+  string device_urn = 1;
+}
+
+message RevokeDeviceResponse {
+  bool revoked = 1;
+}
+
+// --- InitiatePairing ---
+
+message InitiatePairingRequest {
+  // The trusted device that is initiating the pairing flow.
+  string initiator_device_urn = 1;
+}
+
+message InitiatePairingResponse {
+  // Short-lived opaque session token. The browser encodes this in the QR code.
+  string session_token = 1;
+  // UTC expiry of the session token (5 minutes from issuance).
+  google.protobuf.Timestamp expires_at = 2;
+}
+
+// --- CompletePairing ---
+
+message CompletePairingRequest {
+  // The session token from the browser QR code.
+  string session_token = 1;
+
+  // The new browser device's identity.
+  string device_urn  = 2;
+  bytes  public_key  = 3;
+  string device_name = 4;
+}
+
+message CompletePairingResponse {
+  string device_urn  = 1;
+
+  google.protobuf.Timestamp registered_at = 2;
+}
