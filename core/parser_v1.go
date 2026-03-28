@@ -61,7 +61,13 @@ func (p *ParserV1) parseLines(lines []string) (*Note, error) {
 		return nil, fmt.Errorf("parser: invalid created_at: %w", err)
 	}
 
+	noteType, err := ParseNoteType(metadata["note_type"])
+	if err != nil {
+		return nil, fmt.Errorf("parser: invalid note_type: %w", err)
+	}
+
 	note := NewNote(noteURN, metadata["name"], createdAt)
+	note.NoteType = noteType
 
 	if projURNStr, ok := metadata["project_urn"]; ok && projURNStr != "" {
 		projURN, err := ParseURN(projURNStr)

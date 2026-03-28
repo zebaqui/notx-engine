@@ -97,6 +97,22 @@ The following object types are defined in the notx specification:
 | `note`  | A note document with content history | Per-instance (unique within namespace) | `notx:note:018e4f2a-9b1c-7d3e-8f2a-1b3c4d5e6f7a`<br/>`acme:note:018e4f2a-9b1c-7d3e-8f2a-1b3c4d5e6f7a` |
 | `event` | A history event within a note        | Per-note                               | `notx:event:2d3e4f5a-6b7c-8d9e-0f1a-2b3c4d5e6f7a`                                                     |
 
+### Security Types
+
+| Type     | Description                                                              | Scope        | Example URNs                                       |
+| -------- | ------------------------------------------------------------------------ | ------------ | -------------------------------------------------- |
+| `device` | A registered user device with a cryptographic identity (E2EE key holder) | Per-instance | `notx:device:4a5b6c7d-8e9f-0a1b-2c3d-4e5f6a7b8c9d` |
+
+The `device` type is used exclusively by the security model. A device URN identifies a specific physical or virtual device (desktop, mobile, browser) that holds an Ed25519 key pair. The **private key never leaves the device**; only the public key and the device URN are registered on the server (via Vault).
+
+Device URNs appear in secure note encrypted event blocks to identify which device can decrypt a given wrapped Content Encryption Key (CEK):
+
+```
+key[notx:device:4a5b6c7d-8e9f-0a1b-2c3d-4e5f6a7b8c9d]: <base64-wrapped-cek>
+```
+
+See [NOTX_SECURITY_MODEL.md](./NOTX_SECURITY_MODEL.md) for the full device identity and key management specification.
+
 ### User and Organization Types
 
 | Type  | Description                 | Scope        | Example URNs                                                                                        |

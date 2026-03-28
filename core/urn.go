@@ -16,6 +16,13 @@ const (
 	ObjectTypeOrg     ObjectType = "org"
 	ObjectTypeProject ObjectType = "proj"
 	ObjectTypeFolder  ObjectType = "folder"
+	// ObjectTypeDevice identifies a registered user device in the notx
+	// security model. Device URNs are used exclusively for cryptographic
+	// identity — specifically for per-device CEK wrapping in secure notes.
+	//
+	// Format: <namespace>:device:<uuid>
+	// Example: notx:device:4a5b6c7d-8e9f-0a1b-2c3d-4e5f6a7b8c9d
+	ObjectTypeDevice ObjectType = "device"
 )
 
 // sentinelAnon is the special UUID value for anonymous/unknown authors.
@@ -37,6 +44,7 @@ var (
 		ObjectTypeOrg:     {},
 		ObjectTypeProject: {},
 		ObjectTypeFolder:  {},
+		ObjectTypeDevice:  {},
 	}
 )
 

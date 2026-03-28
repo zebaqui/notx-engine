@@ -52,6 +52,25 @@ All notx documents and specifications are available here:
   - How instances can reference each other's documents
   - What data is shared and what stays private
 
+- **[NOTX_SECURITY_MODEL.md](./docs/NOTX_SECURITY_MODEL.md)** — Security model implementation plan
+  - The dual data model: Normal Notes vs. Secure Notes
+  - End-to-end encryption for secure notes (device-only decryption)
+  - Device identity, key management, and browser pairing
+  - Phased implementation plan and acceptance criteria
+
+## Security Model
+
+notx supports two distinct note types with different security guarantees:
+
+| Type        | Indicator | Encrypted at Rest | Server Can Read | Auto-Synced         | Searchable (Server) |
+| ----------- | --------- | ----------------- | --------------- | ------------------- | ------------------- |
+| Normal Note | 📝        | No                | Yes             | Yes                 | Yes                 |
+| Secure Note | 🔒        | Yes (E2EE)        | No              | No (explicit share) | No                  |
+
+**Security is explicit and opt-in at the data level.** Normal notes are platform-protected (TLS + access control). Secure notes are end-to-end encrypted — the server stores only ciphertext and can never read the content.
+
+See [NOTX_SECURITY_MODEL.md](./docs/NOTX_SECURITY_MODEL.md) for the full implementation plan.
+
 ## Use Cases
 
 - **Document version control** — View the complete history of changes without git
@@ -86,4 +105,5 @@ The format is simple, text-based, and designed to be understood and implemented 
 ## Resources
 
 - **Format Specifications**: Start with [NOTX_FORMAT.md](./docs/NOTX_FORMAT.md)
+- **Security Model**: See [NOTX_SECURITY_MODEL.md](./docs/NOTX_SECURITY_MODEL.md)
 - **Issues & Questions**: [GitHub Issues](https://github.com/yourusername/notx-engine/issues)

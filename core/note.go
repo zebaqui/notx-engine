@@ -26,6 +26,12 @@ type Note struct {
 	// Name is the human-readable title / display name of the note.
 	Name string
 
+	// NoteType classifies this note as either a normal note or a secure
+	// (end-to-end encrypted) note. It is set at creation time and is
+	// immutable for the lifetime of the note.
+	// Absence of the field in a .notx file defaults to NoteTypeNormal.
+	NoteType NoteType
+
 	// ProjectURN is the optional URN of the project this note belongs to.
 	// Nil when the note is not associated with any project.
 	ProjectURN *URN
@@ -70,16 +76,35 @@ type Note struct {
 	snapshots []*Snapshot
 }
 
-// NewNote creates a new, empty Note with the given URN, name, and creation
-// timestamp. The event stream is empty; HeadSequence() returns 0.
+// NewNote creates a new, empty Note with the given URN, name, creation
+// timestamp, and note type. The event stream is empty; HeadSequence() returns 0.
+//
+// Pass NoteTypeNormal for a standard note or NoteTypeSecure for an
+// end-to-end encrypted note. The type is immutable once set.
 func NewNote(urn URN, name string, createdAt time.Time) *Note {
 	return &Note{
 		URN:       urn,
 		Name:      name,
+		NoteType:  NoteTypeNormal,
 		CreatedAt: createdAt,
 		UpdatedAt: createdAt,
 		NodeLinks: make(map[string]URN),
 	}
+}
+
+// NewSecureNote creates a new, empty secure (E2EE) Note.
+// It is identical to NewNote except that NoteType is set to NoteTypeSecure
+// and cannot be changed.
+func NewSecureNote(urn URN, name string, createdAt time.Time) *Note {
+	n := NewNote(urn, name, createdAt)
+	n.NoteType = NoteTypeSecure
+	return n
+}
+
+// SecurityPolicy returns the immutable SecurityPolicy derived from the note's
+// NoteType. See NoteSecurityPolicy for the full attribute set.
+func (n *Note) SecurityPolicy() SecurityPolicy {
+	return NoteSecurityPolicy(n.NoteType)
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

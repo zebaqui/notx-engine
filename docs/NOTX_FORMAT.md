@@ -69,6 +69,7 @@ The file begins with metadata lines, each prefixed with `#`:
 ```
 # notx/1.0
 # note_urn:      notx:note:018e4f2a-9b1c-7d3e-8f2a-1b3c4d5e6f7a
+# note_type:     normal
 # name:          My Meeting Notes
 # project_urn:   notx:proj:3a1b2c3d-4e5f-6a7b-8c9d-0e1f2a3b4c5d
 # folder_urn:    notx:folder:1c2d3e4f-5a6b-7c8d-9e0f-1a2b3c4d5e6f
@@ -76,17 +77,25 @@ The file begins with metadata lines, each prefixed with `#`:
 # head_sequence: 4
 ```
 
-| Field           | Purpose                                                                         |
-| --------------- | ------------------------------------------------------------------------------- |
-| `notx/1.0`      | Format version. Always `notx/1.0` for this specification.                       |
-| `note_urn`      | The unique identity of this note (`<namespace>:note:<uuid>`).                   |
-| `name`          | Human-readable name / title of the note.                                        |
-| `project_urn`   | URN of the project this note belongs to (`<namespace>:proj:<uuid>`) (optional). |
-| `folder_urn`    | URN of the folder this note is in (`<namespace>:folder:<uuid>`) (optional).     |
-| `created_at`    | ISO-8601 UTC timestamp of when the note was created.                            |
-| `head_sequence` | The sequence number of the last applied event (current state).                  |
+| Field           | Purpose                                                                            |
+| --------------- | ---------------------------------------------------------------------------------- |
+| `notx/1.0`      | Format version. Always `notx/1.0` for this specification.                          |
+| `note_urn`      | The unique identity of this note (`<namespace>:note:<uuid>`).                      |
+| `note_type`     | Security classification: `normal` (default) or `secure`. Immutable after creation. |
+| `name`          | Human-readable name / title of the note.                                           |
+| `project_urn`   | URN of the project this note belongs to (`<namespace>:proj:<uuid>`) (optional).    |
+| `folder_urn`    | URN of the folder this note is in (`<namespace>:folder:<uuid>`) (optional).        |
+| `created_at`    | ISO-8601 UTC timestamp of when the note was created.                               |
+| `head_sequence` | The sequence number of the last applied event (current state).                     |
 
 The `head_sequence` field is updated whenever new events are appended, allowing the file header to always reflect the current state without rewriting the entire file.
+
+The `note_type` field determines the entire data pipeline for the note:
+
+- `normal` — plaintext stored on the server, TLS + access control protection, automatic sync, server-searchable. Absence of the field is treated as `normal` for backward compatibility.
+- `secure` — end-to-end encrypted, server stores ciphertext only, explicit sharing required, not server-searchable. See [Encrypted Event Format](#encrypted-event-format) below.
+
+`note_type` is **immutable**. It is set at creation time and cannot be changed by any event or API call.
 
 ### Event Stream
 
@@ -137,6 +146,43 @@ The line number is 1-based. The pipe `|` separates the line number from its cont
 | `3 \| hello` | Set line 3 to `hello`                                    |
 | `4 \|`       | Set line 4 to an empty string (line exists but is blank) |
 | `5 \|-`      | **Delete** line 5; all subsequent lines shift up         |
+
+#### Encrypted Event Format
+
+For notes with `note_type: secure`, the normal `N | content` line entries are replaced with an **encrypted block**. The `!encrypted` marker on the first line of the event body signals this:
+
+```
+1:2025-01-15T09:00:00Z:notx:usr:7f3e9c1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b
+->
+!encrypted
+nonce:   <base64-nonce>
+payload: <base64-ciphertext>
+key[notx:device:4a5b6c7d-8e9f-0a1b-2c3d-4e5f6a7b8c9d]: <base64-wrapped-cek>
+key[notx:device:9f8e7d6c-5b4a-3c2d-1e0f-9a8b7c6d5e4f]: <base64-wrapped-cek>
+```
+
+| Field               | Description                                                                                                                             |
+| ------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `!encrypted`        | Marker indicating this event uses the encrypted format. Must be the first entry after `->`.                                             |
+| `nonce`             | Base64-encoded AES-256-GCM nonce. Unique per event — never reused.                                                                      |
+| `payload`           | Base64-encoded AES-256-GCM ciphertext of the serialized line entries.                                                                   |
+| `key[<device-urn>]` | Per-device entry: the Content Encryption Key (CEK) wrapped with that device's public key (X25519 ECDH). One entry per recipient device. |
+
+**Parser behavior for `!encrypted` events**:
+
+- A server-side parser (no private key) **stores and relays the block verbatim** without error. It never attempts decryption.
+- A client-side parser locates its own `key[<own-device-urn>]` entry, uses its private key to unwrap the CEK, then decrypts `payload` to recover the line entries, and replays them normally.
+- A parser encountering `!encrypted` on a `note_type: normal` note **must reject the file** as malformed.
+
+**Encryption scheme** (for implementors):
+
+1. Generate a random 256-bit Content Encryption Key (CEK) per event.
+2. Serialize the line entries as UTF-8 text in normal lane format.
+3. Encrypt the serialized entries with AES-256-GCM using the CEK and a random 96-bit nonce.
+4. For each recipient device, derive a shared secret via X25519 ECDH (sender private key + recipient public key), then derive a wrapping key with HKDF-SHA256, and wrap the CEK with it.
+5. Store the nonce, ciphertext, and all per-device wrapped CEK entries.
+
+See [NOTX_SECURITY_MODEL.md](./NOTX_SECURITY_MODEL.md) for the complete implementation plan.
 
 #### Event Separator (Snapshot Block)
 
@@ -307,7 +353,7 @@ Attendees: Alice, Bob, Carol
 
 A notx file parser must follow these rules:
 
-1. **Comment lines** — Lines starting with `#` are metadata. Skip them during replay; extract key-value pairs for file header metadata.
+1. **Comment lines** — Lines starting with `#` are metadata. Skip them during replay; extract key-value pairs for file header metadata. The `note_type` field must be extracted and used to select the correct event processing path.
 
 2. **Blank lines** — Empty lines are whitespace. Skip them.
 
@@ -324,14 +370,19 @@ A notx file parser must follow these rules:
 
 6. **Snapshot separator** — A line that is exactly `=>` marks the start of snapshot entries.
 
-7. **Line entry** — A line matching `^(\d+) \|(.*)$` is a line entry.
+7. **Encrypted event marker** — A line that is exactly `!encrypted` after the `->` separator signals an encrypted event block (only valid when `note_type: secure`).
+   - A server-side parser stores the entire block verbatim and does not attempt decryption.
+   - A client-side parser unwraps the CEK using the device private key, then decrypts the payload and processes the recovered line entries normally.
+   - Encountering `!encrypted` in a `note_type: normal` file is a parse error.
+
+8. **Line entry** — A line matching `^(\d+) \|(.*)$` is a line entry.
    - Capture group 1: line number (1-based integer)
    - Capture group 2: the content after the pipe
      - If the captured content is exactly `-` (after trimming), this is a deletion
      - If empty, the line is set to an empty string
      - Otherwise, the line is set to the captured content
 
-8. **Unknown lines** — All other lines are ignored (forward-compatibility tolerance).
+9. **Unknown lines** — All other lines are ignored (forward-compatibility tolerance).
 
 ## Replay Algorithm
 

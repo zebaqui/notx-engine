@@ -52,13 +52,21 @@ The file header consists of lines prefixed with `# ` (hash and space). These lin
 
 ### Required Fields
 
-| Field           | Format         | Purpose                                                   |
-| --------------- | -------------- | --------------------------------------------------------- |
-| `notx/1.0`      | Version string | Format version. Required as first header line.            |
-| `note_urn`      | URN string     | Unique identifier: `<namespace>:note:<uuid>`              |
-| `name`          | Plain text     | Display name / title of the note                          |
-| `created_at`    | ISO-8601 UTC   | Timestamp of note creation (immutable)                    |
-| `head_sequence` | Integer        | Sequence number of the last applied event (current state) |
+| Field           | Format         | Purpose                                                                            |
+| --------------- | -------------- | ---------------------------------------------------------------------------------- |
+| `notx/1.0`      | Version string | Format version. Required as first header line.                                     |
+| `note_urn`      | URN string     | Unique identifier: `<namespace>:note:<uuid>`                                       |
+| `note_type`     | Enum string    | Security classification: `normal` (default) or `secure`. Immutable after creation. |
+| `name`          | Plain text     | Display name / title of the note                                                   |
+| `created_at`    | ISO-8601 UTC   | Timestamp of note creation (immutable)                                             |
+| `head_sequence` | Integer        | Sequence number of the last applied event (current state)                          |
+
+**`note_type` semantics**:
+
+- `normal` — The note follows the standard plaintext pipeline. The server stores content as plaintext, syncs automatically across devices, and may index and search content. Protected by TLS and platform access control. Absence of the field defaults to `normal` for backward compatibility with files written before this field existed.
+- `secure` — The note is end-to-end encrypted. The server stores and relays ciphertext only; it never sees plaintext. Sync is explicit (device-to-device sharing), and the note is not indexed or searchable server-side.
+
+`note_type` is **immutable**. It is written once at file creation and must never be changed by any event append or metadata update. A parser encountering a `note_type` change attempt must reject it as a validation error.
 
 ### Optional Fields
 
@@ -80,7 +88,7 @@ The file header consists of lines prefixed with `# ` (hash and space). These lin
 
 ### Header Immutability
 
-The `note_urn` and `created_at` fields **must never change** once the file is created. These fields establish the identity of the note and its origin time.
+The `note_urn`, `created_at`, and `note_type` fields **must never change** once the file is created. `note_urn` and `created_at` establish the identity and origin time of the note. `note_type` establishes the security pipeline — changing it after creation would silently break all encrypted events or expose data that was authored under a different security expectation.
 
 Other fields (`name`, `project_urn`, `folder_urn`, `parent_urn`, `deleted`) may be updated by writers, but **only in the metadata header**, never stored as event data.
 
@@ -135,6 +143,36 @@ Each line entry describes a change to a specific line in the document.
 ```
 
 The special sequence `|-` (pipe followed by hyphen with no space between) indicates deletion. This is distinct from setting a line to the string `-` (which would be `| -` with a space).
+
+### Encrypted Event Entries (Secure Notes)
+
+For files with `note_type: secure`, the normal `N | content` line entries inside an event are replaced with an **encrypted block**. The `!encrypted` marker must be the first line after the `->` separator:
+
+```
+1:2025-01-15T09:00:00Z:notx:usr:7f3e9c1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b
+->
+!encrypted
+nonce:   <base64-nonce>
+payload: <base64-ciphertext>
+key[notx:device:4a5b6c7d-8e9f-0a1b-2c3d-4e5f6a7b8c9d]: <base64-wrapped-cek>
+key[notx:device:9f8e7d6c-5b4a-3c2d-1e0f-9a8b7c6d5e4f]: <base64-wrapped-cek>
+```
+
+| Field               | Description                                                                                                                             |
+| ------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `!encrypted`        | Marker indicating this event uses the encrypted format. Must be the first entry after `->`.                                             |
+| `nonce`             | Base64-encoded AES-256-GCM nonce. Unique per event — never reused.                                                                      |
+| `payload`           | Base64-encoded AES-256-GCM ciphertext of the serialized line entries.                                                                   |
+| `key[<device-urn>]` | Per-device entry: the Content Encryption Key (CEK) wrapped with that device's public key (X25519 ECDH). One entry per recipient device. |
+
+**Parser behavior**:
+
+- A **server-side parser** (no private key available) stores the entire encrypted block verbatim without attempting decryption. This is correct behavior, not an error condition.
+- A **client-side parser** locates its own `key[<own-device-urn>]` entry, uses its local private key to unwrap the CEK via X25519 ECDH + HKDF-SHA256, then decrypts `payload` with AES-256-GCM to recover the line entries, and replays them normally.
+- A parser encountering `!encrypted` in a `note_type: normal` file **must reject the file** as malformed.
+- A parser encountering normal `N | content` entries in a `note_type: secure` file **must reject the file** as malformed (plaintext must never appear in a secure note event stream).
+
+See [NOTX_SECURITY_MODEL.md](./NOTX_SECURITY_MODEL.md) for the full encryption scheme and key management implementation plan.
 
 ### Event Semantics
 
