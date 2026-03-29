@@ -15,7 +15,7 @@ var configCmd = &cobra.Command{
 	Short: "View and edit notx configuration",
 	Long: `Interactively view and update the notx configuration file.
 
-The configuration is stored at ~/.notx/config.yml and controls both the
+The configuration is stored at ~/.notx/config.json and controls both the
 CLI client (which server to dial) and the server/admin defaults.
 
 Running with no sub-command starts the interactive editor:
@@ -24,7 +24,7 @@ Running with no sub-command starts the interactive editor:
 
 Sub-commands:
   notx config show    — print the current config and its file path
-  notx config reset   — overwrite the config with built-in defaults
+  notx config reset   — overwrite the config with built-in defaults (config.json)
 `,
 	RunE: runConfigInteractive,
 }

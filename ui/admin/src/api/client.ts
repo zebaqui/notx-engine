@@ -12,9 +12,53 @@ import type {
   ListFoldersResponse,
   ListDevicesResponse,
   Device,
+  ListUsersResponse,
+  User,
 } from "./types";
 
+// LOCAL_ADMIN_DEVICE_URN is the well-known built-in sentinel device that the
+// server bootstraps automatically in local-mode (no --admin-passphrase set).
+// See: internal/server/config/config.go — DefaultAdminDeviceURN
+const LOCAL_ADMIN_DEVICE_URN =
+  "notx:device:00000000-0000-0000-0000-000000000000";
+
+// activeDeviceURN holds the URN used for X-Device-ID on every request.
+// It starts as the local sentinel and is overwritten by initAdminDeviceURN()
+// when the /admin-config endpoint reveals a different URN (remote mode).
+let activeDeviceURN = LOCAL_ADMIN_DEVICE_URN;
+
 const http = axios.create({ baseURL: "/" });
+
+// Inject X-Device-ID on every outgoing request so the value is always
+// current even if initAdminDeviceURN() resolves after the instance is created.
+http.interceptors.request.use((config) => {
+  config.headers["X-Device-ID"] = activeDeviceURN;
+  return config;
+});
+
+/**
+ * Fetches /admin-config from the admin server (served by `notx admin`) and
+ * updates the active device URN. Call this once at app startup before any
+ * data fetches are made.
+ *
+ * In local mode the endpoint returns `{"device_urn": ""}` and the sentinel
+ * value is kept. In remote mode it returns the URN that was registered during
+ * `notx admin --remote` so the correct admin device is used automatically.
+ */
+export async function initAdminDeviceURN(): Promise<void> {
+  try {
+    const resp = await axios.get<{ device_urn: string }>("/admin-config");
+    const urn = resp.data?.device_urn;
+    if (urn && urn.trim() !== "") {
+      activeDeviceURN = urn.trim();
+    }
+    // else: keep LOCAL_ADMIN_DEVICE_URN (local mode)
+  } catch {
+    // /admin-config is unreachable — keep the sentinel and carry on.
+    // This can happen during development when Vite proxies to the API server
+    // directly without the `notx admin` process in front.
+  }
+}
 
 // ─── Health ───────────────────────────────────────────────────────────────
 
@@ -209,17 +253,6 @@ export async function deleteFolder(urn: string): Promise<void> {
 
 // ─── Devices ──────────────────────────────────────────────────────────────
 
-export class DeviceAPINotImplementedError extends Error {
-  constructor() {
-    super(
-      "The Device HTTP API is not yet available. Device management is currently " +
-        "only accessible via the gRPC DeviceService (RegisterDevice, ListDevices, " +
-        "RevokeDevice). Wire up /v1/devices on the server to enable this section.",
-    );
-    this.name = "DeviceAPINotImplementedError";
-  }
-}
-
 export interface ListDevicesParams {
   owner_urn?: string;
   include_revoked?: boolean;
@@ -228,19 +261,12 @@ export interface ListDevicesParams {
 export async function fetchDevices(
   params: ListDevicesParams = {},
 ): Promise<ListDevicesResponse> {
-  try {
-    const query = new URLSearchParams();
-    if (params.owner_urn) query.set("owner_urn", params.owner_urn);
-    if (params.include_revoked) query.set("include_revoked", "true");
-    const qs = query.toString() ? `?${query}` : "";
-    const { data } = await http.get<ListDevicesResponse>(`/v1/devices${qs}`);
-    return data;
-  } catch (err: unknown) {
-    if (axios.isAxiosError(err) && err.response?.status === 404) {
-      throw new DeviceAPINotImplementedError();
-    }
-    throw err;
-  }
+  const query = new URLSearchParams();
+  if (params.owner_urn) query.set("owner_urn", params.owner_urn);
+  if (params.include_revoked) query.set("include_revoked", "true");
+  const qs = query.toString() ? `?${query}` : "";
+  const { data } = await http.get<ListDevicesResponse>(`/v1/devices${qs}`);
+  return data;
 }
 
 export async function registerDevice(payload: {
@@ -249,71 +275,109 @@ export async function registerDevice(payload: {
   owner_urn: string;
   public_key_b64?: string;
 }): Promise<Device> {
-  try {
-    const { data } = await http.post<Device>("/v1/devices", payload);
-    return data;
-  } catch (err: unknown) {
-    if (axios.isAxiosError(err) && err.response?.status === 404) {
-      throw new DeviceAPINotImplementedError();
-    }
-    throw err;
-  }
+  const { data } = await http.post<Device>("/v1/devices", payload);
+  return data;
 }
 
 export async function updateDevice(
   urn: string,
   patch: { name?: string; last_seen_at?: string },
 ): Promise<Device> {
-  try {
-    const { data } = await http.patch<Device>(
-      `/v1/devices/${encodeURIComponent(urn)}`,
-      patch,
-    );
-    return data;
-  } catch (err: unknown) {
-    if (axios.isAxiosError(err) && err.response?.status === 404) {
-      throw new DeviceAPINotImplementedError();
-    }
-    throw err;
-  }
+  const { data } = await http.patch<Device>(
+    `/v1/devices/${encodeURIComponent(urn)}`,
+    patch,
+  );
+  return data;
 }
 
 export async function revokeDevice(urn: string): Promise<void> {
-  try {
-    await http.delete(`/v1/devices/${encodeURIComponent(urn)}`);
-  } catch (err: unknown) {
-    if (axios.isAxiosError(err) && err.response?.status === 404) {
-      throw new DeviceAPINotImplementedError();
-    }
-    throw err;
-  }
+  await http.delete(`/v1/devices/${encodeURIComponent(urn)}`);
 }
 
 export async function fetchDevice(urn: string): Promise<Device> {
-  try {
-    const { data } = await http.get<Device>(
-      `/v1/devices/${encodeURIComponent(urn)}`,
-    );
-    return data;
-  } catch (err: unknown) {
-    if (axios.isAxiosError(err) && err.response?.status === 404) {
-      throw new DeviceAPINotImplementedError();
-    }
-    throw err;
-  }
+  const { data } = await http.get<Device>(
+    `/v1/devices/${encodeURIComponent(urn)}`,
+  );
+  return data;
+}
+
+export async function approveDevice(urn: string): Promise<Device> {
+  const { data } = await http.patch<Device>(
+    `/v1/devices/${encodeURIComponent(urn)}/approve`,
+  );
+  return data;
+}
+
+export async function rejectDevice(urn: string): Promise<Device> {
+  const { data } = await http.patch<Device>(
+    `/v1/devices/${encodeURIComponent(urn)}/reject`,
+  );
+  return data;
+}
+
+// ─── Users ────────────────────────────────────────────────────────────────
+
+export interface ListUsersParams {
+  include_deleted?: boolean;
+  page_size?: number;
+  page_token?: string;
+}
+
+export async function fetchUsers(
+  params: ListUsersParams = {},
+): Promise<ListUsersResponse> {
+  const query = new URLSearchParams();
+  if (params.page_size) query.set("page_size", String(params.page_size));
+  if (params.page_token) query.set("page_token", params.page_token);
+  if (params.include_deleted) query.set("include_deleted", "true");
+  const qs = query.toString() ? `?${query}` : "";
+  const { data } = await http.get<ListUsersResponse>(`/v1/users${qs}`);
+  return data;
+}
+
+export async function fetchUser(urn: string): Promise<User> {
+  const { data } = await http.get<User>(`/v1/users/${encodeURIComponent(urn)}`);
+  return data;
+}
+
+export async function createUser(payload: {
+  urn: string;
+  display_name: string;
+  email?: string;
+}): Promise<User> {
+  const { data } = await http.post<User>("/v1/users", payload);
+  return data;
+}
+
+export async function updateUser(
+  urn: string,
+  patch: { display_name?: string; email?: string; deleted?: boolean },
+): Promise<User> {
+  const { data } = await http.patch<User>(
+    `/v1/users/${encodeURIComponent(urn)}`,
+    patch,
+  );
+  return data;
+}
+
+export async function deleteUser(urn: string): Promise<void> {
+  await http.delete(`/v1/users/${encodeURIComponent(urn)}`);
 }
 
 // ─── Metrics (assembled from list endpoint) ───────────────────────────────
 
 export async function fetchMetrics(): Promise<ServerMetrics> {
-  // Pull up to 200 notes/projects/folders to compute stats.
+  // Pull up to 200 records per resource to compute stats.
   // For a small/medium deployment this is fine; a dedicated /metrics endpoint
   // would be better for large deployments.
-  const [notesResp, projectsResp, foldersResp] = await Promise.all([
-    fetchNotes({ page_size: 200, include_deleted: true }),
-    fetchProjects({ page_size: 200, include_deleted: true }),
-    fetchFolders({ page_size: 200, include_deleted: true }),
-  ]);
+  const [notesResp, projectsResp, foldersResp, usersResp, devicesResp] =
+    await Promise.all([
+      fetchNotes({ page_size: 200, include_deleted: true }),
+      fetchProjects({ page_size: 200, include_deleted: true }),
+      fetchFolders({ page_size: 200, include_deleted: true }),
+      fetchUsers({ page_size: 200, include_deleted: true }),
+      fetchDevices({ include_revoked: true }),
+    ]);
 
   const notes = notesResp.notes ?? [];
   const total = notes.length;
@@ -321,6 +385,19 @@ export async function fetchMetrics(): Promise<ServerMetrics> {
   const activeCount = total - deletedCount;
   const secureCount = notes.filter((n) => n.note_type === "secure").length;
   const normalCount = notes.filter((n) => n.note_type === "normal").length;
+
+  const users = usersResp.users ?? [];
+  const totalUsers = users.length;
+  const activeUsers = users.filter((u) => !u.deleted).length;
+
+  const devices = devicesResp.devices ?? [];
+  const totalDevices = devices.length;
+  const activeDevices = devices.filter(
+    (d) => d.approval_status === "approved" && !d.revoked,
+  ).length;
+  const pendingDevices = devices.filter(
+    (d) => d.approval_status === "pending" && !d.revoked,
+  ).length;
 
   return {
     total_notes: total,
@@ -331,5 +408,10 @@ export async function fetchMetrics(): Promise<ServerMetrics> {
     total_events: 0, // requires per-note fetch; omitted for performance
     total_projects: (projectsResp.projects ?? []).length,
     total_folders: (foldersResp.folders ?? []).length,
+    total_users: totalUsers,
+    active_users: activeUsers,
+    total_devices: totalDevices,
+    active_devices: activeDevices,
+    pending_devices: pendingDevices,
   };
 }

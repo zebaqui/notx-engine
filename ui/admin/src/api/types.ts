@@ -100,11 +100,15 @@ export interface ServerConfig {
   log_level: string;
 }
 
+export type DeviceApprovalStatus = "pending" | "approved" | "rejected";
+
 export interface Device {
   urn: string;
   name: string;
   owner_urn: string;
   public_key_b64: string; // base64-encoded Ed25519 public key
+  role: "client" | "admin";
+  approval_status: "pending" | "approved" | "rejected";
   registered_at: string; // ISO-8601
   last_seen_at?: string; // ISO-8601, optional
   revoked: boolean;
@@ -129,4 +133,23 @@ export interface ServerMetrics {
   total_events: number;
   total_projects: number;
   total_folders: number;
+  total_users: number;
+  active_users: number;
+  total_devices: number;
+  active_devices: number;
+  pending_devices: number;
+}
+
+export interface User {
+  urn: string;
+  display_name: string;
+  email?: string;
+  deleted: boolean;
+  created_at: string; // ISO-8601
+  updated_at: string; // ISO-8601
+}
+
+export interface ListUsersResponse {
+  users: User[];
+  next_page_token: string;
 }

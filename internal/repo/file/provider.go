@@ -1109,6 +1109,241 @@ func (p *Provider) DeleteFolder(ctx context.Context, urn string) error {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// UserRepository
+// ─────────────────────────────────────────────────────────────────────────────
+
+func (p *Provider) CreateUser(ctx context.Context, u *core.User) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	existing, err := p.idx.GetUser(u.URN.String())
+	if err != nil {
+		return fmt.Errorf("file provider: create user: %w", err)
+	}
+	if existing != nil {
+		return fmt.Errorf("%w: %s", repo.ErrAlreadyExists, u.URN.String())
+	}
+
+	entry := index.UserEntry{
+		URN:         u.URN.String(),
+		DisplayName: u.DisplayName,
+		Email:       u.Email,
+		Deleted:     u.Deleted,
+		CreatedAt:   u.CreatedAt.UTC().Format(time.RFC3339),
+		UpdatedAt:   u.UpdatedAt.UTC().Format(time.RFC3339),
+	}
+	return p.idx.UpsertUser(entry)
+}
+
+func (p *Provider) GetUser(ctx context.Context, urn string) (*core.User, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	entry, err := p.idx.GetUser(urn)
+	if err != nil {
+		return nil, fmt.Errorf("file provider: get user: %w", err)
+	}
+	if entry == nil {
+		return nil, fmt.Errorf("%w: %s", repo.ErrNotFound, urn)
+	}
+	return userEntryToCore(entry)
+}
+
+func (p *Provider) ListUsers(ctx context.Context, opts repo.UserListOptions) (*repo.UserListResult, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	pageSize := opts.PageSize
+	if pageSize <= 0 {
+		pageSize = 50
+	}
+	entries, nextToken, err := p.idx.ListUsers(opts.IncludeDeleted, pageSize, opts.PageToken)
+	if err != nil {
+		return nil, fmt.Errorf("file provider: list users: %w", err)
+	}
+	users := make([]*core.User, 0, len(entries))
+	for i := range entries {
+		u, err := userEntryToCore(&entries[i])
+		if err != nil {
+			return nil, err
+		}
+		users = append(users, u)
+	}
+	return &repo.UserListResult{Users: users, NextPageToken: nextToken}, nil
+}
+
+func (p *Provider) UpdateUser(ctx context.Context, u *core.User) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	existing, err := p.idx.GetUser(u.URN.String())
+	if err != nil {
+		return fmt.Errorf("file provider: update user: %w", err)
+	}
+	if existing == nil {
+		return fmt.Errorf("%w: %s", repo.ErrNotFound, u.URN.String())
+	}
+
+	entry := index.UserEntry{
+		URN:         u.URN.String(),
+		DisplayName: u.DisplayName,
+		Email:       u.Email,
+		Deleted:     u.Deleted,
+		CreatedAt:   existing.CreatedAt, // preserve original
+		UpdatedAt:   u.UpdatedAt.UTC().Format(time.RFC3339),
+	}
+	return p.idx.UpsertUser(entry)
+}
+
+func (p *Provider) DeleteUser(ctx context.Context, urn string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	existing, err := p.idx.GetUser(urn)
+	if err != nil {
+		return fmt.Errorf("file provider: delete user: %w", err)
+	}
+	if existing == nil {
+		return fmt.Errorf("%w: %s", repo.ErrNotFound, urn)
+	}
+
+	existing.Deleted = true
+	existing.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	return p.idx.UpsertUser(*existing)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DeviceRepository
+// ─────────────────────────────────────────────────────────────────────────────
+
+func (p *Provider) RegisterDevice(ctx context.Context, d *core.Device) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	existing, err := p.idx.GetDevice(d.URN.String())
+	if err != nil {
+		return fmt.Errorf("file provider: register device: %w", err)
+	}
+	if existing != nil {
+		return fmt.Errorf("%w: %s", repo.ErrAlreadyExists, d.URN.String())
+	}
+
+	lastSeen := ""
+	if !d.LastSeenAt.IsZero() {
+		lastSeen = d.LastSeenAt.UTC().Format(time.RFC3339)
+	}
+	entry := index.DeviceEntry{
+		URN:            d.URN.String(),
+		Name:           d.Name,
+		OwnerURN:       d.OwnerURN.String(),
+		PublicKeyB64:   d.PublicKeyB64,
+		Role:           string(d.Role),
+		ApprovalStatus: string(d.ApprovalStatus),
+		Revoked:        d.Revoked,
+		RegisteredAt:   d.RegisteredAt.UTC().Format(time.RFC3339),
+		LastSeenAt:     lastSeen,
+	}
+	return p.idx.UpsertDevice(entry)
+}
+
+func (p *Provider) GetDevice(ctx context.Context, urn string) (*core.Device, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	entry, err := p.idx.GetDevice(urn)
+	if err != nil {
+		return nil, fmt.Errorf("file provider: get device: %w", err)
+	}
+	if entry == nil {
+		return nil, fmt.Errorf("%w: %s", repo.ErrNotFound, urn)
+	}
+	return deviceEntryToCore(entry)
+}
+
+func (p *Provider) ListDevices(ctx context.Context, opts repo.DeviceListOptions) (*repo.DeviceListResult, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	entries, err := p.idx.ListDevices(opts.OwnerURN, opts.IncludeRevoked)
+	if err != nil {
+		return nil, fmt.Errorf("file provider: list devices: %w", err)
+	}
+	devices := make([]*core.Device, 0, len(entries))
+	for i := range entries {
+		d, err := deviceEntryToCore(&entries[i])
+		if err != nil {
+			return nil, err
+		}
+		devices = append(devices, d)
+	}
+	return &repo.DeviceListResult{Devices: devices}, nil
+}
+
+func (p *Provider) UpdateDevice(ctx context.Context, d *core.Device) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	existing, err := p.idx.GetDevice(d.URN.String())
+	if err != nil {
+		return fmt.Errorf("file provider: update device: %w", err)
+	}
+	if existing == nil {
+		return fmt.Errorf("%w: %s", repo.ErrNotFound, d.URN.String())
+	}
+
+	lastSeen := ""
+	if !d.LastSeenAt.IsZero() {
+		lastSeen = d.LastSeenAt.UTC().Format(time.RFC3339)
+	}
+	entry := index.DeviceEntry{
+		URN:            d.URN.String(),
+		Name:           d.Name,
+		OwnerURN:       d.OwnerURN.String(),
+		PublicKeyB64:   d.PublicKeyB64,
+		Role:           string(d.Role),
+		ApprovalStatus: string(d.ApprovalStatus),
+		Revoked:        d.Revoked,
+		RegisteredAt:   existing.RegisteredAt, // preserve original
+		LastSeenAt:     lastSeen,
+	}
+	return p.idx.UpsertDevice(entry)
+}
+
+func (p *Provider) RevokeDevice(ctx context.Context, urn string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	existing, err := p.idx.GetDevice(urn)
+	if err != nil {
+		return fmt.Errorf("file provider: revoke device: %w", err)
+	}
+	if existing == nil {
+		return fmt.Errorf("%w: %s", repo.ErrNotFound, urn)
+	}
+
+	existing.Revoked = true
+	return p.idx.UpsertDevice(*existing)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Project / folder conversion helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -1157,6 +1392,54 @@ func folderEntryToCore(e *index.FolderEntry) (*core.Folder, error) {
 
 func (p *Provider) noteFilePath(urn string) string {
 	return filepath.Join(p.notesDir, sanitiseURN(urn)+".notx")
+}
+
+func deviceEntryToCore(e *index.DeviceEntry) (*core.Device, error) {
+	urn, err := core.ParseURN(e.URN)
+	if err != nil {
+		return nil, fmt.Errorf("file provider: parse device URN: %w", err)
+	}
+	ownerURN, err := core.ParseURN(e.OwnerURN)
+	if err != nil {
+		return nil, fmt.Errorf("file provider: parse device owner URN: %w", err)
+	}
+	registeredAt, _ := time.Parse(time.RFC3339, e.RegisteredAt)
+	var lastSeenAt time.Time
+	if e.LastSeenAt != "" {
+		lastSeenAt, _ = time.Parse(time.RFC3339, e.LastSeenAt)
+	}
+	role := core.DeviceRole(e.Role)
+	if role == "" {
+		role = core.DeviceRoleClient
+	}
+	return &core.Device{
+		URN:            urn,
+		Name:           e.Name,
+		OwnerURN:       ownerURN,
+		PublicKeyB64:   e.PublicKeyB64,
+		Role:           role,
+		ApprovalStatus: core.DeviceApprovalStatus(e.ApprovalStatus),
+		Revoked:        e.Revoked,
+		RegisteredAt:   registeredAt,
+		LastSeenAt:     lastSeenAt,
+	}, nil
+}
+
+func userEntryToCore(e *index.UserEntry) (*core.User, error) {
+	urn, err := core.ParseURN(e.URN)
+	if err != nil {
+		return nil, fmt.Errorf("file provider: parse user URN: %w", err)
+	}
+	createdAt, _ := time.Parse(time.RFC3339, e.CreatedAt)
+	updatedAt, _ := time.Parse(time.RFC3339, e.UpdatedAt)
+	return &core.User{
+		URN:         urn,
+		DisplayName: e.DisplayName,
+		Email:       e.Email,
+		Deleted:     e.Deleted,
+		CreatedAt:   createdAt,
+		UpdatedAt:   updatedAt,
+	}, nil
 }
 
 func sanitiseURN(urn string) string {

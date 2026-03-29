@@ -71,3 +71,4 @@ desktop.ini
 .settings/
 *.sublime-workspace
 *.sublime-project
+/tests/smoke/testdata/

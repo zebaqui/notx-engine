@@ -9,6 +9,9 @@ CMD        := ./cmd/notx
 PROTO_DIR  := internal/server/proto
 PROTO_FILE := $(PROTO_DIR)/notx.proto
 
+# Docker image tag used by the integration tests.
+DOCKER_IMAGE := notx:integration-test
+
 GOPATH     := $(shell go env GOPATH)
 GOMODCACHE := $(shell go env GOMODCACHE)
 
@@ -17,7 +20,8 @@ PROTOC_GEN_GO  := $(GOPATH)/bin/protoc-gen-go
 PROTOC_GEN_GRP := $(GOPATH)/bin/protoc-gen-go-grpc
 
 .PHONY: all build build-go generate-proto clean \
-        admin-install admin-dev admin-build
+        admin-install admin-dev admin-build \
+        docker-build test-integration
 
 # ── Default ───────────────────────────────────────────────────────────────────
 
@@ -70,6 +74,19 @@ admin-dev:
 admin-build:
 	@echo "  BUILD   $(ADMIN_DIR)"
 	cd $(ADMIN_DIR) && npm run build
+
+# ── Docker ────────────────────────────────────────────────────────────────────
+
+## docker-build: build the notx Docker image (server-only, no UI embed required)
+docker-build:
+	@echo "  DOCKER  $(DOCKER_IMAGE)"
+	docker build --tag $(DOCKER_IMAGE) --file Dockerfile .
+
+## test-integration: build the Docker image then run the ephemeral-container integration tests
+##                   requires Docker; safe to skip in CI environments without Docker
+test-integration: docker-build
+	@echo "  TEST    ./tests/docker/ (integration)"
+	go test -v -tags integration -timeout 120s ./tests/docker/
 
 # ── Clean ─────────────────────────────────────────────────────────────────────
 

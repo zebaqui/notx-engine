@@ -19,12 +19,16 @@ var ui embed.FS
 // apiPrefixes are the URL prefixes that should be forwarded to the notx API
 // server rather than served from the embedded FS.
 var apiPrefixes = []string{
-	"/v1/",
 	"/healthz",
 	"/readyz",
 }
 
 func isAPIPath(path string) bool {
+	// Forward anything under /v1 — match the exact collection root (/v1/users)
+	// as well as sub-paths (/v1/users/<urn>).
+	if path == "/v1" || strings.HasPrefix(path, "/v1/") {
+		return true
+	}
 	for _, p := range apiPrefixes {
 		if strings.HasPrefix(path, p) {
 			return true

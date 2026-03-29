@@ -2,9 +2,11 @@ package grpc
 
 import (
 	"context"
+	b64 "encoding/base64"
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"google.golang.org/grpc/codes"
@@ -294,25 +296,20 @@ func (s *NoteServiceServer) ShareSecureNote(ctx context.Context, req *pb.ShareSe
 // DeviceServiceServer
 // ─────────────────────────────────────────────────────────────────────────────
 
-// DeviceServiceServer implements pb.DeviceServiceServer.
-// Phase 2 will wire this to a real device registry / Vault client.
-// For now it provides a structurally complete implementation that records
-// devices in-memory so the gRPC layer is testable end-to-end.
+// DeviceServiceServer implements pb.DeviceServiceServer backed by the shared
+// repo.DeviceRepository so the gRPC and HTTP layers read from and write to the
+// same device store.
+//
+// Pairing sessions are the only state kept in-memory: they are short-lived
+// (5-minute TTL), never need to survive a restart, and have no repo analogue.
 type DeviceServiceServer struct {
 	pb.UnimplementedDeviceServiceServer
 
-	mu      chan struct{} // binary semaphore (capacity 1)
-	devices map[string]*deviceRecord
-	pairs   map[string]*pairSession // session_token → session
-}
+	repo repo.DeviceRepository
 
-type deviceRecord struct {
-	DeviceURN    string
-	DeviceName   string
-	OwnerURN     string
-	PublicKey    []byte
-	RegisteredAt time.Time
-	LastSeenAt   time.Time
+	// pairMu guards the pairs map only.
+	pairMu sync.Mutex
+	pairs  map[string]*pairSession // session_token → session
 }
 
 type pairSession struct {
@@ -320,19 +317,14 @@ type pairSession struct {
 	ExpiresAt    time.Time
 }
 
-// NewDeviceServiceServer returns a ready-to-register DeviceServiceServer.
-func NewDeviceServiceServer() *DeviceServiceServer {
-	s := &DeviceServiceServer{
-		mu:      make(chan struct{}, 1),
-		devices: make(map[string]*deviceRecord),
-		pairs:   make(map[string]*pairSession),
+// NewDeviceServiceServer returns a ready-to-register DeviceServiceServer
+// backed by the supplied DeviceRepository.
+func NewDeviceServiceServer(r repo.DeviceRepository) *DeviceServiceServer {
+	return &DeviceServiceServer{
+		repo:  r,
+		pairs: make(map[string]*pairSession),
 	}
-	s.mu <- struct{}{} // fill the semaphore
-	return s
 }
-
-func (s *DeviceServiceServer) lock()   { <-s.mu }
-func (s *DeviceServiceServer) unlock() { s.mu <- struct{}{} }
 
 // ── RegisterDevice ───────────────────────────────────────────────────────────
 
@@ -347,7 +339,6 @@ func (s *DeviceServiceServer) RegisterDevice(ctx context.Context, req *pb.Regist
 		return nil, status.Error(codes.InvalidArgument, "owner_urn is required")
 	}
 
-	// Validate that the URN is a well-formed device URN.
 	deviceURN, err := core.ParseURN(req.DeviceUrn)
 	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "invalid device_urn: %v", err)
@@ -357,26 +348,31 @@ func (s *DeviceServiceServer) RegisterDevice(ctx context.Context, req *pb.Regist
 			"device_urn must be of type %q, got %q", core.ObjectTypeDevice, deviceURN.ObjectType)
 	}
 
-	// Security invariant: private keys must never appear in this request.
-	// We cannot detect this structurally (the field doesn't exist in the proto),
-	// but we validate public key length — Ed25519 public keys are exactly 32 bytes.
+	ownerURN, err := core.ParseURN(req.OwnerUrn)
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "invalid owner_urn: %v", err)
+	}
+
+	// Security invariant: Ed25519 public keys are exactly 32 bytes.
+	// The private key must never appear in this request.
 	if len(req.PublicKey) != 32 {
 		return nil, status.Errorf(codes.InvalidArgument,
 			"public_key must be 32 bytes (Ed25519), got %d", len(req.PublicKey))
 	}
 
 	now := time.Now().UTC()
+	d := &core.Device{
+		URN:            deviceURN,
+		Name:           req.DeviceName,
+		OwnerURN:       ownerURN,
+		PublicKeyB64:   encodePublicKey(req.PublicKey),
+		ApprovalStatus: core.DeviceApprovalApproved, // gRPC registration is always trusted
+		RegisteredAt:   now,
+		LastSeenAt:     now,
+	}
 
-	s.lock()
-	defer s.unlock()
-
-	s.devices[req.DeviceUrn] = &deviceRecord{
-		DeviceURN:    req.DeviceUrn,
-		DeviceName:   req.DeviceName,
-		OwnerURN:     req.OwnerUrn,
-		PublicKey:    req.PublicKey,
-		RegisteredAt: now,
-		LastSeenAt:   now,
+	if err := s.repo.RegisterDevice(ctx, d); err != nil {
+		return nil, deviceRepoErrToStatus(err, req.DeviceUrn)
 	}
 
 	return &pb.RegisterDeviceResponse{
@@ -392,17 +388,23 @@ func (s *DeviceServiceServer) GetDevicePublicKey(ctx context.Context, req *pb.Ge
 		return nil, status.Error(codes.InvalidArgument, "device_urn is required")
 	}
 
-	s.lock()
-	rec, ok := s.devices[req.DeviceUrn]
-	s.unlock()
+	d, err := s.repo.GetDevice(ctx, req.DeviceUrn)
+	if err != nil {
+		return nil, deviceRepoErrToStatus(err, req.DeviceUrn)
+	}
 
-	if !ok {
-		return nil, status.Errorf(codes.NotFound, "device %q not found", req.DeviceUrn)
+	if d.Revoked {
+		return nil, status.Errorf(codes.PermissionDenied, "device %q has been revoked", req.DeviceUrn)
+	}
+
+	key, err := decodePublicKey(d.PublicKeyB64)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "stored public key for device %q is invalid: %v", req.DeviceUrn, err)
 	}
 
 	return &pb.GetDevicePublicKeyResponse{
-		DeviceUrn: rec.DeviceURN,
-		PublicKey: rec.PublicKey,
+		DeviceUrn: d.URN.String(),
+		PublicKey: key,
 	}, nil
 }
 
@@ -413,21 +415,33 @@ func (s *DeviceServiceServer) ListDevices(ctx context.Context, req *pb.ListDevic
 		return nil, status.Error(codes.InvalidArgument, "owner_urn is required")
 	}
 
-	s.lock()
-	var infos []*pb.DeviceInfo
-	for _, rec := range s.devices {
-		if rec.OwnerURN != req.OwnerUrn {
+	result, err := s.repo.ListDevices(ctx, repo.DeviceListOptions{
+		OwnerURN:       req.OwnerUrn,
+		IncludeRevoked: false, // never surface revoked devices for key-exchange use
+	})
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "list devices: %v", err)
+	}
+
+	infos := make([]*pb.DeviceInfo, 0, len(result.Devices))
+	for _, d := range result.Devices {
+		key, err := decodePublicKey(d.PublicKeyB64)
+		if err != nil {
+			// Skip devices whose key is undecodable rather than hard-failing the
+			// whole list — the device may have been registered without a key.
 			continue
 		}
-		infos = append(infos, &pb.DeviceInfo{
-			DeviceUrn:    rec.DeviceURN,
-			DeviceName:   rec.DeviceName,
-			PublicKey:    rec.PublicKey,
-			RegisteredAt: timestamppb.New(rec.RegisteredAt),
-			LastSeenAt:   timestamppb.New(rec.LastSeenAt),
-		})
+		info := &pb.DeviceInfo{
+			DeviceUrn:    d.URN.String(),
+			DeviceName:   d.Name,
+			PublicKey:    key,
+			RegisteredAt: timestamppb.New(d.RegisteredAt),
+		}
+		if !d.LastSeenAt.IsZero() {
+			info.LastSeenAt = timestamppb.New(d.LastSeenAt)
+		}
+		infos = append(infos, info)
 	}
-	s.unlock()
 
 	return &pb.ListDevicesResponse{Devices: infos}, nil
 }
@@ -439,15 +453,8 @@ func (s *DeviceServiceServer) RevokeDevice(ctx context.Context, req *pb.RevokeDe
 		return nil, status.Error(codes.InvalidArgument, "device_urn is required")
 	}
 
-	s.lock()
-	_, ok := s.devices[req.DeviceUrn]
-	if ok {
-		delete(s.devices, req.DeviceUrn)
-	}
-	s.unlock()
-
-	if !ok {
-		return nil, status.Errorf(codes.NotFound, "device %q not found", req.DeviceUrn)
+	if err := s.repo.RevokeDevice(ctx, req.DeviceUrn); err != nil {
+		return nil, deviceRepoErrToStatus(err, req.DeviceUrn)
 	}
 
 	return &pb.RevokeDeviceResponse{Revoked: true}, nil
@@ -460,25 +467,27 @@ func (s *DeviceServiceServer) InitiatePairing(ctx context.Context, req *pb.Initi
 		return nil, status.Error(codes.InvalidArgument, "initiator_device_urn is required")
 	}
 
-	s.lock()
-	_, registered := s.devices[req.InitiatorDeviceUrn]
-	s.unlock()
-
-	if !registered {
+	// The initiator must be a registered, non-revoked device.
+	initiator, err := s.repo.GetDevice(ctx, req.InitiatorDeviceUrn)
+	if err != nil {
+		return nil, deviceRepoErrToStatus(err, req.InitiatorDeviceUrn)
+	}
+	if initiator.Revoked {
 		return nil, status.Errorf(codes.PermissionDenied,
-			"initiator device %q is not registered", req.InitiatorDeviceUrn)
+			"initiator device %q has been revoked", req.InitiatorDeviceUrn)
 	}
 
-	// Generate a short-lived session token (Phase 7: replace with crypto-random token).
+	// Generate a short-lived session token.
+	// TODO(phase7): replace with a crypto-random token.
 	token := fmt.Sprintf("pair-%s-%d", sanitiseURNForToken(req.InitiatorDeviceUrn), time.Now().UnixNano())
 	expiresAt := time.Now().UTC().Add(5 * time.Minute)
 
-	s.lock()
+	s.pairMu.Lock()
 	s.pairs[token] = &pairSession{
 		InitiatorURN: req.InitiatorDeviceUrn,
 		ExpiresAt:    expiresAt,
 	}
-	s.unlock()
+	s.pairMu.Unlock()
 
 	return &pb.InitiatePairingResponse{
 		SessionToken: token,
@@ -503,17 +512,17 @@ func (s *DeviceServiceServer) CompletePairing(ctx context.Context, req *pb.Compl
 			"public_key must be 32 bytes (Ed25519), got %d", len(req.PublicKey))
 	}
 
-	s.lock()
+	s.pairMu.Lock()
 	session, ok := s.pairs[req.SessionToken]
-	s.unlock()
+	if ok {
+		delete(s.pairs, req.SessionToken) // consume immediately; single-use
+	}
+	s.pairMu.Unlock()
 
 	if !ok {
 		return nil, status.Error(codes.NotFound, "pairing session not found or already used")
 	}
 	if time.Now().UTC().After(session.ExpiresAt) {
-		s.lock()
-		delete(s.pairs, req.SessionToken)
-		s.unlock()
 		return nil, status.Error(codes.DeadlineExceeded, "pairing session has expired")
 	}
 
@@ -528,28 +537,29 @@ func (s *DeviceServiceServer) CompletePairing(ctx context.Context, req *pb.Compl
 	}
 
 	// Look up the initiator to inherit the owner URN.
-	s.lock()
-	initiator, initiatorExists := s.devices[session.InitiatorURN]
-	s.unlock()
-
-	if !initiatorExists {
-		return nil, status.Errorf(codes.FailedPrecondition,
-			"initiator device %q is no longer registered", session.InitiatorURN)
+	initiator, err := s.repo.GetDevice(ctx, session.InitiatorURN)
+	if err != nil {
+		if errors.Is(err, repo.ErrNotFound) {
+			return nil, status.Errorf(codes.FailedPrecondition,
+				"initiator device %q is no longer registered", session.InitiatorURN)
+		}
+		return nil, status.Errorf(codes.Internal, "look up initiator: %v", err)
 	}
 
 	now := time.Now().UTC()
-
-	s.lock()
-	s.devices[req.DeviceUrn] = &deviceRecord{
-		DeviceURN:    req.DeviceUrn,
-		DeviceName:   req.DeviceName,
-		OwnerURN:     initiator.OwnerURN,
-		PublicKey:    req.PublicKey,
-		RegisteredAt: now,
-		LastSeenAt:   now,
+	d := &core.Device{
+		URN:            deviceURN,
+		Name:           req.DeviceName,
+		OwnerURN:       initiator.OwnerURN,
+		PublicKeyB64:   encodePublicKey(req.PublicKey),
+		ApprovalStatus: core.DeviceApprovalApproved, // pairing implies trust from an existing device
+		RegisteredAt:   now,
+		LastSeenAt:     now,
 	}
-	delete(s.pairs, req.SessionToken) // consume the session
-	s.unlock()
+
+	if err := s.repo.RegisterDevice(ctx, d); err != nil {
+		return nil, deviceRepoErrToStatus(err, req.DeviceUrn)
+	}
 
 	return &pb.CompletePairingResponse{
 		DeviceUrn:    req.DeviceUrn,
@@ -722,4 +732,31 @@ func repoErrToStatus(err error, urn string) error {
 
 func sanitiseURNForToken(urn string) string {
 	return strings.NewReplacer(":", "-", ".", "-").Replace(urn)
+}
+
+// deviceRepoErrToStatus maps DeviceRepository errors to gRPC status codes.
+func deviceRepoErrToStatus(err error, urn string) error {
+	switch {
+	case errors.Is(err, repo.ErrNotFound):
+		return status.Errorf(codes.NotFound, "device %q not found", urn)
+	case errors.Is(err, repo.ErrAlreadyExists):
+		return status.Errorf(codes.AlreadyExists, "device %q already exists", urn)
+	default:
+		return status.Errorf(codes.Internal, "internal error: %v", err)
+	}
+}
+
+// encodePublicKey base64-encodes a raw Ed25519 public key byte slice for
+// storage in core.Device.PublicKeyB64.
+func encodePublicKey(key []byte) string {
+	return b64.StdEncoding.EncodeToString(key)
+}
+
+// decodePublicKey decodes a base64-encoded Ed25519 public key back to raw
+// bytes. Returns an error if the string is empty or not valid base64.
+func decodePublicKey(b64key string) ([]byte, error) {
+	if b64key == "" {
+		return nil, fmt.Errorf("public key is empty")
+	}
+	return b64.StdEncoding.DecodeString(b64key)
 }

@@ -360,3 +360,50 @@ type DeviceRepository interface {
 	// Returns ErrNotFound if the device does not exist.
 	RevokeDevice(ctx context.Context, urn string) error
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// UserListOptions / UserListResult
+// ─────────────────────────────────────────────────────────────────────────────
+
+// UserListOptions controls filtering and pagination for UserRepository.ListUsers.
+type UserListOptions struct {
+	// IncludeDeleted includes soft-deleted users when true.
+	IncludeDeleted bool
+	// PageSize is the maximum number of users to return. 0 means provider default.
+	PageSize int
+	// PageToken is the opaque continuation token from a previous call.
+	PageToken string
+}
+
+// UserListResult is the return value of UserRepository.ListUsers.
+type UserListResult struct {
+	Users         []*core.User
+	NextPageToken string
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// UserRepository — storage for human users
+// ─────────────────────────────────────────────────────────────────────────────
+
+// UserRepository is the storage abstraction for user records.
+// Implementations must be safe for concurrent use.
+type UserRepository interface {
+	// CreateUser persists a new user.
+	// Returns ErrAlreadyExists if a user with the same URN already exists.
+	CreateUser(ctx context.Context, u *core.User) error
+
+	// GetUser retrieves a user by URN.
+	// Returns ErrNotFound if no user with that URN exists.
+	GetUser(ctx context.Context, urn string) (*core.User, error)
+
+	// ListUsers returns a paginated list of users.
+	ListUsers(ctx context.Context, opts UserListOptions) (*UserListResult, error)
+
+	// UpdateUser persists changes to mutable fields (DisplayName, Email, Deleted).
+	// Returns ErrNotFound if the user does not exist.
+	UpdateUser(ctx context.Context, u *core.User) error
+
+	// DeleteUser soft-deletes a user by setting Deleted=true.
+	// Returns ErrNotFound if the user does not exist.
+	DeleteUser(ctx context.Context, urn string) error
+}

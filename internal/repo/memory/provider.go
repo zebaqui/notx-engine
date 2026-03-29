@@ -22,6 +22,7 @@ type Provider struct {
 	projects map[string]*core.Project // urn → project
 	folders  map[string]*core.Folder  // urn → folder
 	devices  map[string]*core.Device  // urn → device
+	users    map[string]*core.User    // urn → user
 }
 
 // New returns an empty, ready-to-use in-memory Provider.
@@ -32,6 +33,7 @@ func New() *Provider {
 		projects: make(map[string]*core.Project),
 		folders:  make(map[string]*core.Folder),
 		devices:  make(map[string]*core.Device),
+		users:    make(map[string]*core.User),
 	}
 }
 
@@ -678,6 +680,117 @@ func (p *Provider) RevokeDevice(ctx context.Context, urn string) error {
 		return fmt.Errorf("%w: %s", repo.ErrNotFound, urn)
 	}
 	d.Revoked = true
+	return nil
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// UserRepository
+// ─────────────────────────────────────────────────────────────────────────────
+
+func (p *Provider) CreateUser(ctx context.Context, u *core.User) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	urn := u.URN.String()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if _, exists := p.users[urn]; exists {
+		return fmt.Errorf("%w: %s", repo.ErrAlreadyExists, urn)
+	}
+	clone := *u
+	p.users[urn] = &clone
+	return nil
+}
+
+func (p *Provider) GetUser(ctx context.Context, urn string) (*core.User, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	u, ok := p.users[urn]
+	if !ok {
+		return nil, fmt.Errorf("%w: %s", repo.ErrNotFound, urn)
+	}
+	clone := *u
+	return &clone, nil
+}
+
+func (p *Provider) ListUsers(ctx context.Context, opts repo.UserListOptions) (*repo.UserListResult, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	urns := make([]string, 0, len(p.users))
+	for urn := range p.users {
+		urns = append(urns, urn)
+	}
+	sort.Strings(urns)
+
+	// Pagination: use URN string as cursor.
+	startIdx := 0
+	if opts.PageToken != "" {
+		for i, urn := range urns {
+			if urn > opts.PageToken {
+				startIdx = i
+				break
+			}
+		}
+	}
+
+	pageSize := opts.PageSize
+	if pageSize <= 0 {
+		pageSize = 50
+	}
+
+	var results []*core.User
+	var nextToken string
+	for i := startIdx; i < len(urns); i++ {
+		u := p.users[urns[i]]
+		if !opts.IncludeDeleted && u.Deleted {
+			continue
+		}
+		if len(results) == pageSize {
+			nextToken = urns[i]
+			break
+		}
+		clone := *u
+		results = append(results, &clone)
+	}
+	if results == nil {
+		results = []*core.User{}
+	}
+	return &repo.UserListResult{Users: results, NextPageToken: nextToken}, nil
+}
+
+func (p *Provider) UpdateUser(ctx context.Context, u *core.User) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	urn := u.URN.String()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if _, ok := p.users[urn]; !ok {
+		return fmt.Errorf("%w: %s", repo.ErrNotFound, urn)
+	}
+	clone := *u
+	p.users[urn] = &clone
+	return nil
+}
+
+func (p *Provider) DeleteUser(ctx context.Context, urn string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	u, ok := p.users[urn]
+	if !ok {
+		return fmt.Errorf("%w: %s", repo.ErrNotFound, urn)
+	}
+	u.Deleted = true
 	return nil
 }
 

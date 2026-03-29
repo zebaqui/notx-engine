@@ -10,11 +10,13 @@ import (
 	"os/signal"
 	"sync"
 	"syscall"
+	"time"
 
 	googlegrpc "google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/reflection"
 
+	"github.com/zebaqui/notx-engine/core"
 	"github.com/zebaqui/notx-engine/internal/repo"
 	"github.com/zebaqui/notx-engine/internal/server/config"
 	grpcsvc "github.com/zebaqui/notx-engine/internal/server/grpc"
@@ -29,6 +31,7 @@ type Server struct {
 	repo     repo.NoteRepository
 	projRepo repo.ProjectRepository
 	devRepo  repo.DeviceRepository
+	userRepo repo.UserRepository
 	log      *slog.Logger
 
 	httpHandler *httpsvc.Handler
@@ -37,7 +40,7 @@ type Server struct {
 
 // New creates a Server from the given config and repository.
 // It wires all sub-components but does not start any listeners yet.
-func New(cfg *config.Config, r repo.NoteRepository, projRepo repo.ProjectRepository, devRepo repo.DeviceRepository, log *slog.Logger) (*Server, error) {
+func New(cfg *config.Config, r repo.NoteRepository, projRepo repo.ProjectRepository, devRepo repo.DeviceRepository, userRepo repo.UserRepository, log *slog.Logger) (*Server, error) {
 	if log == nil {
 		log = slog.New(slog.NewTextHandler(os.Stderr, nil))
 	}
@@ -47,15 +50,21 @@ func New(cfg *config.Config, r repo.NoteRepository, projRepo repo.ProjectReposit
 		repo:     r,
 		projRepo: projRepo,
 		devRepo:  devRepo,
+		userRepo: userRepo,
 		log:      log,
 	}
 
+	// ── Bootstrap the built-in admin device ─────────────────────────────────
+	if err := bootstrapAdminDevice(cfg, devRepo, log); err != nil {
+		return nil, fmt.Errorf("server: bootstrap admin device: %w", err)
+	}
+
 	if cfg.EnableHTTP {
-		s.httpHandler = httpsvc.New(cfg, r, projRepo, devRepo, log)
+		s.httpHandler = httpsvc.New(cfg, r, projRepo, devRepo, userRepo, log)
 	}
 
 	if cfg.EnableGRPC {
-		grpcSrv, err := buildGRPCServer(cfg, r, projRepo, log)
+		grpcSrv, err := buildGRPCServer(cfg, r, projRepo, devRepo, log)
 		if err != nil {
 			return nil, fmt.Errorf("server: build gRPC server: %w", err)
 		}
@@ -63,6 +72,82 @@ func New(cfg *config.Config, r repo.NoteRepository, projRepo repo.ProjectReposit
 	}
 
 	return s, nil
+}
+
+// bootstrapAdminDevice upserts the well-known local admin device into the
+// device repository on every startup.
+//
+// This runs only in local-mode — i.e. when NO admin passphrase is configured.
+// In that mode the server automatically registers and approves a well-known
+// sentinel device URN so that `notx admin` on the same machine works without
+// any registration step.
+//
+// When an AdminPassphraseHash IS set the bootstrap is skipped entirely.
+// Remote admin clients must register themselves via POST /v1/devices with the
+// correct passphrase to receive role=admin + approval_status=approved.
+//
+// The operation is idempotent: if the sentinel device already exists its
+// approval status and revocation flag are reset to the canonical values so
+// that accidental tampering is repaired on restart.
+func bootstrapAdminDevice(cfg *config.Config, devRepo repo.DeviceRepository, log *slog.Logger) error {
+	// Remote-mode: passphrase is set, so skip the local bootstrap entirely.
+	// Admin devices must authenticate themselves during registration.
+	if cfg.Admin.AdminPassphraseHash != "" {
+		log.Debug("admin passphrase configured — skipping local bootstrap device")
+		return nil
+	}
+
+	ctx := context.Background()
+
+	deviceURN, err := core.ParseURN(cfg.Admin.DeviceURN)
+	if err != nil {
+		return fmt.Errorf("parse admin device URN %q: %w", cfg.Admin.DeviceURN, err)
+	}
+	ownerURN, err := core.ParseURN(cfg.Admin.OwnerURN)
+	if err != nil {
+		return fmt.Errorf("parse admin owner URN %q: %w", cfg.Admin.OwnerURN, err)
+	}
+
+	existing, err := devRepo.GetDevice(ctx, cfg.Admin.DeviceURN)
+	if err != nil && !errors.Is(err, repo.ErrNotFound) {
+		return fmt.Errorf("look up admin device: %w", err)
+	}
+
+	if existing == nil {
+		// First boot — register the sentinel as an approved admin device.
+		d := &core.Device{
+			URN:            deviceURN,
+			Name:           "notx-admin",
+			OwnerURN:       ownerURN,
+			Role:           core.DeviceRoleAdmin,
+			ApprovalStatus: core.DeviceApprovalApproved,
+			Revoked:        false,
+			RegisteredAt:   time.Now().UTC(),
+		}
+		if err := devRepo.RegisterDevice(ctx, d); err != nil {
+			return fmt.Errorf("register admin device: %w", err)
+		}
+		log.Info("admin device registered (local-mode)", "device_urn", cfg.Admin.DeviceURN)
+		return nil
+	}
+
+	// Subsequent boots — ensure the sentinel is always admin + approved + not revoked.
+	needsUpdate := existing.ApprovalStatus != core.DeviceApprovalApproved ||
+		existing.Revoked ||
+		existing.Role != core.DeviceRoleAdmin
+	if needsUpdate {
+		existing.Role = core.DeviceRoleAdmin
+		existing.ApprovalStatus = core.DeviceApprovalApproved
+		existing.Revoked = false
+		if err := devRepo.UpdateDevice(ctx, existing); err != nil {
+			return fmt.Errorf("restore admin device: %w", err)
+		}
+		log.Warn("admin device restored to canonical state", "device_urn", cfg.Admin.DeviceURN)
+		return nil
+	}
+
+	log.Debug("admin device ok (local-mode)", "device_urn", cfg.Admin.DeviceURN)
+	return nil
 }
 
 // Run starts all configured servers and blocks until they all exit.
@@ -188,7 +273,7 @@ func (s *Server) initiateShutdown(ctx context.Context) {
 // gRPC server construction
 // ─────────────────────────────────────────────────────────────────────────────
 
-func buildGRPCServer(cfg *config.Config, r repo.NoteRepository, projRepo repo.ProjectRepository, log *slog.Logger) (*googlegrpc.Server, error) {
+func buildGRPCServer(cfg *config.Config, r repo.NoteRepository, projRepo repo.ProjectRepository, devRepo repo.DeviceRepository, log *slog.Logger) (*googlegrpc.Server, error) {
 	opts := []googlegrpc.ServerOption{
 		googlegrpc.UnaryInterceptor(loggingUnaryInterceptor(log)),
 		googlegrpc.StreamInterceptor(loggingStreamInterceptor(log)),
@@ -209,7 +294,7 @@ func buildGRPCServer(cfg *config.Config, r repo.NoteRepository, projRepo repo.Pr
 
 	// Register services.
 	pb.RegisterNoteServiceServer(srv, grpcsvc.NewNoteServiceServer(r, cfg.DefaultPageSize, cfg.MaxPageSize))
-	pb.RegisterDeviceServiceServer(srv, grpcsvc.NewDeviceServiceServer())
+	pb.RegisterDeviceServiceServer(srv, grpcsvc.NewDeviceServiceServer(devRepo))
 	pb.RegisterProjectServiceServer(srv, grpcsvc.NewProjectServiceServer(projRepo, cfg.DefaultPageSize, cfg.MaxPageSize))
 
 	// Enable server reflection so grpcurl and other tools work out of the box.

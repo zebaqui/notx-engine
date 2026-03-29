@@ -26,6 +26,8 @@ const (
 	prefixContent = "content:"
 	prefixProject = "proj:"
 	prefixFolder  = "folder:"
+	prefixUser    = "usr:"
+	prefixDevice  = "device:"
 )
 
 func contentKey(urn string) []byte {
@@ -455,6 +457,14 @@ func folderKey(urn string) []byte {
 	return []byte(prefixFolder + urn)
 }
 
+func userKey(urn string) []byte {
+	return []byte(prefixUser + urn)
+}
+
+func deviceKey(urn string) []byte {
+	return []byte(prefixDevice + urn)
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // ProjectEntry
 // ─────────────────────────────────────────────────────────────────────────────
@@ -666,5 +676,213 @@ func (idx *Index) ListFolders(projectURN string, includeDeleted bool, pageSize i
 func (idx *Index) DeleteFolder(urn string) error {
 	return idx.db.Update(func(txn *badger.Txn) error {
 		return txn.Delete(folderKey(urn))
+	})
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DeviceEntry
+// ─────────────────────────────────────────────────────────────────────────────
+
+// DeviceEntry is the record stored in the index for each registered device.
+type DeviceEntry struct {
+	URN            string `json:"urn"`
+	Name           string `json:"name"`
+	OwnerURN       string `json:"owner_urn"`
+	PublicKeyB64   string `json:"public_key_b64,omitempty"`
+	Role           string `json:"role"` // "client" or "admin"
+	ApprovalStatus string `json:"approval_status"`
+	Revoked        bool   `json:"revoked"`
+	RegisteredAt   string `json:"registered_at"` // RFC3339
+	LastSeenAt     string `json:"last_seen_at"`  // RFC3339, empty if never seen
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Device methods
+// ─────────────────────────────────────────────────────────────────────────────
+
+// UpsertDevice stores or updates a DeviceEntry. It does not check for prior
+// existence — callers must enforce uniqueness at the repository layer.
+func (idx *Index) UpsertDevice(entry DeviceEntry) error {
+	data, err := json.Marshal(entry)
+	if err != nil {
+		return fmt.Errorf("index: marshal device %q: %w", entry.URN, err)
+	}
+	return idx.db.Update(func(txn *badger.Txn) error {
+		return txn.Set(deviceKey(entry.URN), data)
+	})
+}
+
+// GetDevice returns the DeviceEntry for the given URN.
+// Returns (nil, nil) if not found.
+func (idx *Index) GetDevice(urn string) (*DeviceEntry, error) {
+	var entry DeviceEntry
+	found := false
+	err := idx.db.View(func(txn *badger.Txn) error {
+		item, err := txn.Get(deviceKey(urn))
+		if err == badger.ErrKeyNotFound {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("index: get device key: %w", err)
+		}
+		return item.Value(func(val []byte) error {
+			found = true
+			return json.Unmarshal(val, &entry)
+		})
+	})
+	if err != nil {
+		return nil, err
+	}
+	if !found {
+		return nil, nil
+	}
+	return &entry, nil
+}
+
+// ListDevices returns all DeviceEntries, optionally filtered by owner URN.
+// Revoked devices are included only when includeRevoked is true.
+func (idx *Index) ListDevices(ownerURN string, includeRevoked bool) ([]DeviceEntry, error) {
+	var results []DeviceEntry
+	err := idx.db.View(func(txn *badger.Txn) error {
+		iterOpts := badger.DefaultIteratorOptions
+		iterOpts.Prefix = []byte(prefixDevice)
+		it := txn.NewIterator(iterOpts)
+		defer it.Close()
+
+		for it.Seek([]byte(prefixDevice)); it.Valid(); it.Next() {
+			var entry DeviceEntry
+			if err := it.Item().Value(func(val []byte) error {
+				return json.Unmarshal(val, &entry)
+			}); err != nil {
+				return fmt.Errorf("index: unmarshal device: %w", err)
+			}
+			if !includeRevoked && entry.Revoked {
+				continue
+			}
+			if ownerURN != "" && entry.OwnerURN != ownerURN {
+				continue
+			}
+			results = append(results, entry)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return results, nil
+}
+
+// DeleteDevice removes the DeviceEntry for the given URN from the index.
+func (idx *Index) DeleteDevice(urn string) error {
+	return idx.db.Update(func(txn *badger.Txn) error {
+		return txn.Delete(deviceKey(urn))
+	})
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// UserEntry
+// ─────────────────────────────────────────────────────────────────────────────
+
+// UserEntry is the record stored in the index for each user.
+type UserEntry struct {
+	URN         string `json:"urn"`
+	DisplayName string `json:"display_name"`
+	Email       string `json:"email,omitempty"`
+	Deleted     bool   `json:"deleted"`
+	CreatedAt   string `json:"created_at"` // RFC3339
+	UpdatedAt   string `json:"updated_at"` // RFC3339
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// User methods
+// ─────────────────────────────────────────────────────────────────────────────
+
+// UpsertUser stores or updates a UserEntry.
+func (idx *Index) UpsertUser(entry UserEntry) error {
+	data, err := json.Marshal(entry)
+	if err != nil {
+		return fmt.Errorf("index: marshal user %q: %w", entry.URN, err)
+	}
+	return idx.db.Update(func(txn *badger.Txn) error {
+		return txn.Set(userKey(entry.URN), data)
+	})
+}
+
+// GetUser returns the UserEntry for the given URN.
+// Returns (nil, nil) if not found.
+func (idx *Index) GetUser(urn string) (*UserEntry, error) {
+	var entry UserEntry
+	found := false
+	err := idx.db.View(func(txn *badger.Txn) error {
+		item, err := txn.Get(userKey(urn))
+		if err == badger.ErrKeyNotFound {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("index: get user key: %w", err)
+		}
+		return item.Value(func(val []byte) error {
+			found = true
+			return json.Unmarshal(val, &entry)
+		})
+	})
+	if err != nil {
+		return nil, err
+	}
+	if !found {
+		return nil, nil
+	}
+	return &entry, nil
+}
+
+// ListUsers returns all UserEntries matching the given options.
+func (idx *Index) ListUsers(includeDeleted bool, pageSize int, pageToken string) ([]UserEntry, string, error) {
+	var results []UserEntry
+	err := idx.db.View(func(txn *badger.Txn) error {
+		iterOpts := badger.DefaultIteratorOptions
+		iterOpts.Prefix = []byte(prefixUser)
+		it := txn.NewIterator(iterOpts)
+		defer it.Close()
+
+		startKey := []byte(prefixUser)
+		if pageToken != "" {
+			startKey = []byte(prefixUser + pageToken)
+		}
+
+		for it.Seek(startKey); it.Valid(); it.Next() {
+			var entry UserEntry
+			if err := it.Item().Value(func(val []byte) error {
+				return json.Unmarshal(val, &entry)
+			}); err != nil {
+				return fmt.Errorf("index: unmarshal user: %w", err)
+			}
+			if !includeDeleted && entry.Deleted {
+				continue
+			}
+			if pageToken != "" && entry.URN == pageToken {
+				continue
+			}
+			results = append(results, entry)
+			if pageSize > 0 && len(results) >= pageSize {
+				break
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, "", err
+	}
+	nextToken := ""
+	if pageSize > 0 && len(results) == pageSize {
+		nextToken = results[len(results)-1].URN
+	}
+	return results, nextToken, nil
+}
+
+// DeleteUser removes the UserEntry for the given URN from the index.
+// Used only for hard deletes; soft-delete goes through UpsertUser with Deleted=true.
+func (idx *Index) DeleteUser(urn string) error {
+	return idx.db.Update(func(txn *badger.Txn) error {
+		return txn.Delete(userKey(urn))
 	})
 }

@@ -2,15 +2,22 @@ package http
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	stdlog "log"
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
+
+	"golang.org/x/crypto/bcrypt"
 
 	"github.com/zebaqui/notx-engine/core"
 	"github.com/zebaqui/notx-engine/internal/repo"
@@ -28,6 +35,7 @@ type Handler struct {
 	repo   repo.NoteRepository
 	proj   repo.ProjectRepository
 	dev    repo.DeviceRepository
+	users  repo.UserRepository
 	log    *slog.Logger
 	mux    *http.ServeMux
 	server *http.Server
@@ -35,14 +43,15 @@ type Handler struct {
 
 // New creates a new Handler, registers all routes, and returns it.
 // The caller must call Serve to start accepting connections.
-func New(cfg *config.Config, r repo.NoteRepository, proj repo.ProjectRepository, dev repo.DeviceRepository, log *slog.Logger) *Handler {
+func New(cfg *config.Config, r repo.NoteRepository, proj repo.ProjectRepository, dev repo.DeviceRepository, users repo.UserRepository, log *slog.Logger) *Handler {
 	h := &Handler{
-		cfg:  cfg,
-		repo: r,
-		proj: proj,
-		dev:  dev,
-		log:  log,
-		mux:  http.NewServeMux(),
+		cfg:   cfg,
+		repo:  r,
+		proj:  proj,
+		dev:   dev,
+		users: users,
+		log:   log,
+		mux:   http.NewServeMux(),
 	}
 	h.routes()
 	return h
@@ -55,6 +64,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // Serve starts the HTTP server on the configured address. It blocks until
 // the server shuts down. Call Shutdown to trigger a graceful stop.
+//
+// If TLS is configured (TLSCertFile + TLSKeyFile) the listener is wrapped with
+// a tls.Config that enforces TLS 1.3 as the minimum version. When mTLS is also
+// configured (TLSCAFile) the server additionally requires and verifies a client
+// certificate signed by that CA.
 func (h *Handler) Serve() error {
 	h.server = &http.Server{
 		Addr:         h.cfg.HTTPAddr(),
@@ -62,6 +76,10 @@ func (h *Handler) Serve() error {
 		ReadTimeout:  15 * time.Second,
 		WriteTimeout: 30 * time.Second,
 		IdleTimeout:  60 * time.Second,
+		// Suppress the default "http: TLS handshake error" log lines that
+		// http.Server emits for every rejected client connection. Those are
+		// expected during mTLS enforcement and would pollute test output.
+		ErrorLog: newDiscardLogger(),
 	}
 
 	ln, err := net.Listen("tcp", h.cfg.HTTPAddr())
@@ -69,12 +87,62 @@ func (h *Handler) Serve() error {
 		return fmt.Errorf("http: listen on %s: %w", h.cfg.HTTPAddr(), err)
 	}
 
-	h.log.Info("http server listening", "addr", h.cfg.HTTPAddr())
+	if h.cfg.TLSEnabled() {
+		tlsCfg, err := buildTLSConfig(h.cfg)
+		if err != nil {
+			return fmt.Errorf("http: build TLS config: %w", err)
+		}
+		ln = tls.NewListener(ln, tlsCfg)
+		h.log.Info("http server listening",
+			"addr", h.cfg.HTTPAddr(),
+			"tls", true,
+			"mtls", h.cfg.MTLSEnabled(),
+		)
+	} else {
+		h.log.Info("http server listening", "addr", h.cfg.HTTPAddr())
+	}
 
 	if err := h.server.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return fmt.Errorf("http: serve: %w", err)
 	}
 	return nil
+}
+
+// newDiscardLogger returns a *log.Logger that silently discards all output.
+// It is used as http.Server.ErrorLog to suppress expected TLS handshake errors
+// (e.g. rejected client connections during mTLS enforcement) from polluting
+// logs and test output.
+func newDiscardLogger() *stdlog.Logger {
+	return stdlog.New(io.Discard, "", 0)
+}
+
+// buildTLSConfig constructs a *tls.Config from the server configuration.
+// It mirrors the logic in internal/server/grpc.buildTransportCredentials.
+func buildTLSConfig(cfg *config.Config) (*tls.Config, error) {
+	cert, err := tls.LoadX509KeyPair(cfg.TLSCertFile, cfg.TLSKeyFile)
+	if err != nil {
+		return nil, fmt.Errorf("load server cert/key: %w", err)
+	}
+
+	tlsCfg := &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		MinVersion:   tls.VersionTLS13,
+	}
+
+	if cfg.MTLSEnabled() {
+		caPEM, err := os.ReadFile(cfg.TLSCAFile)
+		if err != nil {
+			return nil, fmt.Errorf("read CA cert %q: %w", cfg.TLSCAFile, err)
+		}
+		caPool := x509.NewCertPool()
+		if !caPool.AppendCertsFromPEM(caPEM) {
+			return nil, fmt.Errorf("parse CA cert %q: no valid PEM blocks found", cfg.TLSCAFile)
+		}
+		tlsCfg.ClientCAs = caPool
+		tlsCfg.ClientAuth = tls.RequireAndVerifyClientCert
+	}
+
+	return tlsCfg, nil
 }
 
 // Shutdown gracefully drains in-flight requests and stops the server.
@@ -90,23 +158,29 @@ func (h *Handler) Shutdown(ctx context.Context) error {
 // ─────────────────────────────────────────────────────────────────────────────
 
 func (h *Handler) routes() {
+	// ── Data routes — require an identified, approved, non-revoked device ────
 	// Notes collection
-	h.mux.HandleFunc("/v1/notes", h.withMiddleware(h.routeNotes))
+	h.mux.HandleFunc("/v1/notes", h.withDeviceAuthMiddleware(h.routeNotes))
 	// Single note
-	h.mux.HandleFunc("/v1/notes/", h.withMiddleware(h.routeNote))
+	h.mux.HandleFunc("/v1/notes/", h.withDeviceAuthMiddleware(h.routeNote))
 	// Events sub-resource
-	h.mux.HandleFunc("/v1/events", h.withMiddleware(h.routeAppendEvent))
+	h.mux.HandleFunc("/v1/events", h.withDeviceAuthMiddleware(h.routeAppendEvent))
 	// Search
-	h.mux.HandleFunc("/v1/search", h.withMiddleware(h.routeSearch))
+	h.mux.HandleFunc("/v1/search", h.withDeviceAuthMiddleware(h.routeSearch))
 	// Projects
-	h.mux.HandleFunc("/v1/projects", h.withMiddleware(h.routeProjects))
-	h.mux.HandleFunc("/v1/projects/", h.withMiddleware(h.routeProject))
+	h.mux.HandleFunc("/v1/projects", h.withDeviceAuthMiddleware(h.routeProjects))
+	h.mux.HandleFunc("/v1/projects/", h.withDeviceAuthMiddleware(h.routeProject))
 	// Folders
-	h.mux.HandleFunc("/v1/folders", h.withMiddleware(h.routeFolders))
-	h.mux.HandleFunc("/v1/folders/", h.withMiddleware(h.routeFolder))
-	// Devices
+	h.mux.HandleFunc("/v1/folders", h.withDeviceAuthMiddleware(h.routeFolders))
+	h.mux.HandleFunc("/v1/folders/", h.withDeviceAuthMiddleware(h.routeFolder))
+
+	// ── Device & user management — open (no device auth required) ───────────
+	// Devices (registration is open so new devices can onboard themselves)
 	h.mux.HandleFunc("/v1/devices", h.withMiddleware(h.routeDevices))
 	h.mux.HandleFunc("/v1/devices/", h.withMiddleware(h.routeDevice))
+	// Users
+	h.mux.HandleFunc("/v1/users", h.withMiddleware(h.routeUsers))
+	h.mux.HandleFunc("/v1/users/", h.withMiddleware(h.routeUser))
 	// Health / readiness probes
 	h.mux.HandleFunc("/healthz", h.handleHealthz)
 	h.mux.HandleFunc("/readyz", h.handleReadyz)
@@ -1396,11 +1470,60 @@ func (h *Handler) routeDevices(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) routeDevice(w http.ResponseWriter, r *http.Request) {
-	urn := strings.TrimPrefix(r.URL.Path, "/v1/devices/")
-	if urn == "" {
+	// Strip the /v1/devices/ prefix to get the remaining path segment(s).
+	// After stripping, the layout is one of:
+	//   <urn>                     → single device operations
+	//   <urn>/<action>            → e.g. approve, reject, status
+	//   <urn>/<action>/<sub>      → e.g. status/stream
+	//
+	// We split on the FIRST slash so the URN (which never contains a slash)
+	// is always the left segment and everything to the right is the sub-path.
+	trimmed := strings.TrimPrefix(r.URL.Path, "/v1/devices/")
+	if trimmed == "" {
 		writeError(w, http.StatusBadRequest, "device URN is required")
 		return
 	}
+
+	// Check for action sub-resources.
+	if idx := strings.Index(trimmed, "/"); idx != -1 {
+		urn := trimmed[:idx]
+		subPath := trimmed[idx+1:] // everything after the first slash
+		if urn == "" {
+			writeError(w, http.StatusBadRequest, "device URN is required")
+			return
+		}
+		switch subPath {
+		case "status":
+			if r.Method != http.MethodGet {
+				writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+				return
+			}
+			h.handleGetDeviceStatus(w, r, urn)
+		case "status/stream":
+			if r.Method != http.MethodGet {
+				writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+				return
+			}
+			h.handleStreamDeviceStatus(w, r, urn)
+		case "approve":
+			if r.Method != http.MethodPatch {
+				writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+				return
+			}
+			h.handleApproveDevice(w, r, urn)
+		case "reject":
+			if r.Method != http.MethodPatch {
+				writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+				return
+			}
+			h.handleRejectDevice(w, r, urn)
+		default:
+			writeError(w, http.StatusNotFound, "unknown device action: "+subPath)
+		}
+		return
+	}
+
+	urn := trimmed
 	switch r.Method {
 	case http.MethodGet:
 		h.handleGetDevice(w, r, urn)
@@ -1414,20 +1537,23 @@ func (h *Handler) routeDevice(w http.ResponseWriter, r *http.Request) {
 }
 
 type deviceJSON struct {
-	URN          string `json:"urn"`
-	Name         string `json:"name"`
-	OwnerURN     string `json:"owner_urn"`
-	PublicKeyB64 string `json:"public_key_b64"`
-	Revoked      bool   `json:"revoked,omitempty"`
-	RegisteredAt string `json:"registered_at"`
-	LastSeenAt   string `json:"last_seen_at,omitempty"`
+	URN            string `json:"urn"`
+	Name           string `json:"name"`
+	OwnerURN       string `json:"owner_urn"`
+	PublicKeyB64   string `json:"public_key_b64"`
+	Role           string `json:"role"`
+	ApprovalStatus string `json:"approval_status"`
+	Revoked        bool   `json:"revoked,omitempty"`
+	RegisteredAt   string `json:"registered_at"`
+	LastSeenAt     string `json:"last_seen_at,omitempty"`
 }
 
 type registerDeviceRequest struct {
-	URN          string `json:"urn"`
-	Name         string `json:"name"`
-	OwnerURN     string `json:"owner_urn"`
-	PublicKeyB64 string `json:"public_key_b64"`
+	URN             string `json:"urn"`
+	Name            string `json:"name"`
+	OwnerURN        string `json:"owner_urn"`
+	PublicKeyB64    string `json:"public_key_b64"`
+	AdminPassphrase string `json:"admin_passphrase,omitempty"`
 }
 
 type updateDeviceRequest struct {
@@ -1440,13 +1566,19 @@ type listDevicesResponse struct {
 }
 
 func deviceToJSON(d *core.Device) *deviceJSON {
+	role := string(d.Role)
+	if role == "" {
+		role = string(core.DeviceRoleClient)
+	}
 	j := &deviceJSON{
-		URN:          d.URN.String(),
-		Name:         d.Name,
-		OwnerURN:     d.OwnerURN.String(),
-		PublicKeyB64: d.PublicKeyB64,
-		Revoked:      d.Revoked,
-		RegisteredAt: d.RegisteredAt.UTC().Format(time.RFC3339),
+		URN:            d.URN.String(),
+		Name:           d.Name,
+		OwnerURN:       d.OwnerURN.String(),
+		PublicKeyB64:   d.PublicKeyB64,
+		Role:           role,
+		ApprovalStatus: string(d.ApprovalStatus),
+		Revoked:        d.Revoked,
+		RegisteredAt:   d.RegisteredAt.UTC().Format(time.RFC3339),
 	}
 	if !d.LastSeenAt.IsZero() {
 		j.LastSeenAt = d.LastSeenAt.UTC().Format(time.RFC3339)
@@ -1477,6 +1609,13 @@ func (h *Handler) handleListDevices(w http.ResponseWriter, r *http.Request) {
 }
 
 // POST /v1/devices
+//
+// admin_passphrase (optional): when the server has an AdminPassphraseHash
+// configured and the supplied plaintext matches, the device is registered
+// with role=admin and approval_status=approved immediately, bypassing the
+// normal approval flow. An incorrect passphrase is silently ignored and the
+// device is registered as a normal client — no information about passphrase
+// validity is leaked in the response.
 func (h *Handler) handleRegisterDevice(w http.ResponseWriter, r *http.Request) {
 	var req registerDeviceRequest
 	if err := decodeJSON(r, &req); err != nil {
@@ -1507,13 +1646,40 @@ func (h *Handler) handleRegisterDevice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Determine role and initial approval status.
+	//
+	// Admin path: a passphrase hash is configured AND the request supplies a
+	// passphrase that matches it → role=admin, immediately approved.
+	//
+	// Client path (default): no passphrase, wrong passphrase, or no hash
+	// configured → role=client, approval follows the onboarding config.
+	role := core.DeviceRoleClient
+	approvalStatus := core.DeviceApprovalPending
+	if h.cfg.DeviceOnboarding.AutoApprove {
+		approvalStatus = core.DeviceApprovalApproved
+	}
+
+	if h.cfg.Admin.AdminPassphraseHash != "" && req.AdminPassphrase != "" {
+		if err := bcrypt.CompareHashAndPassword(
+			[]byte(h.cfg.Admin.AdminPassphraseHash),
+			[]byte(req.AdminPassphrase),
+		); err == nil {
+			role = core.DeviceRoleAdmin
+			approvalStatus = core.DeviceApprovalApproved
+		}
+		// Wrong passphrase: fall through silently as a regular client.
+		// We do not reveal whether the passphrase was wrong.
+	}
+
 	now := time.Now().UTC()
 	d := &core.Device{
-		URN:          deviceURN,
-		Name:         req.Name,
-		OwnerURN:     ownerURN,
-		PublicKeyB64: req.PublicKeyB64,
-		RegisteredAt: now,
+		URN:            deviceURN,
+		Name:           req.Name,
+		OwnerURN:       ownerURN,
+		PublicKeyB64:   req.PublicKeyB64,
+		Role:           role,
+		ApprovalStatus: approvalStatus,
+		RegisteredAt:   now,
 	}
 
 	if err := h.dev.RegisterDevice(r.Context(), d); err != nil {
@@ -1524,6 +1690,17 @@ func (h *Handler) handleRegisterDevice(w http.ResponseWriter, r *http.Request) {
 		h.internalError(w, r, "register device", err)
 		return
 	}
+
+	log := loggerFromCtx(r.Context(), h.log)
+	log.Info("device registered",
+		"device_urn", d.URN.String(),
+		"device_name", d.Name,
+		"owner_urn", d.OwnerURN.String(),
+		"role", string(d.Role),
+		"approval_status", string(d.ApprovalStatus),
+		"auto_approve", h.cfg.DeviceOnboarding.AutoApprove,
+	)
+
 	writeJSON(w, http.StatusCreated, deviceToJSON(d))
 }
 
@@ -1593,4 +1770,317 @@ func (h *Handler) handleRevokeDevice(w http.ResponseWriter, r *http.Request, urn
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"revoked": true})
+}
+
+// GET /v1/devices/:urn/status
+//
+// Returns a lightweight approval status summary for the device identified by
+// :urn. This endpoint is intentionally open — it does NOT require an
+// X-Device-ID header — so a freshly registered device can poll its own
+// approval state before it has been granted data access.
+type deviceStatusResponse struct {
+	URN            string `json:"urn"`
+	ApprovalStatus string `json:"approval_status"`
+	Revoked        bool   `json:"revoked,omitempty"`
+	// Approved is a convenience boolean derived from ApprovalStatus and Revoked.
+	// true only when approval_status == "approved" AND revoked == false.
+	Approved bool `json:"approved"`
+}
+
+func (h *Handler) handleGetDeviceStatus(w http.ResponseWriter, r *http.Request, urn string) {
+	d, err := h.dev.GetDevice(r.Context(), urn)
+	if err != nil {
+		if errors.Is(err, repo.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "device not found")
+			return
+		}
+		h.internalError(w, r, "get device status", err)
+		return
+	}
+
+	approved := d.ApprovalStatus == core.DeviceApprovalApproved && !d.Revoked
+	writeJSON(w, http.StatusOK, &deviceStatusResponse{
+		URN:            d.URN.String(),
+		ApprovalStatus: string(d.ApprovalStatus),
+		Revoked:        d.Revoked,
+		Approved:       approved,
+	})
+}
+
+// PATCH /v1/devices/:urn/approve
+func (h *Handler) handleApproveDevice(w http.ResponseWriter, r *http.Request, urn string) {
+	d, err := h.dev.GetDevice(r.Context(), urn)
+	if err != nil {
+		if errors.Is(err, repo.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "device not found")
+			return
+		}
+		h.internalError(w, r, "get device for approval", err)
+		return
+	}
+
+	if d.Revoked {
+		writeError(w, http.StatusConflict, "cannot approve a revoked device")
+		return
+	}
+	if d.ApprovalStatus == core.DeviceApprovalRejected {
+		writeError(w, http.StatusConflict, "cannot approve a rejected device; re-register the device instead")
+		return
+	}
+
+	d.ApprovalStatus = core.DeviceApprovalApproved
+	if err := h.dev.UpdateDevice(r.Context(), d); err != nil {
+		if errors.Is(err, repo.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "device not found")
+			return
+		}
+		h.internalError(w, r, "approve device", err)
+		return
+	}
+
+	log := loggerFromCtx(r.Context(), h.log)
+	log.Info("device approved", "device_urn", urn)
+	writeJSON(w, http.StatusOK, deviceToJSON(d))
+}
+
+// PATCH /v1/devices/:urn/reject
+func (h *Handler) handleRejectDevice(w http.ResponseWriter, r *http.Request, urn string) {
+	d, err := h.dev.GetDevice(r.Context(), urn)
+	if err != nil {
+		if errors.Is(err, repo.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "device not found")
+			return
+		}
+		h.internalError(w, r, "get device for rejection", err)
+		return
+	}
+
+	if d.Revoked {
+		writeError(w, http.StatusConflict, "cannot reject a revoked device")
+		return
+	}
+
+	d.ApprovalStatus = core.DeviceApprovalRejected
+	if err := h.dev.UpdateDevice(r.Context(), d); err != nil {
+		if errors.Is(err, repo.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "device not found")
+			return
+		}
+		h.internalError(w, r, "reject device", err)
+		return
+	}
+
+	log := loggerFromCtx(r.Context(), h.log)
+	log.Info("device rejected", "device_urn", urn)
+	writeJSON(w, http.StatusOK, deviceToJSON(d))
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Users
+// ─────────────────────────────────────────────────────────────────────────────
+
+func (h *Handler) routeUsers(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		h.handleListUsers(w, r)
+	case http.MethodPost:
+		h.handleCreateUser(w, r)
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+func (h *Handler) routeUser(w http.ResponseWriter, r *http.Request) {
+	urn := strings.TrimPrefix(r.URL.Path, "/v1/users/")
+	if urn == "" {
+		writeError(w, http.StatusBadRequest, "user URN is required")
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		h.handleGetUser(w, r, urn)
+	case http.MethodPatch:
+		h.handleUpdateUser(w, r, urn)
+	case http.MethodDelete:
+		h.handleDeleteUser(w, r, urn)
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+type userJSON struct {
+	URN         string `json:"urn"`
+	DisplayName string `json:"display_name"`
+	Email       string `json:"email,omitempty"`
+	Deleted     bool   `json:"deleted,omitempty"`
+	CreatedAt   string `json:"created_at"`
+	UpdatedAt   string `json:"updated_at"`
+}
+
+type createUserRequest struct {
+	URN         string `json:"urn"`
+	DisplayName string `json:"display_name"`
+	Email       string `json:"email,omitempty"`
+}
+
+type updateUserRequest struct {
+	DisplayName *string `json:"display_name,omitempty"`
+	Email       *string `json:"email,omitempty"`
+	Deleted     *bool   `json:"deleted,omitempty"`
+}
+
+type listUsersResponse struct {
+	Users         []*userJSON `json:"users"`
+	NextPageToken string      `json:"next_page_token,omitempty"`
+}
+
+func userToJSON(u *core.User) *userJSON {
+	return &userJSON{
+		URN:         u.URN.String(),
+		DisplayName: u.DisplayName,
+		Email:       u.Email,
+		Deleted:     u.Deleted,
+		CreatedAt:   u.CreatedAt.UTC().Format(time.RFC3339),
+		UpdatedAt:   u.UpdatedAt.UTC().Format(time.RFC3339),
+	}
+}
+
+// GET /v1/users
+func (h *Handler) handleListUsers(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	includeDeleted := q.Get("include_deleted") == "true"
+	pageSize := 0
+	if s := q.Get("page_size"); s != "" {
+		fmt.Sscan(s, &pageSize)
+	}
+	pageToken := q.Get("page_token")
+
+	result, err := h.users.ListUsers(r.Context(), repo.UserListOptions{
+		IncludeDeleted: includeDeleted,
+		PageSize:       pageSize,
+		PageToken:      pageToken,
+	})
+	if err != nil {
+		h.internalError(w, r, "list users", err)
+		return
+	}
+
+	out := make([]*userJSON, len(result.Users))
+	for i, u := range result.Users {
+		out[i] = userToJSON(u)
+	}
+	writeJSON(w, http.StatusOK, &listUsersResponse{Users: out, NextPageToken: result.NextPageToken})
+}
+
+// POST /v1/users
+func (h *Handler) handleCreateUser(w http.ResponseWriter, r *http.Request) {
+	var req createUserRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if req.URN == "" {
+		writeError(w, http.StatusBadRequest, "urn is required")
+		return
+	}
+	if req.DisplayName == "" {
+		writeError(w, http.StatusBadRequest, "display_name is required")
+		return
+	}
+
+	userURN, err := core.ParseURN(req.URN)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid URN: "+err.Error())
+		return
+	}
+	if userURN.ObjectType != core.ObjectTypeUser {
+		writeError(w, http.StatusBadRequest, "URN must be of type usr")
+		return
+	}
+
+	now := time.Now().UTC()
+	u := &core.User{
+		URN:         userURN,
+		DisplayName: req.DisplayName,
+		Email:       req.Email,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+
+	if err := h.users.CreateUser(r.Context(), u); err != nil {
+		if errors.Is(err, repo.ErrAlreadyExists) {
+			writeError(w, http.StatusConflict, "user already exists")
+			return
+		}
+		h.internalError(w, r, "create user", err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, userToJSON(u))
+}
+
+// GET /v1/users/:urn
+func (h *Handler) handleGetUser(w http.ResponseWriter, r *http.Request, urn string) {
+	u, err := h.users.GetUser(r.Context(), urn)
+	if err != nil {
+		if errors.Is(err, repo.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "user not found")
+			return
+		}
+		h.internalError(w, r, "get user", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, userToJSON(u))
+}
+
+// PATCH /v1/users/:urn
+func (h *Handler) handleUpdateUser(w http.ResponseWriter, r *http.Request, urn string) {
+	var req updateUserRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	u, err := h.users.GetUser(r.Context(), urn)
+	if err != nil {
+		if errors.Is(err, repo.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "user not found")
+			return
+		}
+		h.internalError(w, r, "get user for update", err)
+		return
+	}
+
+	if req.DisplayName != nil {
+		u.DisplayName = *req.DisplayName
+	}
+	if req.Email != nil {
+		u.Email = *req.Email
+	}
+	if req.Deleted != nil {
+		u.Deleted = *req.Deleted
+	}
+	u.UpdatedAt = time.Now().UTC()
+
+	if err := h.users.UpdateUser(r.Context(), u); err != nil {
+		if errors.Is(err, repo.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "user not found")
+			return
+		}
+		h.internalError(w, r, "update user", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, userToJSON(u))
+}
+
+// DELETE /v1/users/:urn
+func (h *Handler) handleDeleteUser(w http.ResponseWriter, r *http.Request, urn string) {
+	if err := h.users.DeleteUser(r.Context(), urn); err != nil {
+		if errors.Is(err, repo.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "user not found")
+			return
+		}
+		h.internalError(w, r, "delete user", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"deleted": true})
 }

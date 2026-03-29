@@ -8,6 +8,38 @@ Entry point: `internal/cli/server.go` (cobra command) → `internal/server/serve
 
 ---
 
+## First Run — Auto-Init
+
+When `notx server` is run for the first time on a machine with no existing configuration, it automatically initialises everything needed before starting:
+
+| Step                  | What happens                                                                                                                                                                                                                                                                                       |
+| --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **1. Config file**    | `~/.notx/config.json` is written from built-in defaults. A notice is printed to stdout.                                                                                                                                                                                                            |
+| **2. Data directory** | `~/.notx/data/notes/` and `~/.notx/data/index/` are created (mode `0755`).                                                                                                                                                                                                                         |
+| **3. Admin device**   | A well-known admin device (`notx:device:00000000-0000-0000-0000-000000000000`) is registered with `approval_status: approved`. This device is restored to approved on every subsequent startup, so the admin UI can always reach data endpoints regardless of the `--device-auto-approve` setting. |
+
+All three steps are **idempotent** — running `notx server` a second time is safe and produces no duplicates or overwrites.
+
+### First-run output
+
+```
+  ✓  First run — created default config at /Users/you/.notx/config.json
+       Run notx config to customise it.
+
+time=... level=INFO msg="admin device registered" device_urn=notx:device:00000000-0000-0000-0000-000000000000
+time=... level=INFO msg="notx server starting" http=true http_addr=:4060 grpc=true grpc_addr=:50051 ...
+```
+
+After first run you can immediately start the admin UI on the same machine:
+
+```bash
+notx admin          # serves on :9090, proxies API to localhost:4060
+```
+
+No manual configuration is required for a local single-machine setup.
+
+---
+
 ## Configuration
 
 All server configuration is expressed in a single struct defined in `internal/server/config/config.go`:
@@ -27,39 +59,56 @@ type Config struct {
     MaxPageSize     int
     DefaultPageSize int
     LogLevel        string
+    DeviceOnboarding DeviceOnboardingConfig
+    Admin            AdminConfig
 }
 ```
 
 Defaults are provided by `Config.Default()`:
 
-| Field             | Default             | Notes                                              |
-| ----------------- | ------------------- | -------------------------------------------------- |
-| `EnableHTTP`      | `true`              |                                                    |
-| `EnableGRPC`      | `true`              |                                                    |
-| `HTTPPort`        | `4060`              |                                                    |
-| `GRPCPort`        | `50051`             |                                                    |
-| `Host`            | `""` (all interfaces) | Empty string binds to `0.0.0.0`                  |
-| `DataDir`         | `~/.notx/data`      |                                                    |
-| `TLSCertFile`     | `""`                | Empty = plaintext (dev only)                       |
-| `TLSKeyFile`      | `""`                |                                                    |
-| `TLSCAFile`       | `""`                | Non-empty enables mTLS                             |
-| `ShutdownTimeout` | `30s`               |                                                    |
-| `MaxPageSize`     | `200`               |                                                    |
-| `DefaultPageSize` | `50`                |                                                    |
-| `LogLevel`        | `"info"`            |                                                    |
+| Field                          | Default                                            | Notes                                   |
+| ------------------------------ | -------------------------------------------------- | --------------------------------------- |
+| `EnableHTTP`                   | `true`                                             |                                         |
+| `EnableGRPC`                   | `true`                                             |                                         |
+| `HTTPPort`                     | `4060`                                             |                                         |
+| `GRPCPort`                     | `50051`                                            |                                         |
+| `Host`                         | `""` (all interfaces)                              | Empty string binds to `0.0.0.0`         |
+| `DataDir`                      | `~/.notx/data`                                     |                                         |
+| `TLSCertFile`                  | `""`                                               | Empty = plaintext (dev only)            |
+| `TLSKeyFile`                   | `""`                                               |                                         |
+| `TLSCAFile`                    | `""`                                               | Non-empty enables mTLS                  |
+| `ShutdownTimeout`              | `30s`                                              |                                         |
+| `MaxPageSize`                  | `200`                                              |                                         |
+| `DefaultPageSize`              | `50`                                               |                                         |
+| `LogLevel`                     | `"info"`                                           |                                         |
+| `DeviceOnboarding.AutoApprove` | `false`                                            | Set `true` to skip manual approval step |
+| `Admin.DeviceURN`              | `notx:device:00000000-0000-0000-0000-000000000000` | Built-in admin device; always approved  |
+| `Admin.OwnerURN`               | `notx:usr:00000000-0000-0000-0000-000000000000`    | Owner of the admin device               |
 
 ### Config File Seeding
 
-Before cobra parses CLI flags, the config file at `~/.notx/config.yml` is read by `internal/clientconfig`. The `server.*` section of that file seeds the cobra flag defaults for `notx server`. CLI flags always win over config file values.
+Before cobra parses CLI flags, the config file at `~/.notx/config.json` is read by `internal/clientconfig`. The `server.*` section of that file seeds the cobra flag defaults for `notx server`. CLI flags always win over config file values.
 
-Example `~/.notx/config.yml`:
+If the file does not exist, `notx server` creates it from built-in defaults before doing anything else (see [First Run](#first-run--auto-init) above).
 
-```yaml
-server:
-  http_port: 4060
-  grpc_port: 50051
-  data_dir: ~/.notx/data
-  log_level: info
+Example `~/.notx/config.json`:
+
+```json
+{
+  "server": {
+    "http_addr": ":4060",
+    "grpc_addr": ":50051",
+    "enable_http": true,
+    "enable_grpc": true,
+    "shutdown_timeout_sec": 30
+  },
+  "storage": {
+    "data_dir": "/Users/you/.notx/data"
+  },
+  "log": {
+    "level": "info"
+  }
+}
 ```
 
 Set persistent values interactively with `notx config`.
@@ -114,14 +163,14 @@ A mutable JSON file updated on every write operation: `Create`, `Update`, `Appen
 
 ```json
 {
-  "urn":           "notx:note:<uuid>",
-  "name":          "my-note",
-  "note_type":     "normal",
-  "project_urn":   "notx:proj:<uuid>",
-  "folder_urn":    null,
-  "deleted":       false,
-  "created_at":    "2025-01-01T00:00:00Z",
-  "updated_at":    "2025-01-02T12:00:00Z",
+  "urn": "notx:note:<uuid>",
+  "name": "my-note",
+  "note_type": "normal",
+  "project_urn": "notx:proj:<uuid>",
+  "folder_urn": null,
+  "deleted": false,
+  "created_at": "2025-01-01T00:00:00Z",
+  "updated_at": "2025-01-02T12:00:00Z",
   "head_sequence": 7
 }
 ```
@@ -134,12 +183,12 @@ An append-only newline-delimited JSON file. One line per event. Written by `appe
 
 ```json
 {
-  "urn":        "notx:event:<uuid>",
-  "note_urn":   "notx:note:<uuid>",
-  "sequence":   1,
+  "urn": "notx:event:<uuid>",
+  "note_urn": "notx:note:<uuid>",
+  "sequence": 1,
   "author_urn": "notx:usr:<uuid>",
   "created_at": "2025-01-01T00:00:00Z",
-  "entries":    [{"ln": 1, "op": "insert", "c": "Hello, world"}]
+  "entries": [{ "ln": 1, "op": "insert", "c": "Hello, world" }]
 }
 ```
 
@@ -153,11 +202,11 @@ A Badger v4 embedded key-value store in `<dataDir>/index/`. It is derived from t
 
 **Key schema** (all keys are plain `[]byte`):
 
-| Key pattern               | Value                              | Purpose                                  |
-| ------------------------- | ---------------------------------- | ---------------------------------------- |
-| `note:<urn>`              | JSON-encoded `IndexEntry`          | Metadata for list operations             |
-| `name:<urn>`              | Note name string                   | Name lookup by URN                       |
-| `search:<token>:<urn>`    | Empty                              | Inverted index for full-text search      |
+| Key pattern            | Value                     | Purpose                             |
+| ---------------------- | ------------------------- | ----------------------------------- |
+| `note:<urn>`           | JSON-encoded `IndexEntry` | Metadata for list operations        |
+| `name:<urn>`           | Note name string          | Name lookup by URN                  |
+| `search:<token>:<urn>` | Empty                     | Inverted index for full-text search |
 
 **Tokenisation** (applied at write time to note names and content):
 
@@ -173,12 +222,12 @@ Each surviving token produces one `search:<token>:<urn>` key. A search query tok
 
 ### Artefact Roles — Summary
 
-| Artefact        | Mutable | Source of truth for             |
-| --------------- | ------- | ------------------------------- |
-| `.notx` stub    | No      | Human-readable creation record  |
-| `.meta.json`    | Yes     | Live header (name, flags, seq)  |
-| `.jsonl` journal | Yes    | Complete event history, content |
-| Badger index    | Yes     | List and search queries         |
+| Artefact         | Mutable | Source of truth for             |
+| ---------------- | ------- | ------------------------------- |
+| `.notx` stub     | No      | Human-readable creation record  |
+| `.meta.json`     | Yes     | Live header (name, flags, seq)  |
+| `.jsonl` journal | Yes     | Complete event history, content |
+| Badger index     | Yes     | List and search queries         |
 
 None of these are redundant. Removing any one of them breaks a distinct code path.
 
@@ -190,18 +239,18 @@ Implemented in `internal/server/http/handler.go`. Listens on `Host:HTTPPort` (de
 
 ### Routes
 
-| Method | Path                      | Description                              |
-| ------ | ------------------------- | ---------------------------------------- |
-| `GET`  | `/v1/notes`               | List notes (paginated)                   |
-| `POST` | `/v1/notes`               | Create a note                            |
-| `GET`  | `/v1/notes/{urn}`         | Get a note by URN                        |
-| `PUT`  | `/v1/notes/{urn}`         | Update a note                            |
-| `DELETE` | `/v1/notes/{urn}`       | Delete a note (soft-delete)              |
-| `POST` | `/v1/events`              | Append an event to a note                |
-| `GET`  | `/v1/notes/{urn}/events`  | Stream a note's event history            |
-| `GET`  | `/v1/search?q=...`        | Full-text search across notes            |
-| `GET`  | `/healthz`                | Liveness probe → `{"status":"ok"}`       |
-| `GET`  | `/readyz`                 | Readiness probe → `{"status":"ready"}`   |
+| Method   | Path                     | Description                            |
+| -------- | ------------------------ | -------------------------------------- |
+| `GET`    | `/v1/notes`              | List notes (paginated)                 |
+| `POST`   | `/v1/notes`              | Create a note                          |
+| `GET`    | `/v1/notes/{urn}`        | Get a note by URN                      |
+| `PUT`    | `/v1/notes/{urn}`        | Update a note                          |
+| `DELETE` | `/v1/notes/{urn}`        | Delete a note (soft-delete)            |
+| `POST`   | `/v1/events`             | Append an event to a note              |
+| `GET`    | `/v1/notes/{urn}/events` | Stream a note's event history          |
+| `GET`    | `/v1/search?q=...`       | Full-text search across notes          |
+| `GET`    | `/healthz`               | Liveness probe → `{"status":"ok"}`     |
+| `GET`    | `/readyz`                | Readiness probe → `{"status":"ready"}` |
 
 All endpoints set and expect `Content-Type: application/json`.
 
@@ -212,7 +261,7 @@ All endpoints set and expect `Content-Type: application/json`.
 All error responses use a consistent envelope:
 
 ```json
-{"error": "note not found"}
+{ "error": "note not found" }
 ```
 
 HTTP status codes follow standard semantics: `400` for malformed input, `404` for missing resources, `409` for conflicts, `500` for internal errors.
@@ -236,27 +285,27 @@ Proto definition: `internal/server/proto/notx.proto` (package `notx.v1`).
 
 **`NoteService`**:
 
-| RPC              | Type          | Description                             |
-| ---------------- | ------------- | --------------------------------------- |
-| `GetNote`        | Unary         | Fetch a single note by URN              |
-| `ListNotes`      | Unary         | Paginated list with optional filters    |
-| `CreateNote`     | Unary         | Create a new note                       |
-| `DeleteNote`     | Unary         | Soft-delete a note                      |
-| `AppendEvent`    | Unary         | Append an event to a note               |
-| `StreamEvents`   | Server-stream | Stream the event history for a note     |
-| `SearchNotes`    | Unary         | Full-text search                        |
-| `ShareSecureNote`| Unary         | Share a secure note with a device       |
+| RPC               | Type          | Description                          |
+| ----------------- | ------------- | ------------------------------------ |
+| `GetNote`         | Unary         | Fetch a single note by URN           |
+| `ListNotes`       | Unary         | Paginated list with optional filters |
+| `CreateNote`      | Unary         | Create a new note                    |
+| `DeleteNote`      | Unary         | Soft-delete a note                   |
+| `AppendEvent`     | Unary         | Append an event to a note            |
+| `StreamEvents`    | Server-stream | Stream the event history for a note  |
+| `SearchNotes`     | Unary         | Full-text search                     |
+| `ShareSecureNote` | Unary         | Share a secure note with a device    |
 
 **`DeviceService`**:
 
-| RPC               | Type  | Description                                     |
-| ----------------- | ----- | ----------------------------------------------- |
-| `RegisterDevice`  | Unary | Register a new device and its public key        |
-| `GetDevicePublicKey` | Unary | Fetch a registered device's public key       |
-| `ListDevices`     | Unary | List all registered devices                     |
-| `RevokeDevice`    | Unary | Revoke a device's registration                  |
-| `InitiatePairing` | Unary | Begin the browser pairing handshake             |
-| `CompletePairing` | Unary | Complete the browser pairing handshake          |
+| RPC                  | Type  | Description                              |
+| -------------------- | ----- | ---------------------------------------- |
+| `RegisterDevice`     | Unary | Register a new device and its public key |
+| `GetDevicePublicKey` | Unary | Fetch a registered device's public key   |
+| `ListDevices`        | Unary | List all registered devices              |
+| `RevokeDevice`       | Unary | Revoke a device's registration           |
+| `InitiatePairing`    | Unary | Begin the browser pairing handshake      |
+| `CompletePairing`    | Unary | Complete the browser pairing handshake   |
 
 ### Server Reflection
 
@@ -271,11 +320,11 @@ grpcurl -plaintext localhost:50051 notx.v1.NoteService/ListNotes
 
 TLS configuration is built by `buildTransportCredentials()` based on which `Config` fields are populated:
 
-| `TLSCertFile` | `TLSKeyFile` | `TLSCAFile` | Mode                        |
-| ------------- | ------------ | ----------- | --------------------------- |
-| empty         | empty        | —           | Plaintext (dev only)        |
-| set           | set          | empty       | TLS 1.3 (server auth only)  |
-| set           | set          | set         | mTLS (mutual auth)          |
+| `TLSCertFile` | `TLSKeyFile` | `TLSCAFile` | Mode                       |
+| ------------- | ------------ | ----------- | -------------------------- |
+| empty         | empty        | —           | Plaintext (dev only)       |
+| set           | set          | empty       | TLS 1.3 (server auth only) |
+| set           | set          | set         | mTLS (mutual auth)         |
 
 mTLS is activated when `TLSCAFile` is non-empty. The CA cert is used to verify client certificates. This is the recommended configuration for production deployments.
 
@@ -316,11 +365,17 @@ No in-flight request or RPC is dropped as long as it completes within `ShutdownT
 ## Running the Server
 
 ```bash
-# Start with all defaults (reads ~/.notx/config.yml)
+# First run — config is created automatically, then the server starts
+notx server
+
+# Start with existing config (reads ~/.notx/config.json)
 notx server
 
 # Override specific values for one run
 notx server --http-port 8080 --grpc=false --data-dir /var/notx
+
+# Auto-approve all newly registered devices (useful for development)
+notx server --device-auto-approve
 
 # gRPC only, with TLS
 notx server --http=false --tls-cert server.crt --tls-key server.key
@@ -330,6 +385,28 @@ notx server --tls-cert server.crt --tls-key server.key --tls-ca ca.crt
 ```
 
 To persist configuration across runs, use `notx config` rather than passing flags each time.
+
+### Typical local setup (two terminals)
+
+```bash
+# Terminal 1 — API + gRPC server
+notx server
+
+# Terminal 2 — Admin UI (reads api_addr from ~/.notx/config.json)
+notx admin
+```
+
+The admin UI at `http://localhost:9090` proxies all `/v1/*` calls to the API server at `http://localhost:4060`. No extra configuration is needed when both processes run on the same machine with default settings.
+
+### Admin device
+
+Every server startup ensures the built-in admin device exists and is approved. To make requests to data endpoints from scripts or the admin UI, pass the following header:
+
+```
+X-Device-ID: notx:device:00000000-0000-0000-0000-000000000000
+```
+
+This device bypasses the normal approval/revocation checks and is restored to `approved` automatically on each restart, even if it was manually revoked in the database.
 
 ---
 

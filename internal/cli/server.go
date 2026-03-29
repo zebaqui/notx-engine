@@ -6,19 +6,37 @@ import (
 	"os"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/crypto/bcrypt"
+
 	"github.com/zebaqui/notx-engine/internal/clientconfig"
 	"github.com/zebaqui/notx-engine/internal/repo/file"
-	"github.com/zebaqui/notx-engine/internal/repo/memory"
 	"github.com/zebaqui/notx-engine/internal/server"
 	"github.com/zebaqui/notx-engine/internal/server/config"
 )
+
+// adminURNsFromConfig returns the admin device and owner URNs stored in the
+// client config, falling back to the well-known all-zero sentinels only when
+// the config cannot be loaded at all (should never happen in practice because
+// runServer calls EnsureConfig first).
+func adminURNsFromConfig(fileCfg *clientconfig.Config) (deviceURN, ownerURN string) {
+	deviceURN = fileCfg.Admin.AdminDeviceURN
+	ownerURN = fileCfg.Admin.AdminOwnerURN
+
+	if deviceURN == "" {
+		deviceURN = config.DefaultAdminDeviceURN
+	}
+	if ownerURN == "" {
+		ownerURN = config.DefaultAdminOwnerURN
+	}
+	return deviceURN, ownerURN
+}
 
 var serverCmd = &cobra.Command{
 	Use:   "server",
 	Short: "Start the notx server",
 	Long: `Start the notx server with HTTP and/or gRPC listeners.
 
-Default values are read from ~/.notx/config.yml. Flags override the config
+Default values are read from ~/.notx/config.json. Flags override the config
 for a single invocation. Run "notx config" to edit the config interactively.
 
 Examples:
@@ -38,7 +56,7 @@ Examples:
 }
 
 // serverFlags holds the raw flag values populated by cobra.
-// Defaults are seeded from ~/.notx/config.yml in init(); flags override them.
+// Defaults are seeded from ~/.notx/config.json in init(); flags override them.
 var serverFlags struct {
 	httpEnabled bool
 	grpcEnabled bool
@@ -54,6 +72,9 @@ var serverFlags struct {
 	tlsCA   string
 
 	logLevel string
+
+	deviceAutoApprove bool
+	adminPassphrase   string
 }
 
 func init() {
@@ -96,11 +117,31 @@ func init() {
 	f.StringVar(&serverFlags.logLevel, "log-level", fileCfg.EffectiveLogLevel(fileCfg.Server.LogLevel),
 		"Log verbosity: debug, info, warn, error")
 
+	// Device onboarding
+	f.BoolVar(&serverFlags.deviceAutoApprove, "device-auto-approve", false,
+		"Automatically approve newly registered devices (skip manual approval step)")
+
+	// Admin passphrase — when set, remote `notx admin --remote` can register
+	// an admin device by presenting this passphrase. The plaintext is never
+	// stored; only a bcrypt hash is kept in memory for the lifetime of the
+	// server process.
+	f.StringVar(&serverFlags.adminPassphrase, "admin-passphrase", "",
+		"Passphrase required to register an admin device from a remote machine (plaintext; hashed at startup)")
+
 	rootCmd.AddCommand(serverCmd)
 }
 
 func runServer(cmd *cobra.Command, args []string) error {
-	// ── Build config from flags (already seeded from ~/.notx/config.yml) ─────
+	// ── Ensure ~/.notx/config.json exists on first run ───────────────────────
+	if created, err := clientconfig.EnsureConfig(); err != nil {
+		fmt.Fprintf(os.Stderr, "  \033[33m⚠\033[0m  Could not write default config: %v\n", err)
+	} else if created {
+		path, _ := clientconfig.Path()
+		fmt.Fprintf(os.Stdout, "\n  \033[1;32m✓\033[0m  First run — created default config at \033[36m%s\033[0m\n", path)
+		fmt.Fprintf(os.Stdout, "       Run \033[1mnotx config\033[0m to customise it.\n\n")
+	}
+
+	// ── Build config from flags (already seeded from ~/.notx/config.json) ─────
 	cfg := config.Default()
 	cfg.EnableHTTP = serverFlags.httpEnabled
 	cfg.EnableGRPC = serverFlags.grpcEnabled
@@ -112,6 +153,24 @@ func runServer(cmd *cobra.Command, args []string) error {
 	cfg.TLSKeyFile = serverFlags.tlsKey
 	cfg.TLSCAFile = serverFlags.tlsCA
 	cfg.LogLevel = serverFlags.logLevel
+	cfg.DeviceOnboarding.AutoApprove = serverFlags.deviceAutoApprove
+
+	// Populate admin URNs from the persisted config so that every installation
+	// has its own unique, unpredictable admin identity rather than the shared
+	// all-zero sentinel. EnsureConfig (called above) guarantees these are
+	// already written to ~/.notx/config.json before we reach this point.
+	fileCfg, _ := clientconfig.Load()
+	cfg.Admin.DeviceURN, cfg.Admin.OwnerURN = adminURNsFromConfig(fileCfg)
+
+	// Hash the admin passphrase if one was supplied.
+	if serverFlags.adminPassphrase != "" {
+		hash, err := bcrypt.GenerateFromPassword([]byte(serverFlags.adminPassphrase), bcrypt.DefaultCost)
+		if err != nil {
+			return fmt.Errorf("hash admin passphrase: %w", err)
+		}
+		cfg.Admin.AdminPassphraseHash = string(hash)
+		fmt.Fprintf(os.Stdout, "  \033[1;32m✓\033[0m  Admin passphrase set — remote admin registration enabled\n\n")
+	}
 
 	if err := cfg.Validate(); err != nil {
 		return err
@@ -128,6 +187,7 @@ func runServer(cmd *cobra.Command, args []string) error {
 		"data_dir", cfg.DataDir,
 		"tls", cfg.TLSEnabled(),
 		"mtls", cfg.MTLSEnabled(),
+		"device_auto_approve", cfg.DeviceOnboarding.AutoApprove,
 	)
 
 	// ── Open file provider ───────────────────────────────────────────────────
@@ -142,8 +202,7 @@ func runServer(cmd *cobra.Command, args []string) error {
 	}()
 
 	// ── Build and run server ─────────────────────────────────────────────────
-	memProvider := memory.New()
-	srv, err := server.New(cfg, provider, provider, memProvider, log)
+	srv, err := server.New(cfg, provider, provider, provider, provider, log)
 	if err != nil {
 		return fmt.Errorf("build server: %w", err)
 	}

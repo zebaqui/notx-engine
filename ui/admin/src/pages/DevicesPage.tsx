@@ -5,22 +5,24 @@ import {
   RefreshCw,
   AlertCircle,
   ShieldOff,
+  ShieldCheck,
+  ShieldX,
   Key,
   Clock,
   Search,
   ChevronRight,
   X,
-  AlertTriangle,
-  Info,
   Plus,
+  Hourglass,
 } from "lucide-react";
 import {
   fetchDevices,
   revokeDevice,
   registerDevice,
-  DeviceAPINotImplementedError,
+  approveDevice,
+  rejectDevice,
 } from "../api/client";
-import type { Device } from "../api/types";
+import type { Device, DeviceApprovalStatus } from "../api/types";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -44,13 +46,340 @@ function timeSince(iso: string) {
 }
 
 function truncateUrn(urn: string) {
-  // notx:device:<uuid> → show last 12 chars of uuid
   const parts = urn.split(":");
   if (parts.length === 3) {
     const uuid = parts[2];
     return `${parts[0]}:${parts[1]}:…${uuid.slice(-12)}`;
   }
   return urn;
+}
+
+// ─── Status badge ─────────────────────────────────────────────────────────────
+
+function ApprovalBadge({
+  device,
+  size = "normal",
+}: {
+  device: Device;
+  size?: "normal" | "small";
+}) {
+  const dotSize = size === "small" ? 6 : 7;
+  const fontSize = size === "small" ? 10 : undefined;
+
+  if (device.revoked) {
+    return (
+      <span className="badge badge-red" style={{ fontSize }}>
+        <span
+          className="badge-dot"
+          style={{ width: dotSize, height: dotSize }}
+        />
+        revoked
+      </span>
+    );
+  }
+  switch (device.approval_status) {
+    case "approved":
+      return (
+        <span className="badge badge-green" style={{ fontSize }}>
+          <span
+            className="badge-dot"
+            style={{ width: dotSize, height: dotSize }}
+          />
+          approved
+        </span>
+      );
+    case "pending":
+      return (
+        <span
+          className="badge"
+          style={{
+            fontSize,
+            background: "var(--yellow-dim, rgba(234,179,8,0.12))",
+            color: "var(--yellow, #ca8a04)",
+            border: "1px solid var(--yellow, #ca8a04)",
+          }}
+        >
+          <Hourglass size={dotSize} style={{ flexShrink: 0 }} />
+          pending
+        </span>
+      );
+    case "rejected":
+      return (
+        <span
+          className="badge"
+          style={{
+            fontSize,
+            background: "var(--orange-dim, rgba(234,88,12,0.12))",
+            color: "var(--orange, #ea580c)",
+            border: "1px solid var(--orange, #ea580c)",
+          }}
+        >
+          <span
+            className="badge-dot"
+            style={{ width: dotSize, height: dotSize }}
+          />
+          rejected
+        </span>
+      );
+    default:
+      return (
+        <span className="badge" style={{ fontSize }}>
+          <span
+            className="badge-dot"
+            style={{ width: dotSize, height: dotSize }}
+          />
+          {device.approval_status ?? "unknown"}
+        </span>
+      );
+  }
+}
+
+// ─── Confirm revoke modal ─────────────────────────────────────────────────────
+
+function ConfirmRevokeModal({
+  device,
+  onConfirm,
+  onCancel,
+  isPending,
+}: {
+  device: Device;
+  onConfirm: () => void;
+  onCancel: () => void;
+  isPending: boolean;
+}) {
+  const overlayStyle: React.CSSProperties = {
+    position: "fixed",
+    inset: 0,
+    background: "rgba(0,0,0,0.6)",
+    zIndex: 200,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+  };
+  const boxStyle: React.CSSProperties = {
+    background: "var(--bg-elevated)",
+    border: "1px solid var(--border-strong)",
+    borderRadius: "var(--radius-lg)",
+    padding: 28,
+    width: 440,
+    display: "flex",
+    flexDirection: "column",
+    gap: 16,
+  };
+
+  return (
+    <div
+      style={overlayStyle}
+      onClick={(e) => e.target === e.currentTarget && onCancel()}
+    >
+      <div style={boxStyle}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <ShieldOff size={16} style={{ color: "var(--red)", flexShrink: 0 }} />
+          <span
+            style={{
+              fontWeight: 700,
+              fontSize: 15,
+              color: "var(--text-primary)",
+            }}
+          >
+            Revoke device
+          </span>
+        </div>
+
+        <p
+          style={{
+            fontSize: 13,
+            color: "var(--text-secondary)",
+            lineHeight: 1.6,
+            margin: 0,
+          }}
+        >
+          This will permanently revoke{" "}
+          <span style={{ color: "var(--text-primary)", fontWeight: 600 }}>
+            {device.name}
+          </span>
+          . The device will immediately lose all data access and{" "}
+          <span style={{ color: "var(--red)", fontWeight: 600 }}>
+            this cannot be undone
+          </span>
+          .
+        </p>
+
+        <div
+          style={{
+            background: "var(--bg-surface)",
+            border: "1px solid var(--border)",
+            borderRadius: "var(--radius-md)",
+            padding: "8px 12px",
+            fontFamily: "var(--font-mono)",
+            fontSize: 11,
+            color: "var(--text-secondary)",
+            wordBreak: "break-all",
+          }}
+        >
+          {device.urn}
+        </div>
+
+        <div
+          style={{
+            display: "flex",
+            gap: 10,
+            justifyContent: "flex-end",
+            marginTop: 4,
+          }}
+        >
+          <button
+            className="btn btn-ghost"
+            onClick={onCancel}
+            disabled={isPending}
+          >
+            Cancel
+          </button>
+          <button
+            className="btn"
+            style={{
+              background: "transparent",
+              color: "var(--red)",
+              borderColor: "var(--red)",
+            }}
+            onClick={onConfirm}
+            disabled={isPending}
+          >
+            {isPending ? (
+              <div className="spinner" style={{ width: 14, height: 14 }} />
+            ) : (
+              <ShieldOff size={14} />
+            )}
+            Revoke
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Confirm reject modal ─────────────────────────────────────────────────────
+
+function ConfirmRejectModal({
+  device,
+  onConfirm,
+  onCancel,
+  isPending,
+}: {
+  device: Device;
+  onConfirm: () => void;
+  onCancel: () => void;
+  isPending: boolean;
+}) {
+  const overlayStyle: React.CSSProperties = {
+    position: "fixed",
+    inset: 0,
+    background: "rgba(0,0,0,0.6)",
+    zIndex: 200,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+  };
+  const boxStyle: React.CSSProperties = {
+    background: "var(--bg-elevated)",
+    border: "1px solid var(--border-strong)",
+    borderRadius: "var(--radius-lg)",
+    padding: 28,
+    width: 440,
+    display: "flex",
+    flexDirection: "column",
+    gap: 16,
+  };
+
+  return (
+    <div
+      style={overlayStyle}
+      onClick={(e) => e.target === e.currentTarget && onCancel()}
+    >
+      <div style={boxStyle}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <ShieldX
+            size={16}
+            style={{ color: "var(--orange, #ea580c)", flexShrink: 0 }}
+          />
+          <span
+            style={{
+              fontWeight: 700,
+              fontSize: 15,
+              color: "var(--text-primary)",
+            }}
+          >
+            Reject device
+          </span>
+        </div>
+
+        <p
+          style={{
+            fontSize: 13,
+            color: "var(--text-secondary)",
+            lineHeight: 1.6,
+            margin: 0,
+          }}
+        >
+          Rejecting{" "}
+          <span style={{ color: "var(--text-primary)", fontWeight: 600 }}>
+            {device.name}
+          </span>{" "}
+          will permanently bar it from data access. The device must re-register
+          with a new URN to retry onboarding.
+        </p>
+
+        <div
+          style={{
+            background: "var(--bg-surface)",
+            border: "1px solid var(--border)",
+            borderRadius: "var(--radius-md)",
+            padding: "8px 12px",
+            fontFamily: "var(--font-mono)",
+            fontSize: 11,
+            color: "var(--text-secondary)",
+            wordBreak: "break-all",
+          }}
+        >
+          {device.urn}
+        </div>
+
+        <div
+          style={{
+            display: "flex",
+            gap: 10,
+            justifyContent: "flex-end",
+            marginTop: 4,
+          }}
+        >
+          <button
+            className="btn btn-ghost"
+            onClick={onCancel}
+            disabled={isPending}
+          >
+            Cancel
+          </button>
+          <button
+            className="btn"
+            style={{
+              background: "transparent",
+              color: "var(--orange, #ea580c)",
+              borderColor: "var(--orange, #ea580c)",
+            }}
+            onClick={onConfirm}
+            disabled={isPending}
+          >
+            {isPending ? (
+              <div className="spinner" style={{ width: 14, height: 14 }} />
+            ) : (
+              <ShieldX size={14} />
+            )}
+            Reject
+          </button>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 // ─── Register device modal ────────────────────────────────────────────────────
@@ -103,7 +432,6 @@ function RegisterDeviceModal({ onClose }: { onClose: () => void }) {
     alignItems: "center",
     justifyContent: "center",
   };
-
   const boxStyle: React.CSSProperties = {
     background: "var(--bg-elevated)",
     border: "1px solid var(--border-strong)",
@@ -114,13 +442,11 @@ function RegisterDeviceModal({ onClose }: { onClose: () => void }) {
     flexDirection: "column",
     gap: 18,
   };
-
   const fieldStyle: React.CSSProperties = {
     display: "flex",
     flexDirection: "column",
     gap: 4,
   };
-
   const labelStyle: React.CSSProperties = {
     fontSize: 11,
     fontWeight: 600,
@@ -297,142 +623,25 @@ function RegisterDeviceModal({ onClose }: { onClose: () => void }) {
   );
 }
 
-// ─── Confirm revoke modal ─────────────────────────────────────────────────────
-
-function ConfirmRevokeModal({
-  device,
-  onConfirm,
-  onCancel,
-  isPending,
-}: {
-  device: Device;
-  onConfirm: () => void;
-  onCancel: () => void;
-  isPending: boolean;
-}) {
-  return (
-    <div
-      style={{
-        position: "fixed",
-        inset: 0,
-        background: "rgba(0,0,0,0.6)",
-        zIndex: 200,
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-      }}
-    >
-      <div
-        style={{
-          background: "var(--bg-elevated)",
-          border: "1px solid var(--border-strong)",
-          borderRadius: "var(--radius-lg)",
-          padding: 28,
-          width: 420,
-          display: "flex",
-          flexDirection: "column",
-          gap: 16,
-        }}
-      >
-        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <AlertTriangle
-            size={18}
-            style={{ color: "var(--red)", flexShrink: 0 }}
-          />
-          <span
-            style={{
-              fontWeight: 700,
-              fontSize: 15,
-              color: "var(--text-primary)",
-            }}
-          >
-            Revoke device
-          </span>
-        </div>
-
-        <p
-          style={{
-            fontSize: 13,
-            color: "var(--text-secondary)",
-            lineHeight: 1.7,
-          }}
-        >
-          Are you sure you want to revoke{" "}
-          <span style={{ color: "var(--text-primary)", fontWeight: 600 }}>
-            {device.name}
-          </span>
-          ? This device will immediately lose access and any future requests
-          using its URN will be rejected. This action{" "}
-          <span style={{ color: "var(--red)", fontWeight: 600 }}>
-            cannot be undone
-          </span>
-          .
-        </p>
-
-        <div
-          style={{
-            background: "var(--bg-surface)",
-            border: "1px solid var(--border)",
-            borderRadius: "var(--radius-md)",
-            padding: "10px 14px",
-            fontFamily: "var(--font-mono)",
-            fontSize: 11.5,
-            color: "var(--text-muted)",
-            wordBreak: "break-all",
-          }}
-        >
-          {device.urn}
-        </div>
-
-        <div
-          style={{
-            display: "flex",
-            gap: 10,
-            justifyContent: "flex-end",
-            marginTop: 4,
-          }}
-        >
-          <button
-            className="btn btn-ghost"
-            onClick={onCancel}
-            disabled={isPending}
-          >
-            Cancel
-          </button>
-          <button
-            className="btn"
-            style={{
-              background: "var(--red-dim)",
-              color: "var(--red)",
-              borderColor: "var(--red)",
-            }}
-            onClick={onConfirm}
-            disabled={isPending}
-          >
-            {isPending ? (
-              <div className="spinner" style={{ width: 14, height: 14 }} />
-            ) : (
-              <ShieldOff size={14} />
-            )}
-            Revoke device
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 // ─── Device detail panel ──────────────────────────────────────────────────────
 
 function DeviceDetailPanel({
   device,
   onClose,
   onRevoke,
+  onApprove,
+  onReject,
 }: {
   device: Device;
   onClose: () => void;
   onRevoke: (device: Device) => void;
+  onApprove: (device: Device) => void;
+  onReject: (device: Device) => void;
 }) {
+  const isPending = device.approval_status === "pending" && !device.revoked;
+  const isApproved = device.approval_status === "approved" && !device.revoked;
+  const isRejected = device.approval_status === "rejected" && !device.revoked;
+
   return (
     <div className="drawer-overlay" onClick={onClose}>
       <div className="drawer" onClick={(e) => e.stopPropagation()}>
@@ -440,17 +649,7 @@ function DeviceDetailPanel({
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
             <Monitor size={15} style={{ color: "var(--accent)" }} />
             <span className="drawer-title">{device.name}</span>
-            {device.revoked ? (
-              <span className="badge badge-red">
-                <span className="badge-dot" />
-                revoked
-              </span>
-            ) : (
-              <span className="badge badge-green">
-                <span className="badge-dot" />
-                active
-              </span>
-            )}
+            <ApprovalBadge device={device} />
           </div>
           <button className="close-btn" onClick={onClose}>
             <X size={16} />
@@ -497,19 +696,9 @@ function DeviceDetailPanel({
                     </td>
                   </tr>
                   <tr>
-                    <td>Status</td>
+                    <td>Approval status</td>
                     <td>
-                      {device.revoked ? (
-                        <span className="badge badge-red">
-                          <span className="badge-dot" />
-                          revoked
-                        </span>
-                      ) : (
-                        <span className="badge badge-green">
-                          <span className="badge-dot" />
-                          active
-                        </span>
-                      )}
+                      <ApprovalBadge device={device} size="small" />
                     </td>
                   </tr>
                 </tbody>
@@ -517,7 +706,7 @@ function DeviceDetailPanel({
             </div>
           </div>
 
-          {/* Timestamps */}
+          {/* Activity */}
           <div>
             <div className="card-title" style={{ marginBottom: 10 }}>
               Activity
@@ -592,7 +781,86 @@ function DeviceDetailPanel({
             </div>
           </div>
 
-          {/* Danger zone */}
+          {/* Onboarding actions — shown for pending devices */}
+          {isPending && (
+            <div>
+              <div className="card-title" style={{ marginBottom: 10 }}>
+                Onboarding approval
+              </div>
+              <div
+                className="card"
+                style={{
+                  border: "1px solid var(--yellow, #ca8a04)",
+                  background: "var(--yellow-dim, rgba(234,179,8,0.06))",
+                }}
+              >
+                <div
+                  style={{
+                    fontSize: 13,
+                    color: "var(--text-secondary)",
+                    marginBottom: 14,
+                    lineHeight: 1.6,
+                  }}
+                >
+                  This device is awaiting administrator approval before it can
+                  access any data. Approve it to grant access or reject it to
+                  permanently bar this device URN.
+                </div>
+                <div style={{ display: "flex", gap: 10 }}>
+                  <button
+                    className="btn btn-primary"
+                    style={{ flex: 1 }}
+                    onClick={() => onApprove(device)}
+                  >
+                    <ShieldCheck size={14} />
+                    Approve access
+                  </button>
+                  <button
+                    className="btn"
+                    style={{
+                      flex: 1,
+                      background: "transparent",
+                      color: "var(--orange, #ea580c)",
+                      borderColor: "var(--orange, #ea580c)",
+                    }}
+                    onClick={() => onReject(device)}
+                  >
+                    <ShieldX size={14} />
+                    Reject
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Re-approve action — shown for rejected devices */}
+          {isRejected && (
+            <div>
+              <div className="card-title" style={{ marginBottom: 10 }}>
+                Onboarding status
+              </div>
+              <div
+                className="card"
+                style={{
+                  border: "1px solid var(--orange, #ea580c)",
+                  background: "var(--orange-dim, rgba(234,88,12,0.06))",
+                }}
+              >
+                <div
+                  style={{
+                    fontSize: 13,
+                    color: "var(--text-secondary)",
+                    lineHeight: 1.6,
+                  }}
+                >
+                  This device has been rejected. It cannot access any data. The
+                  device must re-register with a new URN to retry onboarding.
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Danger zone — shown for non-revoked devices */}
           {!device.revoked && (
             <div>
               <div
@@ -608,6 +876,52 @@ function DeviceDetailPanel({
                   background: "var(--red-dim)",
                 }}
               >
+                {isApproved && (
+                  <div
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "space-between",
+                      gap: 16,
+                      marginBottom: 12,
+                      paddingBottom: 12,
+                      borderBottom: "1px solid var(--border)",
+                    }}
+                  >
+                    <div>
+                      <div
+                        style={{
+                          fontWeight: 600,
+                          fontSize: 13,
+                          color: "var(--text-primary)",
+                          marginBottom: 4,
+                        }}
+                      >
+                        Reject this device
+                      </div>
+                      <div
+                        style={{ fontSize: 12, color: "var(--text-secondary)" }}
+                      >
+                        Removes data access. Device must re-register to retry.
+                      </div>
+                    </div>
+                    <button
+                      className="btn"
+                      style={{
+                        background: "transparent",
+                        color: "var(--orange, #ea580c)",
+                        borderColor: "var(--orange, #ea580c)",
+                        whiteSpace: "nowrap",
+                        flexShrink: 0,
+                      }}
+                      onClick={() => onReject(device)}
+                    >
+                      <ShieldX size={14} />
+                      Reject
+                    </button>
+                  </div>
+                )}
+
                 <div
                   style={{
                     display: "flex",
@@ -657,55 +971,19 @@ function DeviceDetailPanel({
   );
 }
 
-// ─── Not-implemented banner ────────────────────────────────────────────────────
+// ─── Status filter type ───────────────────────────────────────────────────────
 
-function GrpcOnlyBanner() {
-  return (
-    <div
-      style={{
-        background: "rgba(108, 143, 255, 0.08)",
-        border: "1px solid var(--accent-dim)",
-        borderRadius: "var(--radius-md)",
-        padding: "14px 18px",
-        display: "flex",
-        gap: 12,
-        alignItems: "flex-start",
-      }}
-    >
-      <Info
-        size={15}
-        style={{ color: "var(--accent)", flexShrink: 0, marginTop: 1 }}
-      />
-      <div
-        style={{
-          fontSize: 12.5,
-          color: "var(--text-secondary)",
-          lineHeight: 1.7,
-        }}
-      >
-        <span style={{ color: "var(--accent)", fontWeight: 600 }}>
-          Device HTTP API not yet available.
-        </span>{" "}
-        Device management is currently only accessible via the gRPC{" "}
-        <span className="mono">DeviceService</span> (
-        <span className="mono">RegisterDevice</span>,{" "}
-        <span className="mono">ListDevices</span>,{" "}
-        <span className="mono">RevokeDevice</span>
-        ). Add a <span className="mono">/v1/devices</span> HTTP route on the
-        server to enable live data in this section.
-      </div>
-    </div>
-  );
-}
+type StatusFilter = "all" | DeviceApprovalStatus | "revoked";
 
 // ─── Main page ────────────────────────────────────────────────────────────────
 
 export default function DevicesPage() {
   const qc = useQueryClient();
   const [search, setSearch] = useState("");
-  const [showRevoked, setShowRevoked] = useState(false);
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [selected, setSelected] = useState<Device | null>(null);
   const [revoking, setRevoking] = useState<Device | null>(null);
+  const [rejecting, setRejecting] = useState<Device | null>(null);
   const [showRegister, setShowRegister] = useState(false);
 
   const query = useQuery({
@@ -714,8 +992,7 @@ export default function DevicesPage() {
     retry: false,
   });
 
-  const isNotImplemented =
-    query.isError && query.error instanceof DeviceAPINotImplementedError;
+  // ── Mutations ────────────────────────────────────────────────────────────────
 
   const revokeMut = useMutation({
     mutationFn: (urn: string) => revokeDevice(urn),
@@ -726,53 +1003,60 @@ export default function DevicesPage() {
     },
   });
 
+  const approveMut = useMutation({
+    mutationFn: (urn: string) => approveDevice(urn),
+    onSuccess: (updated) => {
+      qc.invalidateQueries({ queryKey: ["devices"] });
+      // Keep the detail panel open but show the refreshed device
+      setSelected(updated);
+    },
+  });
+
+  const rejectMut = useMutation({
+    mutationFn: (urn: string) => rejectDevice(urn),
+    onSuccess: (updated) => {
+      qc.invalidateQueries({ queryKey: ["devices"] });
+      setRejecting(null);
+      setSelected(updated);
+    },
+  });
+
+  // ── Derived data ──────────────────────────────────────────────────────────────
+
   const devices: Device[] = query.data?.devices ?? [];
 
-  // ── Demo stub — shown only when the API is not yet implemented ────────────
-  const stubDevices: Device[] = isNotImplemented
-    ? [
-        {
-          urn: "notx:device:4a5b6c7d-8e9f-0a1b-2c3d-4e5f6a7b8c9d",
-          name: "MacBook Pro (work)",
-          owner_urn: "notx:usr:1a2b3c4d-5e6f-7a8b-9c0d-1e2f3a4b5c6d",
-          public_key_b64: "MCowBQYDK2VwAyEAyHvGkDPLFXUhH6ZpW8N+dVFkKQ==",
-          registered_at: new Date(
-            Date.now() - 1000 * 60 * 60 * 24 * 14,
-          ).toISOString(),
-          last_seen_at: new Date(Date.now() - 1000 * 60 * 8).toISOString(),
-          revoked: false,
-        },
-        {
-          urn: "notx:device:b1c2d3e4-f5a6-b7c8-d9e0-f1a2b3c4d5e6",
-          name: "iPhone 15 Pro",
-          owner_urn: "notx:usr:1a2b3c4d-5e6f-7a8b-9c0d-1e2f3a4b5c6d",
-          public_key_b64: "MCowBQYDK2VwAyEA3KlMj/xPZ2sVm1dQeR8yLNaT7w==",
-          registered_at: new Date(
-            Date.now() - 1000 * 60 * 60 * 24 * 3,
-          ).toISOString(),
-          last_seen_at: new Date(Date.now() - 1000 * 60 * 60 * 2).toISOString(),
-          revoked: false,
-        },
-        {
-          urn: "notx:device:e7f8a9b0-c1d2-e3f4-a5b6-c7d8e9f0a1b2",
-          name: "Linux desktop (home)",
-          owner_urn: "notx:usr:1a2b3c4d-5e6f-7a8b-9c0d-1e2f3a4b5c6d",
-          public_key_b64: "MCowBQYDK2VwAyEA9QwXmLkP4cRBzfGn2HsVaUeDj1==",
-          registered_at: new Date(
-            Date.now() - 1000 * 60 * 60 * 24 * 60,
-          ).toISOString(),
-          last_seen_at: new Date(
-            Date.now() - 1000 * 60 * 60 * 24 * 5,
-          ).toISOString(),
-          revoked: true,
-        },
-      ]
-    : [];
+  const pendingCount = devices.filter(
+    (d) => d.approval_status === "pending" && !d.revoked,
+  ).length;
+  const approvedCount = devices.filter(
+    (d) => d.approval_status === "approved" && !d.revoked,
+  ).length;
+  const rejectedCount = devices.filter(
+    (d) => d.approval_status === "rejected" && !d.revoked,
+  ).length;
+  const revokedCount = devices.filter((d) => d.revoked).length;
+  const totalCount = devices.length;
 
-  const displayDevices = isNotImplemented ? stubDevices : devices;
+  const filtered = devices.filter((d) => {
+    // Status filter
+    if (statusFilter === "revoked" && !d.revoked) return false;
+    if (
+      statusFilter === "pending" &&
+      (d.approval_status !== "pending" || d.revoked)
+    )
+      return false;
+    if (
+      statusFilter === "approved" &&
+      (d.approval_status !== "approved" || d.revoked)
+    )
+      return false;
+    if (
+      statusFilter === "rejected" &&
+      (d.approval_status !== "rejected" || d.revoked)
+    )
+      return false;
 
-  const filtered = displayDevices.filter((d) => {
-    if (!showRevoked && d.revoked) return false;
+    // Search filter
     if (search.trim()) {
       const q = search.toLowerCase();
       return (
@@ -784,9 +1068,57 @@ export default function DevicesPage() {
     return true;
   });
 
-  const activeCount = displayDevices.filter((d) => !d.revoked).length;
-  const revokedCount = displayDevices.filter((d) => d.revoked).length;
-  const totalCount = displayDevices.length;
+  // ── Filter pill helper ────────────────────────────────────────────────────────
+
+  function FilterPill({
+    value,
+    label,
+    count,
+    warn,
+  }: {
+    value: StatusFilter;
+    label: string;
+    count?: number;
+    warn?: boolean;
+  }) {
+    const active = statusFilter === value;
+    return (
+      <button
+        className={`btn ${active ? "btn-primary" : "btn-ghost"}`}
+        style={{
+          fontSize: 12,
+          padding: "4px 12px",
+          ...(warn && !active
+            ? {
+                color: "var(--yellow, #ca8a04)",
+                borderColor: "var(--yellow, #ca8a04)",
+              }
+            : {}),
+        }}
+        onClick={() => setStatusFilter(value)}
+      >
+        {label}
+        {count !== undefined && (
+          <span
+            style={{
+              marginLeft: 5,
+              background: active
+                ? "rgba(255,255,255,0.2)"
+                : "var(--bg-elevated)",
+              border: "1px solid var(--border)",
+              borderRadius: 99,
+              padding: "0 6px",
+              fontSize: 10,
+              fontWeight: 700,
+              color: warn && !active ? "var(--yellow, #ca8a04)" : undefined,
+            }}
+          >
+            {count}
+          </span>
+        )}
+      </button>
+    );
+  }
 
   return (
     <div className="page-stack">
@@ -795,7 +1127,7 @@ export default function DevicesPage() {
         <div>
           <div className="section-title">Devices</div>
           <div className="section-sub">
-            Registered devices and cryptographic identities
+            Registered devices and onboarding approvals
           </div>
         </div>
         <div style={{ display: "flex", gap: 8 }}>
@@ -820,53 +1152,132 @@ export default function DevicesPage() {
         </div>
       </div>
 
-      {/* ── API not implemented banner ───────────────────────────────────── */}
-      {isNotImplemented && <GrpcOnlyBanner />}
-
-      {/* ── Generic error banner ─────────────────────────────────────────── */}
-      {query.isError && !isNotImplemented && (
+      {/* ── Error banner ─────────────────────────────────────────────────── */}
+      {query.isError && (
         <div className="error-banner">
           <AlertCircle size={15} />
           Failed to load devices — {(query.error as Error).message}
         </div>
       )}
 
+      {/* ── Pending approval callout ─────────────────────────────────────── */}
+      {pendingCount > 0 && (
+        <div
+          style={{
+            background: "var(--yellow-dim, rgba(234,179,8,0.08))",
+            border: "1px solid var(--yellow, #ca8a04)",
+            borderRadius: "var(--radius-lg)",
+            padding: "12px 16px",
+            display: "flex",
+            alignItems: "center",
+            gap: 12,
+          }}
+        >
+          <Hourglass
+            size={16}
+            style={{ color: "var(--yellow, #ca8a04)", flexShrink: 0 }}
+          />
+          <div style={{ flex: 1 }}>
+            <span
+              style={{
+                fontWeight: 600,
+                color: "var(--text-primary)",
+                fontSize: 13,
+              }}
+            >
+              {pendingCount} device{pendingCount !== 1 ? "s" : ""} awaiting
+              approval
+            </span>
+            <span
+              style={{
+                color: "var(--text-secondary)",
+                fontSize: 12,
+                marginLeft: 8,
+              }}
+            >
+              These devices have registered but cannot access data until
+              approved.
+            </span>
+          </div>
+          <button
+            className="btn"
+            style={{
+              fontSize: 12,
+              padding: "4px 12px",
+              color: "var(--yellow, #ca8a04)",
+              borderColor: "var(--yellow, #ca8a04)",
+              background: "transparent",
+              flexShrink: 0,
+            }}
+            onClick={() => setStatusFilter("pending")}
+          >
+            Review
+          </button>
+        </div>
+      )}
+
       {/* ── Summary tiles ───────────────────────────────────────────────── */}
-      <div className="grid-3">
+      <div className="grid-4">
         <div className="stat-tile">
-          <div className="stat-label">Total devices</div>
+          <div className="stat-label">Total</div>
           <div className="stat-value">{totalCount}</div>
           <div className="stat-sub">all registered</div>
         </div>
         <div className="stat-tile">
-          <div className="stat-label">Active</div>
+          <div className="stat-label">Approved</div>
           <div
             className="stat-value"
             style={{
-              color: activeCount > 0 ? "var(--green)" : "var(--text-primary)",
+              color: approvedCount > 0 ? "var(--green)" : "var(--text-primary)",
             }}
           >
-            {activeCount}
+            {approvedCount}
           </div>
-          <div className="stat-sub">not revoked</div>
+          <div className="stat-sub">active access</div>
         </div>
         <div className="stat-tile">
-          <div className="stat-label">Revoked</div>
+          <div className="stat-label">Pending</div>
           <div
             className="stat-value"
             style={{
-              color: revokedCount > 0 ? "var(--yellow)" : "var(--text-primary)",
+              color:
+                pendingCount > 0
+                  ? "var(--yellow, #ca8a04)"
+                  : "var(--text-primary)",
             }}
           >
-            {revokedCount}
+            {pendingCount}
+          </div>
+          <div className="stat-sub">awaiting review</div>
+        </div>
+        <div className="stat-tile">
+          <div className="stat-label">Revoked / Rejected</div>
+          <div
+            className="stat-value"
+            style={{
+              color:
+                revokedCount + rejectedCount > 0
+                  ? "var(--red)"
+                  : "var(--text-primary)",
+            }}
+          >
+            {revokedCount + rejectedCount}
           </div>
           <div className="stat-sub">access removed</div>
         </div>
       </div>
 
       {/* ── Toolbar ─────────────────────────────────────────────────────── */}
-      <div className="toolbar">
-        <div style={{ position: "relative", flex: 1, maxWidth: 320 }}>
+      <div className="toolbar" style={{ flexWrap: "wrap", gap: 10 }}>
+        {/* Search */}
+        <div
+          style={{
+            position: "relative",
+            flex: 1,
+            minWidth: 200,
+            maxWidth: 320,
+          }}
+        >
           <Search
             size={13}
             style={{
@@ -887,25 +1298,19 @@ export default function DevicesPage() {
           />
         </div>
 
-        <label
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 6,
-            cursor: "pointer",
-            fontSize: 13,
-            color: "var(--text-secondary)",
-            userSelect: "none",
-          }}
-        >
-          <input
-            type="checkbox"
-            checked={showRevoked}
-            onChange={(e) => setShowRevoked(e.target.checked)}
-            style={{ accentColor: "var(--accent)", cursor: "pointer" }}
+        {/* Status filter pills */}
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+          <FilterPill value="all" label="All" count={totalCount} />
+          <FilterPill
+            value="pending"
+            label="Pending"
+            count={pendingCount}
+            warn={pendingCount > 0}
           />
-          Show revoked
-        </label>
+          <FilterPill value="approved" label="Approved" count={approvedCount} />
+          <FilterPill value="rejected" label="Rejected" count={rejectedCount} />
+          <FilterPill value="revoked" label="Revoked" count={revokedCount} />
+        </div>
       </div>
 
       {/* ── Table ───────────────────────────────────────────────────────── */}
@@ -929,9 +1334,9 @@ export default function DevicesPage() {
               <div style={{ marginTop: 4 }}>
                 {search.trim()
                   ? "No devices match your search."
-                  : displayDevices.length === 0
+                  : totalCount === 0
                     ? "No devices registered yet."
-                    : 'No active devices. Enable "Show revoked" to see all.'}
+                    : "No devices match the selected filter."}
               </div>
             </div>
           ) : (
@@ -944,102 +1349,158 @@ export default function DevicesPage() {
                   <th>Registered</th>
                   <th>Last seen</th>
                   <th>Status</th>
+                  <th>Actions</th>
                   <th style={{ width: 36 }} />
                 </tr>
               </thead>
               <tbody>
-                {filtered.map((d) => (
-                  <tr
-                    key={d.urn}
-                    style={{ cursor: "pointer", opacity: d.revoked ? 0.55 : 1 }}
-                    onClick={() => setSelected(d)}
-                  >
-                    {/* Device name */}
-                    <td>
-                      <div
-                        style={{
-                          display: "flex",
-                          alignItems: "center",
-                          gap: 8,
-                        }}
-                      >
-                        <Monitor
-                          size={14}
+                {filtered.map((d) => {
+                  const isPendingRow =
+                    d.approval_status === "pending" && !d.revoked;
+                  return (
+                    <tr
+                      key={d.urn}
+                      style={{
+                        cursor: "pointer",
+                        opacity:
+                          d.revoked || d.approval_status === "rejected"
+                            ? 0.55
+                            : 1,
+                        background: isPendingRow
+                          ? "var(--yellow-dim, rgba(234,179,8,0.04))"
+                          : undefined,
+                      }}
+                      onClick={() => setSelected(d)}
+                    >
+                      {/* Device name */}
+                      <td>
+                        <div
                           style={{
-                            color: d.revoked
-                              ? "var(--text-muted)"
-                              : "var(--accent)",
-                            flexShrink: 0,
-                          }}
-                        />
-                        <span
-                          className="name-cell"
-                          style={{
-                            color: d.revoked
-                              ? "var(--text-secondary)"
-                              : "var(--text-primary)",
+                            display: "flex",
+                            alignItems: "center",
+                            gap: 8,
                           }}
                         >
-                          {d.name}
-                        </span>
-                      </div>
-                    </td>
+                          <Monitor
+                            size={14}
+                            style={{
+                              color:
+                                d.revoked || d.approval_status === "rejected"
+                                  ? "var(--text-muted)"
+                                  : isPendingRow
+                                    ? "var(--yellow, #ca8a04)"
+                                    : "var(--accent)",
+                              flexShrink: 0,
+                            }}
+                          />
+                          <span
+                            className="name-cell"
+                            style={{
+                              color:
+                                d.revoked || d.approval_status === "rejected"
+                                  ? "var(--text-secondary)"
+                                  : "var(--text-primary)",
+                            }}
+                          >
+                            {d.name}
+                          </span>
+                        </div>
+                      </td>
 
-                    {/* URN */}
-                    <td className="urn-cell" title={d.urn}>
-                      {truncateUrn(d.urn)}
-                    </td>
+                      {/* URN */}
+                      <td className="urn-cell" title={d.urn}>
+                        {truncateUrn(d.urn)}
+                      </td>
 
-                    {/* Owner URN */}
-                    <td className="urn-cell" title={d.owner_urn}>
-                      {truncateUrn(d.owner_urn)}
-                    </td>
+                      {/* Owner URN */}
+                      <td className="urn-cell" title={d.owner_urn}>
+                        {truncateUrn(d.owner_urn)}
+                      </td>
 
-                    {/* Registered */}
-                    <td>
-                      <div
-                        style={{
-                          display: "flex",
-                          alignItems: "center",
-                          gap: 5,
-                          whiteSpace: "nowrap",
-                          fontSize: 12,
-                        }}
-                      >
-                        <Clock size={11} style={{ opacity: 0.5 }} />
-                        {fmtDate(d.registered_at)}
-                      </div>
-                    </td>
+                      {/* Registered */}
+                      <td>
+                        <div
+                          style={{
+                            display: "flex",
+                            alignItems: "center",
+                            gap: 5,
+                            whiteSpace: "nowrap",
+                            fontSize: 12,
+                          }}
+                        >
+                          <Clock size={11} style={{ opacity: 0.5 }} />
+                          {fmtDate(d.registered_at)}
+                        </div>
+                      </td>
 
-                    {/* Last seen */}
-                    <td style={{ whiteSpace: "nowrap", fontSize: 12 }}>
-                      {d.last_seen_at ? timeSince(d.last_seen_at) : "—"}
-                    </td>
+                      {/* Last seen */}
+                      <td style={{ whiteSpace: "nowrap", fontSize: 12 }}>
+                        {d.last_seen_at ? timeSince(d.last_seen_at) : "—"}
+                      </td>
 
-                    {/* Status badge */}
-                    <td>
-                      {d.revoked ? (
-                        <span className="badge badge-red">
-                          <span className="badge-dot" />
-                          revoked
-                        </span>
-                      ) : (
-                        <span className="badge badge-green">
-                          <span className="badge-dot" />
-                          active
-                        </span>
-                      )}
-                    </td>
+                      {/* Status badge */}
+                      <td>
+                        <ApprovalBadge device={d} size="small" />
+                      </td>
 
-                    {/* Arrow */}
-                    <td style={{ padding: "0 12px 0 0" }}>
-                      <ChevronRight
-                        size={14}
-                        style={{ color: "var(--text-muted)" }}
-                      />
-                    </td>
-                  </tr>
-                ))}
+                      {/* Inline quick-actions for pending */}
+                      <td onClick={(e) => e.stopPropagation()}>
+                        {isPendingRow ? (
+                          <div style={{ display: "flex", gap: 6 }}>
+                            <button
+                              className="btn btn-primary"
+                              style={{ fontSize: 11, padding: "3px 10px" }}
+                              onClick={() => approveMut.mutate(d.urn)}
+                              disabled={approveMut.isPending}
+                              title="Approve this device"
+                            >
+                              {approveMut.isPending &&
+                              approveMut.variables === d.urn ? (
+                                <div
+                                  className="spinner"
+                                  style={{ width: 11, height: 11 }}
+                                />
+                              ) : (
+                                <ShieldCheck size={12} />
+                              )}
+                              Approve
+                            </button>
+                            <button
+                              className="btn"
+                              style={{
+                                fontSize: 11,
+                                padding: "3px 10px",
+                                background: "transparent",
+                                color: "var(--orange, #ea580c)",
+                                borderColor: "var(--orange, #ea580c)",
+                              }}
+                              onClick={() => setRejecting(d)}
+                              disabled={rejectMut.isPending}
+                              title="Reject this device"
+                            >
+                              <ShieldX size={12} />
+                              Reject
+                            </button>
+                          </div>
+                        ) : (
+                          <span
+                            style={{ color: "var(--text-muted)", fontSize: 12 }}
+                          >
+                            —
+                          </span>
+                        )}
+                      </td>
+
+                      {/* Arrow */}
+                      <td style={{ padding: "0 12px 0 0" }}>
+                        <ChevronRight
+                          size={14}
+                          style={{ color: "var(--text-muted)" }}
+                        />
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           )}
@@ -1119,6 +1580,10 @@ export default function DevicesPage() {
             setRevoking(d);
             setSelected(null);
           }}
+          onApprove={(d) => approveMut.mutate(d.urn)}
+          onReject={(d) => {
+            setRejecting(d);
+          }}
         />
       )}
 
@@ -1129,6 +1594,16 @@ export default function DevicesPage() {
           onConfirm={() => revokeMut.mutate(revoking.urn)}
           onCancel={() => setRevoking(null)}
           isPending={revokeMut.isPending}
+        />
+      )}
+
+      {/* ── Reject confirm modal ──────────────────────────────────────────── */}
+      {rejecting && (
+        <ConfirmRejectModal
+          device={rejecting}
+          onConfirm={() => rejectMut.mutate(rejecting.urn)}
+          onCancel={() => setRejecting(null)}
+          isPending={rejectMut.isPending}
         />
       )}
 

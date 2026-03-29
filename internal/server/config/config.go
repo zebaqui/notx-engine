@@ -23,6 +23,52 @@ const (
 	DefaultGRPCPort = 50051
 )
 
+// DeviceOnboardingConfig controls how newly registered devices are handled
+// before they are allowed to pull data from the server.
+type DeviceOnboardingConfig struct {
+	// AutoApprove, when true, immediately sets a newly registered device's
+	// approval status to "approved" so it can start pulling data right away.
+	// When false (the default) devices start in "pending" status and an
+	// administrator must explicitly approve them via
+	// PATCH /v1/devices/:urn/approve before they can access any data.
+	AutoApprove bool
+}
+
+// AdminConfig holds configuration for the built-in server admin identity.
+type AdminConfig struct {
+	// DeviceURN is the fully-qualified URN of the admin device that is
+	// automatically registered and approved on every server startup when
+	// no AdminPassphraseHash is set (local-mode shortcut).
+	//
+	// When AdminPassphraseHash is set this field is ignored — admin devices
+	// must register themselves via POST /v1/devices with a matching passphrase.
+	//
+	// Default: "notx:device:00000000-0000-0000-0000-000000000000"
+	DeviceURN string
+
+	// OwnerURN is the user URN associated with the bootstrapped admin device
+	// (local-mode only).
+	//
+	// Default: "notx:usr:00000000-0000-0000-0000-000000000000"
+	OwnerURN string
+
+	// AdminPassphraseHash is a bcrypt hash of the admin registration
+	// passphrase. When non-empty:
+	//
+	//  • The local-mode bootstrap device is NOT automatically created.
+	//  • POST /v1/devices requests that include a matching "admin_passphrase"
+	//    field are registered with role=admin and approval_status=approved
+	//    immediately, bypassing the normal approval flow.
+	//  • POST /v1/devices requests without a passphrase (or with a wrong one)
+	//    are registered as role=client with the normal pending/auto-approve
+	//    behaviour unchanged.
+	//
+	// Set this via the --admin-passphrase flag on `notx server` (the flag
+	// accepts the plaintext passphrase and hashes it automatically).
+	// Never store the plaintext passphrase in the config.
+	AdminPassphraseHash string
+}
+
 // Config holds all runtime configuration for the notx server.
 //
 // It is populated once at startup (from CLI flags, env vars, or a config file)
@@ -90,7 +136,29 @@ type Config struct {
 	// LogLevel controls verbosity. Accepted values: "debug", "info", "warn", "error".
 	// Default: "info".
 	LogLevel string
+
+	// ── Device onboarding ────────────────────────────────────────────────────
+
+	// DeviceOnboarding controls whether newly registered devices are
+	// auto-approved or held in a pending state awaiting manual approval.
+	DeviceOnboarding DeviceOnboardingConfig
+
+	// ── Admin identity ───────────────────────────────────────────────────────
+
+	// Admin holds the configuration for the built-in server admin device.
+	// This device is upserted on every startup with ApprovalStatus "approved"
+	// so administrative operations are never blocked by the device auth gate.
+	Admin AdminConfig
 }
+
+// DefaultAdminDeviceURN is the well-known URN reserved for the server's
+// built-in admin device. All-zero UUID makes it visually distinct and
+// impossible to collide with any client-generated UUIDv4/v7.
+const DefaultAdminDeviceURN = "notx:device:00000000-0000-0000-0000-000000000000"
+
+// DefaultAdminOwnerURN is the well-known URN reserved for the admin user
+// that owns the built-in admin device.
+const DefaultAdminOwnerURN = "notx:usr:00000000-0000-0000-0000-000000000000"
 
 // Default returns a Config populated with all production-safe defaults.
 // Callers should start from Default() and override only what they need.
@@ -106,6 +174,13 @@ func Default() *Config {
 		MaxPageSize:     200,
 		DefaultPageSize: 50,
 		LogLevel:        "info",
+		DeviceOnboarding: DeviceOnboardingConfig{
+			AutoApprove: false,
+		},
+		Admin: AdminConfig{
+			DeviceURN: DefaultAdminDeviceURN,
+			OwnerURN:  DefaultAdminOwnerURN,
+		},
 	}
 }
 

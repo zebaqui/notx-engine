@@ -1,12 +1,13 @@
 package clientconfig
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 
-	"gopkg.in/yaml.v3"
+	"github.com/google/uuid"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -14,8 +15,8 @@ import (
 // ─────────────────────────────────────────────────────────────────────────────
 
 // Config is the unified configuration file for both the notx CLI client and
-// the notx server. It lives at ~/.notx/config.yml and is created automatically
-// on first use.
+// the notx server. It lives at ~/.notx/config.json and is written automatically
+// on first use by EnsureConfig().
 //
 // Fields are grouped by concern:
 //   - [server]  — what address/port the server listens on (used by `notx server`)
@@ -27,87 +28,118 @@ import (
 type Config struct {
 	// ── Client ───────────────────────────────────────────────────────────────
 
-	Client ClientConfig `yaml:"client"`
+	Client ClientConfig `json:"client"`
 
 	// ── Server ───────────────────────────────────────────────────────────────
 
-	Server ServerConfig `yaml:"server"`
+	Server ServerConfig `json:"server"`
 
 	// ── Admin UI ─────────────────────────────────────────────────────────────
 
-	Admin AdminConfig `yaml:"admin"`
+	Admin AdminConfig `json:"admin"`
 
 	// ── Storage ──────────────────────────────────────────────────────────────
 
-	Storage StorageConfig `yaml:"storage"`
+	Storage StorageConfig `json:"storage"`
 
 	// ── TLS ──────────────────────────────────────────────────────────────────
 
-	TLS TLSConfig `yaml:"tls"`
+	TLS TLSConfig `json:"tls"`
 
 	// ── Logging ──────────────────────────────────────────────────────────────
 
-	Log LogConfig `yaml:"log"`
+	Log LogConfig `json:"log"`
 }
 
 // ClientConfig controls how CLI commands connect to the notx gRPC server.
 type ClientConfig struct {
 	// GRPCAddr is the host:port the CLI dials for gRPC calls.
 	// Default: "localhost:50051"
-	GRPCAddr string `yaml:"grpc_addr"`
+	GRPCAddr string `json:"grpc_addr"`
 
 	// Namespace is the URN namespace used when generating note/event URNs.
 	// Default: "notx"
-	Namespace string `yaml:"namespace"`
+	Namespace string `json:"namespace"`
 
 	// Insecure disables TLS verification on the client dial (dev only).
 	// Default: true (matches the server default of no TLS in dev)
-	Insecure bool `yaml:"insecure"`
+	Insecure bool `json:"insecure"`
 }
 
 // ServerConfig controls the notx gRPC/HTTP server listeners.
 type ServerConfig struct {
 	// HTTPAddr is the host:port the HTTP server binds to.
 	// Default: ":4060"
-	HTTPAddr string `yaml:"http_addr"`
+	HTTPAddr string `json:"http_addr"`
 
 	// GRPCAddr is the host:port the gRPC server binds to.
 	// Default: ":50051"
-	GRPCAddr string `yaml:"grpc_addr"`
+	GRPCAddr string `json:"grpc_addr"`
 
 	// EnableHTTP toggles the HTTP/JSON API layer.
 	// Default: true
-	EnableHTTP bool `yaml:"enable_http"`
+	EnableHTTP bool `json:"enable_http"`
 
 	// EnableGRPC toggles the gRPC layer.
 	// Default: true
-	EnableGRPC bool `yaml:"enable_grpc"`
+	EnableGRPC bool `json:"enable_grpc"`
 
 	// ShutdownTimeoutSec is the graceful-shutdown window in seconds.
 	// Default: 30
-	ShutdownTimeoutSec int `yaml:"shutdown_timeout_sec"`
+	ShutdownTimeoutSec int `json:"shutdown_timeout_sec"`
 
 	// LogLevel overrides the global log level for the server process.
 	// Accepted: "debug", "info", "warn", "error". Empty → use Log.Level.
-	LogLevel string `yaml:"log_level,omitempty"`
+	LogLevel string `json:"log_level,omitempty"`
 }
 
 // AdminConfig controls the embedded admin UI server.
 type AdminConfig struct {
 	// Addr is the host:port the admin HTTP server binds to.
 	// Default: ":9090"
-	Addr string `yaml:"addr"`
+	Addr string `json:"addr"`
 
 	// APIAddr is the notx server base URL the admin UI proxies API calls to.
 	// Default: "http://localhost:4060"
-	APIAddr string `yaml:"api_addr"`
+	APIAddr string `json:"api_addr"`
+
+	// DeviceURN is the fully-qualified URN of the admin device that was
+	// registered on this machine via `notx admin --remote`. When non-empty,
+	// the admin UI sends this URN as the X-Device-ID header on every request
+	// instead of the hardcoded local-mode sentinel.
+	//
+	// This field is written automatically by `notx admin --remote` after a
+	// successful admin device registration. Do not set it manually unless you
+	// know what you are doing.
+	DeviceURN string `json:"device_urn,omitempty"`
+
+	// AdminDeviceURN is the fully-qualified URN of the built-in local-mode
+	// admin device that is bootstrapped on every server startup.
+	//
+	// This value is generated once on first run (using a random UUIDv4) and
+	// persisted here so that the same URN is reused across restarts while
+	// still being unique per installation. This provides security-by-obscurity
+	// on top of the role-based access controls: an attacker cannot predict the
+	// admin device URN without access to this config file.
+	//
+	// Generated automatically by EnsureConfig(). Do not set it manually.
+	AdminDeviceURN string `json:"admin_device_urn,omitempty"`
+
+	// AdminOwnerURN is the fully-qualified URN of the user that owns the
+	// built-in local-mode admin device.
+	//
+	// Like AdminDeviceURN, this is generated once on first run and persisted
+	// so it remains stable across restarts while being unique per installation.
+	//
+	// Generated automatically by EnsureConfig(). Do not set it manually.
+	AdminOwnerURN string `json:"admin_owner_urn,omitempty"`
 }
 
 // StorageConfig controls where note data is persisted on disk.
 type StorageConfig struct {
 	// DataDir is the root directory for note files and the Badger index.
 	// Default: "~/.notx/data"
-	DataDir string `yaml:"data_dir"`
+	DataDir string `json:"data_dir"`
 }
 
 // TLSConfig holds optional paths to TLS/mTLS certificate material.
@@ -115,20 +147,20 @@ type StorageConfig struct {
 // and the CLI uses TLS when dialling.
 type TLSConfig struct {
 	// CertFile is the path to the PEM-encoded server certificate.
-	CertFile string `yaml:"cert_file,omitempty"`
+	CertFile string `json:"cert_file,omitempty"`
 
 	// KeyFile is the path to the PEM-encoded server private key.
-	KeyFile string `yaml:"key_file,omitempty"`
+	KeyFile string `json:"key_file,omitempty"`
 
 	// CAFile is the path to the PEM-encoded CA certificate for mTLS.
-	CAFile string `yaml:"ca_file,omitempty"`
+	CAFile string `json:"ca_file,omitempty"`
 }
 
 // LogConfig controls log output.
 type LogConfig struct {
 	// Level is the minimum log level. Accepted: "debug", "info", "warn", "error".
 	// Default: "info"
-	Level string `yaml:"level"`
+	Level string `json:"level"`
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -137,6 +169,11 @@ type LogConfig struct {
 
 // Default returns a Config populated with all production-safe defaults.
 // Callers should start from Default() and override only what they need.
+//
+// The Admin.AdminDeviceURN and Admin.AdminOwnerURN fields are left empty here
+// intentionally: EnsureConfig() is responsible for generating and persisting
+// fresh UUIDs on first run. Load() will always return non-empty values for
+// those fields on subsequent runs because they are stored in the config file.
 func Default() *Config {
 	return &Config{
 		Client: ClientConfig{
@@ -164,6 +201,17 @@ func Default() *Config {
 	}
 }
 
+// generateAdminURNs returns a fresh pair of (deviceURN, ownerURN) strings
+// built from random UUIDv4 values. The URNs follow the notx format:
+//
+//	notx:device:<uuidv4>
+//	notx:usr:<uuidv4>
+func generateAdminURNs() (deviceURN, ownerURN string) {
+	deviceURN = "notx:device:" + uuid.New().String()
+	ownerURN = "notx:usr:" + uuid.New().String()
+	return deviceURN, ownerURN
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Path resolution
 // ─────────────────────────────────────────────────────────────────────────────
@@ -177,13 +225,13 @@ func Dir() (string, error) {
 	return filepath.Join(home, ".notx"), nil
 }
 
-// Path returns the full path to the config file: ~/.notx/config.yml
+// Path returns the full path to the config file: ~/.notx/config.json
 func Path() (string, error) {
 	dir, err := Dir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(dir, "config.yml"), nil
+	return filepath.Join(dir, "config.json"), nil
 }
 
 // defaultDataDir returns ~/.notx/data as the default storage root.
@@ -197,10 +245,10 @@ func defaultDataDir() string {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Load / Save
+// Load / Save / EnsureConfig
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Load reads the config file from ~/.notx/config.yml.
+// Load reads the config file from ~/.notx/config.json.
 //
 // If the file does not exist, Load returns Default() and nil — callers can
 // rely on a valid Config being returned even on a fresh machine.
@@ -223,15 +271,75 @@ func Load() (*Config, error) {
 
 	// Start from defaults so missing keys are always populated.
 	cfg := Default()
-	if err := yaml.Unmarshal(data, cfg); err != nil {
+	if err := json.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("clientconfig: parse %s: %w", path, err)
 	}
 
 	return cfg, nil
 }
 
-// Save writes cfg to ~/.notx/config.yml, creating the directory if needed.
+// EnsureConfig writes the default configuration to ~/.notx/config.json if and
+// only if the file does not already exist. It is safe to call on every startup:
+// it is a no-op when the file is already present.
+//
+// On first run it also generates unique UUIDv4-based URNs for the built-in
+// admin device and its owner, storing them under Admin.AdminDeviceURN and
+// Admin.AdminOwnerURN. This ensures every installation has its own
+// unpredictable admin URNs rather than sharing the well-known all-zero
+// sentinel, providing an additional layer of security by obscurity.
+//
+// Returns (true, nil) when the file was created, (false, nil) when it already
+// existed, and (false, err) on any I/O error.
+func EnsureConfig() (created bool, err error) {
+	path, err := Path()
+	if err != nil {
+		return false, err
+	}
+
+	// Already exists — check whether the admin URNs need to be back-filled
+	// (handles configs created before this feature was introduced).
+	if _, statErr := os.Stat(path); statErr == nil {
+		return false, ensureAdminURNs(path)
+	} else if !errors.Is(statErr, os.ErrNotExist) {
+		return false, fmt.Errorf("clientconfig: stat %s: %w", path, statErr)
+	}
+
+	// First run — create a default config with freshly generated admin URNs.
+	cfg := Default()
+	cfg.Admin.AdminDeviceURN, cfg.Admin.AdminOwnerURN = generateAdminURNs()
+
+	if err := Save(cfg); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// ensureAdminURNs reads the config at path and, if either AdminDeviceURN or
+// AdminOwnerURN is empty (e.g. the file pre-dates this feature), generates
+// fresh ones and saves the updated config back. It is a no-op when both URNs
+// are already populated.
+func ensureAdminURNs(path string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("clientconfig: read %s: %w", path, err)
+	}
+
+	cfg := Default()
+	if err := json.Unmarshal(data, cfg); err != nil {
+		return fmt.Errorf("clientconfig: parse %s: %w", path, err)
+	}
+
+	if cfg.Admin.AdminDeviceURN != "" && cfg.Admin.AdminOwnerURN != "" {
+		return nil // already populated, nothing to do
+	}
+
+	cfg.Admin.AdminDeviceURN, cfg.Admin.AdminOwnerURN = generateAdminURNs()
+	return Save(cfg)
+}
+
+// Save writes cfg to ~/.notx/config.json, creating the directory if needed.
 // The file is written atomically via a temp-file rename.
+// The output is pretty-printed JSON for human readability.
 func Save(cfg *Config) error {
 	dir, err := Dir()
 	if err != nil {
@@ -242,28 +350,21 @@ func Save(cfg *Config) error {
 		return fmt.Errorf("clientconfig: create config dir %s: %w", dir, err)
 	}
 
-	data, err := yaml.Marshal(cfg)
+	data, err := json.MarshalIndent(cfg, "", "    ")
 	if err != nil {
 		return fmt.Errorf("clientconfig: marshal config: %w", err)
 	}
+	// Ensure the file ends with a newline.
+	data = append(data, '\n')
 
 	// Write to a temp file first, then rename for atomic replacement.
-	cfgPath := filepath.Join(dir, "config.yml")
-	tmp, err := os.CreateTemp(dir, ".config.*.yml.tmp")
+	cfgPath := filepath.Join(dir, "config.json")
+	tmp, err := os.CreateTemp(dir, ".config.*.json.tmp")
 	if err != nil {
 		return fmt.Errorf("clientconfig: create temp file: %w", err)
 	}
 	tmpPath := tmp.Name()
 
-	// Prepend a header comment so the file is self-documenting.
-	header := "# notx configuration — ~/.notx/config.yml\n" +
-		"# Edit this file directly or run `notx config` to update interactively.\n\n"
-
-	if _, err := tmp.WriteString(header); err != nil {
-		tmp.Close()
-		os.Remove(tmpPath)
-		return fmt.Errorf("clientconfig: write header: %w", err)
-	}
 	if _, err := tmp.Write(data); err != nil {
 		tmp.Close()
 		os.Remove(tmpPath)

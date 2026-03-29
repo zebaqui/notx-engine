@@ -36,7 +36,7 @@ state on the server. Only changed lines are written as a new event — the
 full document is never re-stored verbatim.
 
 The note name is derived from the file's base name (without extension).
-The server address is read from ~/.notx/config.yml (client.grpc_addr).
+The server address is read from ~/.notx/config.json (client.grpc_addr).
 Override it for a single invocation with --addr.
 
 Examples:

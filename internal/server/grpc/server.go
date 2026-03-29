@@ -35,7 +35,7 @@ type Server struct {
 
 // NewServer creates a fully wired gRPC Server ready to call Serve on.
 // It does NOT start listening; call Serve to begin accepting connections.
-func NewServer(cfg *config.Config, r repo.NoteRepository, log *slog.Logger) (*Server, error) {
+func NewServer(cfg *config.Config, r repo.NoteRepository, devRepo repo.DeviceRepository, log *slog.Logger) (*Server, error) {
 	creds, err := buildTransportCredentials(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("grpc: build TLS credentials: %w", err)
@@ -63,7 +63,7 @@ func NewServer(cfg *config.Config, r repo.NoteRepository, log *slog.Logger) (*Se
 	gs := grpc.NewServer(opts...)
 
 	noteS := NewNoteServiceServer(r, cfg.DefaultPageSize, cfg.MaxPageSize)
-	deviceS := NewDeviceServiceServer()
+	deviceS := NewDeviceServiceServer(devRepo)
 
 	pb.RegisterNoteServiceServer(gs, noteS)
 	pb.RegisterDeviceServiceServer(gs, deviceS)

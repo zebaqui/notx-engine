@@ -19,7 +19,7 @@ by sending it to the running notx gRPC server (equivalent to "notx add <file>"):
   notx some/file.txt -d --secure
   notx some/file.txt --addr localhost:9000
 
-The server address is read from ~/.notx/config.yml (client.grpc_addr).
+The server address is read from ~/.notx/config.json (client.grpc_addr).
 Run "notx config" to set it up interactively.
 
 Pass --urn to update an existing note instead of creating a new one:

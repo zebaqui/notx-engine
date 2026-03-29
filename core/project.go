@@ -2,6 +2,37 @@ package core
 
 import "time"
 
+// DeviceApprovalStatus represents the onboarding approval state of a device.
+type DeviceApprovalStatus string
+
+const (
+	// DeviceApprovalPending means the device has registered but is awaiting
+	// manual approval from an administrator before it can pull data.
+	DeviceApprovalPending DeviceApprovalStatus = "pending"
+
+	// DeviceApprovalApproved means the device is allowed to pull data.
+	DeviceApprovalApproved DeviceApprovalStatus = "approved"
+
+	// DeviceApprovalRejected means an administrator has explicitly rejected
+	// this device; it must never be allowed to pull data.
+	DeviceApprovalRejected DeviceApprovalStatus = "rejected"
+)
+
+// DeviceRole describes the capability level granted to a device.
+type DeviceRole string
+
+const (
+	// DeviceRoleClient is a regular end-user device. It must go through the
+	// normal registration and approval flow before accessing data endpoints.
+	DeviceRoleClient DeviceRole = "client"
+
+	// DeviceRoleAdmin is a privileged device. Admin devices bypass the
+	// approval/revocation checks in withDeviceAuth and can always reach all
+	// data and management endpoints. A device only receives this role when it
+	// presents a valid admin passphrase during registration.
+	DeviceRoleAdmin DeviceRole = "admin"
+)
+
 // Project is an index-only grouping entity. Unlike notes, projects have no
 // .notx file; they exist solely in the Badger index so they are lightweight
 // and fast to enumerate.
@@ -68,6 +99,18 @@ type Device struct {
 
 	// PublicKeyB64 is the base64-encoded Ed25519 public key (32 bytes).
 	PublicKeyB64 string
+
+	// Role classifies the device as either a regular client or a privileged
+	// admin device. Admin devices bypass the approval/revocation gate in the
+	// HTTP middleware. Defaults to DeviceRoleClient when not set.
+	Role DeviceRole
+
+	// ApprovalStatus tracks whether this device has been approved for data
+	// access. On registration the value is set to DeviceApprovalPending when
+	// auto-approve is disabled, or DeviceApprovalApproved when auto-approve
+	// is enabled. Once set to DeviceApprovalRejected the device can never
+	// be granted access again without a new registration.
+	ApprovalStatus DeviceApprovalStatus
 
 	// Revoked marks the device as permanently revoked.
 	// A revoked device must be rejected by all layers.

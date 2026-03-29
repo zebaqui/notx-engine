@@ -49,6 +49,7 @@ func startServer(t *testing.T) (baseURL string, stop func()) {
 	cfg.EnableGRPC = true
 	cfg.HTTPPort = httpPort
 	cfg.GRPCPort = grpcPort
+	cfg.DeviceOnboarding.AutoApprove = true
 
 	provider := memory.New()
 
@@ -56,7 +57,7 @@ func startServer(t *testing.T) (baseURL string, stop func()) {
 		Level: slog.LevelError, // keep test output clean
 	}))
 
-	srv, err := server.New(cfg, provider, provider, provider, log)
+	srv, err := server.New(cfg, provider, provider, provider, provider, log)
 	if err != nil {
 		t.Fatalf("server.New: %v", err)
 	}
@@ -95,15 +96,90 @@ func startServer(t *testing.T) (baseURL string, stop func()) {
 // postJSON sends a POST request with a JSON body and returns the response.
 func postJSON(t *testing.T, url string, body any) *http.Response {
 	t.Helper()
+	return postJSONWithDeviceID(t, http.DefaultClient, url, "", body)
+}
+
+// postJSONWithDeviceID sends a POST request with a JSON body and an optional
+// X-Device-ID header, using the provided client.
+func postJSONWithDeviceID(t *testing.T, client *http.Client, url, deviceID string, body any) *http.Response {
+	t.Helper()
 	b, err := json.Marshal(body)
 	if err != nil {
-		t.Fatalf("postJSON marshal: %v", err)
+		t.Fatalf("postJSONWithDeviceID marshal: %v", err)
 	}
-	resp, err := http.Post(url, "application/json", bytes.NewReader(b)) //nolint:noctx
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(b)) //nolint:noctx
 	if err != nil {
-		t.Fatalf("postJSON %s: %v", url, err)
+		t.Fatalf("postJSONWithDeviceID new request %s: %v", url, err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if deviceID != "" {
+		req.Header.Set("X-Device-ID", deviceID)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("postJSONWithDeviceID %s: %v", url, err)
 	}
 	return resp
+}
+
+// getWithDeviceID sends a GET request with an X-Device-ID header.
+func getWithDeviceID(t *testing.T, client *http.Client, url, deviceID string) *http.Response {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodGet, url, nil) //nolint:noctx
+	if err != nil {
+		t.Fatalf("getWithDeviceID new request %s: %v", url, err)
+	}
+	if deviceID != "" {
+		req.Header.Set("X-Device-ID", deviceID)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("getWithDeviceID %s: %v", url, err)
+	}
+	return resp
+}
+
+type registerDeviceRequest struct {
+	URN          string `json:"urn"`
+	Name         string `json:"name"`
+	OwnerURN     string `json:"owner_urn"`
+	PublicKeyB64 string `json:"public_key_b64"`
+}
+
+type registerDeviceResponse struct {
+	URN            string `json:"urn"`
+	Name           string `json:"name"`
+	ApprovalStatus string `json:"approval_status"`
+}
+
+// registerTestDevice registers a device against the server (no X-Device-ID
+// required — the registration endpoint is open) and returns the device URN.
+// The server must have AutoApprove=true so the device is immediately usable.
+func registerTestDevice(t *testing.T, client *http.Client, baseURL string) string {
+	t.Helper()
+	const (
+		devURN   = "notx:device:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+		ownerURN = "notx:usr:7f3e9c1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b"
+	)
+	resp := postJSONWithDeviceID(t, client, baseURL+"/v1/devices", "", registerDeviceRequest{
+		URN:      devURN,
+		Name:     "test-device",
+		OwnerURN: ownerURN,
+	})
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("registerTestDevice: expected 201, got %d — %s", resp.StatusCode, body)
+	}
+	var out registerDeviceResponse
+	raw, _ := io.ReadAll(resp.Body)
+	if err := json.Unmarshal(raw, &out); err != nil {
+		t.Fatalf("registerTestDevice: decode response: %v", err)
+	}
+	if out.ApprovalStatus != "approved" {
+		t.Fatalf("registerTestDevice: expected approval_status=approved, got %q (is AutoApprove enabled?)", out.ApprovalStatus)
+	}
+	return out.URN
 }
 
 // decodeBody reads the response body into dst and closes it.
@@ -185,8 +261,11 @@ func TestGetNotes(t *testing.T) {
 		authorURN = "notx:usr:7f3e9c1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b"
 	)
 
+	// ── Step 0: register a device (auto-approved) and obtain its URN ─────────
+	deviceID := registerTestDevice(t, http.DefaultClient, baseURL)
+
 	// ── Step 1: create the note ───────────────────────────────────────────────
-	createResp := postJSON(t, baseURL+"/v1/notes", createNoteRequest{
+	createResp := postJSONWithDeviceID(t, http.DefaultClient, baseURL+"/v1/notes", deviceID, createNoteRequest{
 		URN:      noteURN,
 		Name:     noteName,
 		NoteType: "normal",
@@ -214,7 +293,7 @@ func TestGetNotes(t *testing.T) {
 	}
 
 	// ── Step 2: append an event ───────────────────────────────────────────────
-	eventResp := postJSON(t, baseURL+"/v1/events", appendEventRequest{
+	eventResp := postJSONWithDeviceID(t, http.DefaultClient, baseURL+"/v1/events", deviceID, appendEventRequest{
 		NoteURN:   noteURN,
 		Sequence:  1,
 		AuthorURN: authorURN,
@@ -236,10 +315,7 @@ func TestGetNotes(t *testing.T) {
 	}
 
 	// ── Step 3: list notes and verify ─────────────────────────────────────────
-	listResp, err := http.Get(baseURL + "/v1/notes") //nolint:noctx
-	if err != nil {
-		t.Fatalf("GET /v1/notes: %v", err)
-	}
+	listResp := getWithDeviceID(t, http.DefaultClient, baseURL+"/v1/notes", deviceID)
 	if listResp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(listResp.Body)
 		listResp.Body.Close()

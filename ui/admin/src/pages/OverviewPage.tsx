@@ -1,5 +1,13 @@
 import { useQuery } from "@tanstack/react-query";
-import { RefreshCw, AlertCircle, FolderOpen, Folder } from "lucide-react";
+import { useNavigate } from "@tanstack/react-router";
+import {
+  RefreshCw,
+  AlertCircle,
+  FolderOpen,
+  Folder,
+  Users,
+  Monitor,
+} from "lucide-react";
 import { fetchHealth, fetchMetrics } from "../api/client";
 
 function fmt(n: number) {
@@ -14,6 +22,8 @@ function timeSince(iso: string) {
 }
 
 export default function OverviewPage() {
+  const navigate = useNavigate();
+
   const health = useQuery({
     queryKey: ["health"],
     queryFn: fetchHealth,
@@ -35,7 +45,7 @@ export default function OverviewPage() {
       <div className="section-header">
         <div>
           <div className="section-title">Overview</div>
-          <div className="section-sub">Server health and note statistics</div>
+          <div className="section-sub">Server health and statistics</div>
         </div>
         <div className="topbar-right">
           {health.data && (
@@ -84,16 +94,13 @@ export default function OverviewPage() {
         </div>
       </div>
 
-      {/* ── Metrics grid ───────────────────────────────────────────────── */}
+      {/* ── Notes ──────────────────────────────────────────────────────── */}
       <div>
         <div className="card-title" style={{ marginBottom: 10 }}>
           Notes
         </div>
         {metrics.isLoading ? (
-          <div className="loading-center">
-            <div className="spinner" />
-            Loading metrics…
-          </div>
+          <LoadingRow />
         ) : (
           <div className="grid-4">
             <StatTile
@@ -110,12 +117,12 @@ export default function OverviewPage() {
             <StatTile
               label="Normal"
               value={fmt(metrics.data?.normal_notes ?? 0)}
-              sub="plain text notes"
+              sub="plain text"
             />
             <StatTile
               label="Secure"
               value={fmt(metrics.data?.secure_notes ?? 0)}
-              sub="encrypted notes"
+              sub="end-to-end encrypted"
             />
           </div>
         )}
@@ -154,48 +161,190 @@ export default function OverviewPage() {
         </div>
       )}
 
-      {/* ── Projects & Folders ─────────────────────────────────────────── */}
+      {/* ── Organisation ───────────────────────────────────────────────── */}
       <div>
         <div className="card-title" style={{ marginBottom: 10 }}>
           Organisation
         </div>
         {metrics.isLoading ? (
-          <div className="loading-center">
-            <div className="spinner" />
-            Loading…
-          </div>
+          <LoadingRow />
         ) : (
           <div className="grid-2">
+            <IconTile
+              icon={<FolderOpen size={22} />}
+              label="Projects"
+              value={fmt(metrics.data?.total_projects ?? 0)}
+              sub="active project groups"
+              onClick={() => navigate({ to: "/projects" })}
+            />
+            <IconTile
+              icon={<Folder size={22} />}
+              label="Folders"
+              value={fmt(metrics.data?.total_folders ?? 0)}
+              sub="folders across all projects"
+              onClick={() => navigate({ to: "/projects" })}
+            />
+          </div>
+        )}
+      </div>
+
+      {/* ── People ─────────────────────────────────────────────────────── */}
+      <div>
+        <div className="card-title" style={{ marginBottom: 10 }}>
+          People & Devices
+        </div>
+        {metrics.isLoading ? (
+          <LoadingRow />
+        ) : (
+          <div className="grid-2">
+            {/* Users tile */}
             <div
               className="stat-tile"
-              style={{ flexDirection: "row", alignItems: "center", gap: 14 }}
+              onClick={() => navigate({ to: "/users" })}
+              style={{ cursor: "pointer" }}
             >
-              <FolderOpen
-                size={22}
-                style={{ color: "var(--accent)", flexShrink: 0, opacity: 0.8 }}
-              />
-              <div>
-                <div className="stat-label">Projects</div>
-                <div className="stat-value" style={{ fontSize: 22 }}>
-                  {fmt(metrics.data?.total_projects ?? 0)}
+              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <Users
+                  size={18}
+                  style={{
+                    color: "var(--accent)",
+                    flexShrink: 0,
+                    opacity: 0.85,
+                  }}
+                />
+                <div className="stat-label" style={{ marginBottom: 0 }}>
+                  Users
                 </div>
-                <div className="stat-sub">active project groups</div>
+              </div>
+
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "baseline",
+                  gap: 10,
+                  marginTop: 4,
+                }}
+              >
+                <div className="stat-value">
+                  {fmt(metrics.data?.active_users ?? 0)}
+                </div>
+                {(metrics.data?.total_users ?? 0) >
+                  (metrics.data?.active_users ?? 0) && (
+                  <span className="stat-sub">
+                    +
+                    {fmt(
+                      (metrics.data?.total_users ?? 0) -
+                        (metrics.data?.active_users ?? 0),
+                    )}{" "}
+                    deleted
+                  </span>
+                )}
+              </div>
+
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  marginTop: 2,
+                }}
+              >
+                <div className="stat-sub">active accounts</div>
+                <span
+                  style={{
+                    fontSize: 11,
+                    color: "var(--accent)",
+                    opacity: 0.7,
+                  }}
+                >
+                  Manage →
+                </span>
               </div>
             </div>
+
+            {/* Devices tile */}
             <div
               className="stat-tile"
-              style={{ flexDirection: "row", alignItems: "center", gap: 14 }}
+              onClick={() => navigate({ to: "/devices" })}
+              style={{ cursor: "pointer" }}
             >
-              <Folder
-                size={22}
-                style={{ color: "var(--accent)", flexShrink: 0, opacity: 0.8 }}
-              />
-              <div>
-                <div className="stat-label">Folders</div>
-                <div className="stat-value" style={{ fontSize: 22 }}>
-                  {fmt(metrics.data?.total_folders ?? 0)}
+              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <Monitor
+                  size={18}
+                  style={{
+                    color: "var(--accent)",
+                    flexShrink: 0,
+                    opacity: 0.85,
+                  }}
+                />
+                <div className="stat-label" style={{ marginBottom: 0 }}>
+                  Devices
                 </div>
-                <div className="stat-sub">folders across all projects</div>
+              </div>
+
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "baseline",
+                  gap: 10,
+                  marginTop: 4,
+                }}
+              >
+                <div className="stat-value">
+                  {fmt(metrics.data?.active_devices ?? 0)}
+                </div>
+                {(metrics.data?.total_devices ?? 0) >
+                  (metrics.data?.active_devices ?? 0) && (
+                  <span className="stat-sub">
+                    +
+                    {fmt(
+                      (metrics.data?.total_devices ?? 0) -
+                        (metrics.data?.active_devices ?? 0),
+                    )}{" "}
+                    other
+                  </span>
+                )}
+              </div>
+
+              {/* Pending approval warning */}
+              {(metrics.data?.pending_devices ?? 0) > 0 && (
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 5,
+                    marginTop: 4,
+                    padding: "3px 8px",
+                    borderRadius: "var(--radius-sm, 4px)",
+                    background: "var(--yellow-dim, rgba(234,179,8,0.1))",
+                    border: "1px solid var(--yellow, #ca8a04)",
+                    fontSize: 11,
+                    color: "var(--yellow, #ca8a04)",
+                    fontWeight: 600,
+                  }}
+                >
+                  ⏳ {metrics.data!.pending_devices} pending approval
+                </div>
+              )}
+
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  marginTop: 2,
+                }}
+              >
+                <div className="stat-sub">approved &amp; active</div>
+                <span
+                  style={{
+                    fontSize: 11,
+                    color: "var(--accent)",
+                    opacity: 0.7,
+                  }}
+                >
+                  Manage →
+                </span>
               </div>
             </div>
           </div>
@@ -206,6 +355,15 @@ export default function OverviewPage() {
 }
 
 // ─── Sub-components ──────────────────────────────────────────────────────────
+
+function LoadingRow() {
+  return (
+    <div className="loading-center" style={{ padding: "28px 0" }}>
+      <div className="spinner" />
+      Loading…
+    </div>
+  );
+}
 
 function HealthCard({
   label,
@@ -286,6 +444,56 @@ function StatTile({
         {value}
       </div>
       {sub && <div className="stat-sub">{sub}</div>}
+    </div>
+  );
+}
+
+function IconTile({
+  icon,
+  label,
+  value,
+  sub,
+  onClick,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  value: string;
+  sub?: string;
+  onClick?: () => void;
+}) {
+  return (
+    <div
+      className="stat-tile"
+      style={{
+        flexDirection: "row",
+        alignItems: "center",
+        gap: 14,
+        cursor: onClick ? "pointer" : undefined,
+      }}
+      onClick={onClick}
+    >
+      <div style={{ color: "var(--accent)", flexShrink: 0, opacity: 0.8 }}>
+        {icon}
+      </div>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div className="stat-label">{label}</div>
+        <div className="stat-value" style={{ fontSize: 22 }}>
+          {value}
+        </div>
+        {sub && <div className="stat-sub">{sub}</div>}
+      </div>
+      {onClick && (
+        <span
+          style={{
+            fontSize: 11,
+            color: "var(--accent)",
+            opacity: 0.7,
+            flexShrink: 0,
+          }}
+        >
+          Manage →
+        </span>
+      )}
     </div>
   );
 }
