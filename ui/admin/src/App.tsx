@@ -1,20 +1,33 @@
 import { useState } from "react";
-import { LayoutDashboard, Settings, FileText, Activity } from "lucide-react";
+import {
+  LayoutDashboard,
+  Settings,
+  FileText,
+  Activity,
+  FolderOpen,
+  Monitor,
+} from "lucide-react";
 import OverviewPage from "./pages/OverviewPage";
 import ConfigPage from "./pages/ConfigPage";
 import NotesPage from "./pages/NotesPage";
+import ProjectsPage from "./pages/ProjectsPage";
+import DevicesPage from "./pages/DevicesPage";
 
-type Page = "overview" | "config" | "notes";
+type Page = "overview" | "notes" | "projects" | "devices" | "config";
 
 const NAV: { id: Page; label: string; icon: React.ReactNode }[] = [
   { id: "overview", label: "Overview", icon: <LayoutDashboard size={16} /> },
   { id: "notes", label: "Notes", icon: <FileText size={16} /> },
+  { id: "projects", label: "Projects", icon: <FolderOpen size={16} /> },
+  { id: "devices", label: "Devices", icon: <Monitor size={16} /> },
   { id: "config", label: "Configuration", icon: <Settings size={16} /> },
 ];
 
 const PAGE_TITLES: Record<Page, string> = {
   overview: "Overview",
   notes: "Notes",
+  projects: "Projects & Folders",
+  devices: "Devices",
   config: "Configuration",
 };
 
@@ -92,6 +105,8 @@ export default function App() {
         <main className="page-content">
           {page === "overview" && <OverviewPage />}
           {page === "notes" && <NotesPage />}
+          {page === "projects" && <ProjectsPage />}
+          {page === "devices" && <DevicesPage />}
           {page === "config" && <ConfigPage />}
         </main>
       </div>

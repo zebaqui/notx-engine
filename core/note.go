@@ -92,6 +92,54 @@ func NewNote(urn URN, name string, createdAt time.Time) *Note {
 	}
 }
 
+// NewNoteAtSequence creates a Note pre-seeded with a snapshot at the given
+// headSequence and content string. This is used by the file provider's Get
+// fast path to reconstruct a note from Badger's materialised cache without
+// replaying the full event history from disk.
+//
+// The returned note has:
+//   - HeadSequence() == headSequence
+//   - Content() == content (if non-empty)
+//   - No events in its event stream (only a snapshot checkpoint)
+//
+// The note is ready to accept AppendEvent calls for sequence headSequence+1.
+func NewNoteAtSequence(urn URN, name string, createdAt, updatedAt time.Time, headSequence int, content string) *Note {
+	n := &Note{
+		URN:       urn,
+		Name:      name,
+		NoteType:  NoteTypeNormal,
+		CreatedAt: createdAt,
+		UpdatedAt: updatedAt,
+		NodeLinks: make(map[string]URN),
+	}
+	if headSequence < 1 || content == "" {
+		return n
+	}
+	// Seed the event slice with headSequence placeholder entries so that
+	// HeadSequence() returns the correct value. Each placeholder carries a
+	// single no-content marker entry; the snapshot below provides the actual
+	// content so linesAt() never needs to replay these placeholders.
+	n.events = make([]*Event, headSequence)
+	for i := 0; i < headSequence; i++ {
+		n.events[i] = &Event{
+			NoteURN:   urn,
+			Sequence:  i + 1,
+			AuthorURN: AnonURN(urn.Namespace),
+			CreatedAt: createdAt,
+			Entries:   []LineEntry{{Op: LineOpSetEmpty, LineNumber: 1}},
+		}
+	}
+	n.snapshots = []*Snapshot{
+		{
+			NoteURN:   urn,
+			Sequence:  headSequence,
+			Lines:     SplitLines(content),
+			CreatedAt: updatedAt,
+		},
+	}
+	return n
+}
+
 // NewSecureNote creates a new, empty secure (E2EE) Note.
 // It is identical to NewNote except that NoteType is set to NoteTypeSecure
 // and cannot be changed.

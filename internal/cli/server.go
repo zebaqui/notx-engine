@@ -8,6 +8,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/zebaqui/notx-engine/internal/clientconfig"
 	"github.com/zebaqui/notx-engine/internal/repo/file"
+	"github.com/zebaqui/notx-engine/internal/repo/memory"
 	"github.com/zebaqui/notx-engine/internal/server"
 	"github.com/zebaqui/notx-engine/internal/server/config"
 )
@@ -141,7 +142,8 @@ func runServer(cmd *cobra.Command, args []string) error {
 	}()
 
 	// ── Build and run server ─────────────────────────────────────────────────
-	srv, err := server.New(cfg, provider, log)
+	memProvider := memory.New()
+	srv, err := server.New(cfg, provider, provider, memProvider, log)
 	if err != nil {
 		return fmt.Errorf("build server: %w", err)
 	}

@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { RefreshCw, AlertCircle } from "lucide-react";
+import { RefreshCw, AlertCircle, FolderOpen, Folder } from "lucide-react";
 import { fetchHealth, fetchMetrics } from "../api/client";
 
 function fmt(n: number) {
@@ -139,7 +139,13 @@ export default function OverviewPage() {
                     100
                   ).toFixed(1)
                 : "0.0"}
-              <span style={{ fontSize: 16, fontWeight: 400, color: "var(--text-secondary)" }}>
+              <span
+                style={{
+                  fontSize: 16,
+                  fontWeight: 400,
+                  color: "var(--text-secondary)",
+                }}
+              >
                 %
               </span>
             </div>
@@ -147,6 +153,54 @@ export default function OverviewPage() {
           </div>
         </div>
       )}
+
+      {/* ── Projects & Folders ─────────────────────────────────────────── */}
+      <div>
+        <div className="card-title" style={{ marginBottom: 10 }}>
+          Organisation
+        </div>
+        {metrics.isLoading ? (
+          <div className="loading-center">
+            <div className="spinner" />
+            Loading…
+          </div>
+        ) : (
+          <div className="grid-2">
+            <div
+              className="stat-tile"
+              style={{ flexDirection: "row", alignItems: "center", gap: 14 }}
+            >
+              <FolderOpen
+                size={22}
+                style={{ color: "var(--accent)", flexShrink: 0, opacity: 0.8 }}
+              />
+              <div>
+                <div className="stat-label">Projects</div>
+                <div className="stat-value" style={{ fontSize: 22 }}>
+                  {fmt(metrics.data?.total_projects ?? 0)}
+                </div>
+                <div className="stat-sub">active project groups</div>
+              </div>
+            </div>
+            <div
+              className="stat-tile"
+              style={{ flexDirection: "row", alignItems: "center", gap: 14 }}
+            >
+              <Folder
+                size={22}
+                style={{ color: "var(--accent)", flexShrink: 0, opacity: 0.8 }}
+              />
+              <div>
+                <div className="stat-label">Folders</div>
+                <div className="stat-value" style={{ fontSize: 22 }}>
+                  {fmt(metrics.data?.total_folders ?? 0)}
+                </div>
+                <div className="stat-sub">folders across all projects</div>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -163,7 +217,10 @@ function HealthCard({
   loading: boolean;
 }) {
   return (
-    <div className="stat-tile" style={{ flexDirection: "row", alignItems: "center", gap: 14 }}>
+    <div
+      className="stat-tile"
+      style={{ flexDirection: "row", alignItems: "center", gap: 14 }}
+    >
       {loading ? (
         <div className="spinner" />
       ) : (
@@ -180,7 +237,14 @@ function HealthCard({
       )}
       <div>
         <div className="stat-label">{label}</div>
-        <div style={{ fontSize: 15, fontWeight: 600, color: "var(--text-primary)", marginTop: 2 }}>
+        <div
+          style={{
+            fontSize: 15,
+            fontWeight: 600,
+            color: "var(--text-primary)",
+            marginTop: 2,
+          }}
+        >
           {loading ? "—" : ok ? "Healthy" : "Unreachable"}
         </div>
       </div>
@@ -212,8 +276,8 @@ function StatTile({
   const color = accent
     ? "var(--accent)"
     : warn
-    ? "var(--yellow)"
-    : "var(--text-primary)";
+      ? "var(--yellow)"
+      : "var(--text-primary)";
 
   return (
     <div className="stat-tile">

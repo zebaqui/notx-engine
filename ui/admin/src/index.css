@@ -575,6 +575,11 @@ a:hover {
     color: var(--text-muted);
 }
 
+/* ── Spin icon (animate SVG icons during loading) ───────────────────────── */
+.spin-icon {
+    animation: spin 0.7s linear infinite;
+}
+
 /* ── Note detail drawer ─────────────────────────────────────────────────── */
 .drawer-overlay {
     position: fixed;

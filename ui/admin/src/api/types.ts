@@ -54,6 +54,35 @@ export interface SearchNotesResponse {
   next_page_token: string;
 }
 
+export interface Project {
+  urn: string;
+  name: string;
+  description?: string;
+  deleted: boolean;
+  created_at: string; // ISO-8601
+  updated_at: string; // ISO-8601
+}
+
+export interface Folder {
+  urn: string;
+  project_urn: string;
+  name: string;
+  description?: string;
+  deleted: boolean;
+  created_at: string; // ISO-8601
+  updated_at: string; // ISO-8601
+}
+
+export interface ListProjectsResponse {
+  projects: Project[];
+  next_page_token: string;
+}
+
+export interface ListFoldersResponse {
+  folders: Folder[];
+  next_page_token: string;
+}
+
 // ─── Admin-only synthetic types (assembled client-side) ────────────────────
 
 export interface ServerConfig {
@@ -71,6 +100,20 @@ export interface ServerConfig {
   log_level: string;
 }
 
+export interface Device {
+  urn: string;
+  name: string;
+  owner_urn: string;
+  public_key_b64: string; // base64-encoded Ed25519 public key
+  registered_at: string; // ISO-8601
+  last_seen_at?: string; // ISO-8601, optional
+  revoked: boolean;
+}
+
+export interface ListDevicesResponse {
+  devices: Device[];
+}
+
 export interface HealthStatus {
   http_ok: boolean;
   ready_ok: boolean;
@@ -84,4 +127,6 @@ export interface ServerMetrics {
   secure_notes: number;
   normal_notes: number;
   total_events: number;
+  total_projects: number;
+  total_folders: number;
 }

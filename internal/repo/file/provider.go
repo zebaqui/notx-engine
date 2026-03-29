@@ -1,64 +1,85 @@
 package file
 
 import (
+	"bufio"
+	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	oteltrace "go.opentelemetry.io/otel/trace"
+
 	"github.com/zebaqui/notx-engine/core"
 	"github.com/zebaqui/notx-engine/internal/repo"
 	"github.com/zebaqui/notx-engine/internal/repo/index"
 )
 
+// tracer returns a fresh Tracer from the current global provider so that any
+// provider swap (e.g. in tests) is visible to all callers.
+func tracer() oteltrace.Tracer {
+	return otel.Tracer("notx/repo/file")
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Directory layout
 //
 //   <dataDir>/
-//     notes/           .notx files, one per note: <urn-uuid>.notx
-//     events/          append-only event journals: <urn-uuid>.jsonl
-//     index/           Badger database directory
+//     notes/   — one .notx file per note, append-only event stream
+//     index/   — Badger database (metadata cache + materialized content + FTS)
+//
+// There are no .meta.json sidecars and no .jsonl journals.
+// Badger is the single fast-read cache. The .notx files are the canonical
+// on-disk truth. On startup the provider reconciles them.
 // ─────────────────────────────────────────────────────────────────────────────
 
 const (
-	notesSubdir  = "notes"
-	eventsSubdir = "events"
-	indexSubdir  = "index"
+	notesSubdir = "notes"
+	indexSubdir = "index"
 )
 
 // Provider is a file-system-backed implementation of repo.NoteRepository.
 //
-// Notes are stored as .notx files under <dataDir>/notes/.
-// Each note's event stream is additionally journaled as newline-delimited JSON
-// under <dataDir>/events/ for fast sequential reads without re-parsing the
-// full .notx file.
-// A Badger-backed index under <dataDir>/index/ provides fast list and search
-// operations without reading every file on disk.
+// Write path  — every AppendEvent call:
+//  1. Appends the event block to the .notx file (single O_APPEND write).
+//  2. Rewrites the # head_sequence header line in the .notx file.
+//  3. Updates Badger with the new metadata + materialised content.
+//
+// Read path   — Get, List, Events:
+//   - Get:    served entirely from Badger (header + content). No file I/O.
+//   - List:   served entirely from Badger.
+//   - Events: parses the .notx file (only called when history is requested).
+//   - Search: served from Badger FTS index.
+//
+// Startup reconciliation — New():
+//
+//	Scans all .notx files, compares each file's head_sequence against what
+//	Badger knows. Any file that is ahead of (or absent from) Badger is
+//	re-parsed and re-indexed. This covers manual file edits, copies, and
+//	any crash that left Badger stale.
 //
 // Provider is safe for concurrent use.
 type Provider struct {
-	dataDir   string
-	notesDir  string
-	eventsDir string
-
-	idx *index.Index
-
-	mu sync.RWMutex // guards in-memory note cache and file writes
+	dataDir  string
+	notesDir string
+	idx      *index.Index
+	mu       sync.RWMutex
 }
 
-// New creates a new file-based Provider rooted at dataDir.
-// It creates all required sub-directories if they do not exist and opens the
-// Badger index. The caller must call Close when done.
+// New creates a new Provider rooted at dataDir, opens Badger, and reconciles
+// the notes directory against the index before returning.
 func New(dataDir string) (*Provider, error) {
 	notesDir := filepath.Join(dataDir, notesSubdir)
-	eventsDir := filepath.Join(dataDir, eventsSubdir)
 	indexDir := filepath.Join(dataDir, indexSubdir)
 
-	for _, dir := range []string{notesDir, eventsDir, indexDir} {
+	for _, dir := range []string{notesDir, indexDir} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return nil, fmt.Errorf("file provider: create directory %q: %w", dir, err)
 		}
@@ -69,60 +90,120 @@ func New(dataDir string) (*Provider, error) {
 		return nil, fmt.Errorf("file provider: open index: %w", err)
 	}
 
-	return &Provider{
-		dataDir:   dataDir,
-		notesDir:  notesDir,
-		eventsDir: eventsDir,
-		idx:       idx,
-	}, nil
+	p := &Provider{
+		dataDir:  dataDir,
+		notesDir: notesDir,
+		idx:      idx,
+	}
+
+	if err := p.reconcile(); err != nil {
+		_ = idx.Close()
+		return nil, fmt.Errorf("file provider: reconcile: %w", err)
+	}
+
+	return p, nil
 }
 
-// Close releases all resources held by the provider (index database, etc.).
+// Close releases all resources held by the provider.
 func (p *Provider) Close() error {
 	return p.idx.Close()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Note lifecycle
+// Startup reconciliation
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Create persists a new note header. The note must have an empty event stream.
-// Returns repo.ErrAlreadyExists if the URN is already in use.
-func (p *Provider) Create(ctx context.Context, note *core.Note) error {
-	if err := ctx.Err(); err != nil {
-		return err
+// reconcile scans every .notx file in notesDir and re-indexes any file whose
+// head_sequence is ahead of what Badger currently knows. This keeps the cache
+// consistent after crashes, manual file copies, or out-of-band edits.
+func (p *Provider) reconcile() error {
+	entries, err := os.ReadDir(p.notesDir)
+	if err != nil {
+		return fmt.Errorf("read notes dir: %w", err)
 	}
 
+	for _, de := range entries {
+		if de.IsDir() || !strings.HasSuffix(de.Name(), ".notx") {
+			continue
+		}
+
+		notePath := filepath.Join(p.notesDir, de.Name())
+
+		// Peek at just the header to get the URN and head_sequence cheaply.
+		urn, fileSeq, err := peekNotxHeader(notePath)
+		if err != nil {
+			// Corrupt or unrecognised file — skip, don't crash the server.
+			continue
+		}
+
+		// Check what Badger knows.
+		existing, err := p.idx.Get(urn)
+		if err != nil {
+			return fmt.Errorf("index get %q: %w", urn, err)
+		}
+
+		if existing != nil && existing.HeadSequence >= fileSeq {
+			// Badger is current — nothing to do.
+			continue
+		}
+
+		// File is ahead of the index (or unknown): parse and re-index.
+		note, err := core.NewNoteFromFile(notePath)
+		if err != nil {
+			continue
+		}
+
+		if err := p.indexNote(note); err != nil {
+			return fmt.Errorf("re-index %q: %w", urn, err)
+		}
+	}
+
+	return nil
+}
+
+// peekNotxHeader reads just the comment header block of a .notx file and
+// returns the note URN string and the head_sequence value. It does not parse
+// the event stream.
+func peekNotxHeader(path string) (urn string, headSeq int, err error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", 0, err
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.HasPrefix(line, "#") && strings.TrimSpace(line) != "" {
+			break // past the header block
+		}
+		if strings.HasPrefix(line, "# note_urn:") {
+			urn = strings.TrimSpace(strings.TrimPrefix(line, "# note_urn:"))
+		}
+		if strings.HasPrefix(line, "# head_sequence:") {
+			raw := strings.TrimSpace(strings.TrimPrefix(line, "# head_sequence:"))
+			_, _ = fmt.Sscanf(raw, "%d", &headSeq)
+		}
+	}
+	if urn == "" {
+		return "", 0, fmt.Errorf("no note_urn found in %q", path)
+	}
+	return urn, headSeq, scanner.Err()
+}
+
+// indexNote upserts a fully-parsed note (with all events applied) into Badger,
+// storing both the metadata and the materialised content string.
+func (p *Provider) indexNote(note *core.Note) error {
 	urn := note.URN.String()
-	notePath := p.noteFilePath(urn)
 
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	if _, err := os.Stat(notePath); err == nil {
-		return fmt.Errorf("%w: %s", repo.ErrAlreadyExists, urn)
-	}
-
-	// Serialise header metadata to a compact JSON sidecar alongside the .notx file.
-	meta := noteMetaFromNote(note)
-	if err := p.writeMeta(urn, meta); err != nil {
-		return err
-	}
-
-	// Write an empty .notx stub so the file exists on disk.
-	if err := p.writeNotxStub(note); err != nil {
-		_ = os.Remove(p.metaFilePath(urn))
-		return err
-	}
-
-	// Update the index.
 	entry := index.IndexEntry{
-		URN:       urn,
-		Name:      note.Name,
-		NoteType:  note.NoteType.String(),
-		Deleted:   note.Deleted,
-		CreatedAt: note.CreatedAt.UTC().Format(time.RFC3339),
-		UpdatedAt: note.UpdatedAt.UTC().Format(time.RFC3339),
+		URN:          urn,
+		Name:         note.Name,
+		NoteType:     note.NoteType.String(),
+		Deleted:      note.Deleted,
+		CreatedAt:    note.CreatedAt.UTC().Format(time.RFC3339),
+		UpdatedAt:    note.UpdatedAt.UTC().Format(time.RFC3339),
+		HeadSequence: note.HeadSequence(),
 	}
 	if note.ProjectURN != nil {
 		entry.ProjectURN = note.ProjectURN.String()
@@ -131,77 +212,204 @@ func (p *Provider) Create(ctx context.Context, note *core.Note) error {
 		entry.FolderURN = note.FolderURN.String()
 	}
 
-	if err := p.idx.Upsert(entry, ""); err != nil {
-		_ = os.Remove(p.metaFilePath(urn))
+	var content string
+	if note.NoteType == core.NoteTypeNormal {
+		content = note.Content()
+	}
+
+	return p.idx.Upsert(entry, content)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Note lifecycle
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Create persists a new note. Writes the .notx header stub and indexes it.
+// Returns repo.ErrAlreadyExists if the URN is already in use.
+func (p *Provider) Create(ctx context.Context, note *core.Note) error {
+	ctx, span := tracer().Start(ctx, "file.Create")
+	defer span.End()
+
+	if err := ctx.Err(); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return err
+	}
+
+	urn := note.URN.String()
+	span.SetAttributes(
+		attribute.String("note.urn", urn),
+		attribute.String("note.type", note.NoteType.String()),
+	)
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	notePath := p.noteFilePath(urn)
+	if _, err := os.Stat(notePath); err == nil {
+		err2 := fmt.Errorf("%w: %s", repo.ErrAlreadyExists, urn)
+		span.RecordError(err2)
+		span.SetStatus(codes.Error, err2.Error())
+		return err2
+	}
+
+	if err := p.writeNotxStub(note); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return err
+	}
+
+	_, idxSpan := tracer().Start(ctx, "file.Create/index.Upsert")
+	if err := p.indexNote(note); err != nil {
+		idxSpan.RecordError(err)
+		idxSpan.SetStatus(codes.Error, err.Error())
+		idxSpan.End()
 		_ = os.Remove(notePath)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return fmt.Errorf("file provider: index create: %w", err)
 	}
+	idxSpan.End()
 
 	return nil
 }
 
-// Get retrieves a note by URN, replaying its full event stream.
-// Returns repo.ErrNotFound if no note with that URN exists.
+// Get returns the note header and materialised content from Badger.
+// No .notx file I/O occurs on the hot read path.
 func (p *Provider) Get(ctx context.Context, urn string) (*core.Note, error) {
+	ctx, span := tracer().Start(ctx, "file.Get")
+	defer span.End()
+	span.SetAttributes(attribute.String("note.urn", urn))
+
 	if err := ctx.Err(); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return nil, err
 	}
 
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
-	notePath := p.noteFilePath(urn)
-	if _, err := os.Stat(notePath); os.IsNotExist(err) {
-		return nil, fmt.Errorf("%w: %s", repo.ErrNotFound, urn)
-	}
-
-	note, err := core.NewNoteFromFile(notePath)
+	_, idxSpan := tracer().Start(ctx, "file.Get/index.Get")
+	entry, err := p.idx.Get(urn)
+	idxSpan.End()
 	if err != nil {
-		return nil, fmt.Errorf("file provider: parse note %q: %w", urn, err)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return nil, fmt.Errorf("file provider: index get: %w", err)
+	}
+	if entry == nil {
+		// Not in index — fall back to file if it exists (e.g. after manual copy).
+		notePath := p.noteFilePath(urn)
+		if _, statErr := os.Stat(notePath); os.IsNotExist(statErr) {
+			err2 := fmt.Errorf("%w: %s", repo.ErrNotFound, urn)
+			span.RecordError(err2)
+			span.SetStatus(codes.Error, err2.Error())
+			return nil, err2
+		}
+		note, parseErr := core.NewNoteFromFile(notePath)
+		if parseErr != nil {
+			span.RecordError(parseErr)
+			span.SetStatus(codes.Error, parseErr.Error())
+			return nil, fmt.Errorf("file provider: fallback parse %q: %w", urn, parseErr)
+		}
+		// Re-index so next read is fast.
+		_ = p.indexNote(note)
+		span.SetAttributes(attribute.Bool("cache.miss", true))
+		return note, nil
 	}
 
-	// Replay events from the journal (they are the authoritative stream).
-	events, err := p.readEventJournal(urn)
-	if err != nil {
-		return nil, err
-	}
-	for _, ev := range events {
-		if ev.Sequence <= note.HeadSequence() {
-			// Already applied via the .notx file; skip.
-			continue
-		}
-		if err := note.ApplyEvent(ev); err != nil {
-			return nil, fmt.Errorf("file provider: replay event seq %d for %q: %w", ev.Sequence, urn, err)
-		}
-	}
+	// Build the note from the index entry (no file I/O).
+	_, buildSpan := tracer().Start(ctx, "file.Get/buildFromIndex")
 
+	var note *core.Note
+	if entry.NoteType == "normal" {
+		_, contentSpan := tracer().Start(ctx, "file.Get/index.GetContent")
+		content, contentErr := p.idx.GetContent(urn)
+		contentSpan.End()
+		if contentErr != nil {
+			span.RecordError(contentErr)
+			span.SetStatus(codes.Error, contentErr.Error())
+			buildSpan.End()
+			return nil, fmt.Errorf("file provider: get content: %w", contentErr)
+		}
+		noteURN, parseErr := core.ParseURN(urn)
+		if parseErr != nil {
+			span.RecordError(parseErr)
+			span.SetStatus(codes.Error, parseErr.Error())
+			buildSpan.End()
+			return nil, fmt.Errorf("file provider: parse urn: %w", parseErr)
+		}
+		createdAt, _ := time.Parse(time.RFC3339, entry.CreatedAt)
+		updatedAt, _ := time.Parse(time.RFC3339, entry.UpdatedAt)
+		note = core.NewNoteAtSequence(noteURN, entry.Name, createdAt, updatedAt, entry.HeadSequence, content)
+		note.NoteType, _ = core.ParseNoteType(entry.NoteType)
+		note.Deleted = entry.Deleted
+		if entry.ProjectURN != "" {
+			if purn, e := core.ParseURN(entry.ProjectURN); e == nil {
+				note.ProjectURN = &purn
+			}
+		}
+		if entry.FolderURN != "" {
+			if furn, e := core.ParseURN(entry.FolderURN); e == nil {
+				note.FolderURN = &furn
+			}
+		}
+	} else {
+		var buildErr error
+		note, buildErr = noteFromIndexEntry(*entry)
+		if buildErr != nil {
+			span.RecordError(buildErr)
+			span.SetStatus(codes.Error, buildErr.Error())
+			buildSpan.End()
+			return nil, fmt.Errorf("file provider: build note from index: %w", buildErr)
+		}
+	}
+	buildSpan.End()
+
+	span.SetAttributes(
+		attribute.Int("note.head_sequence", note.HeadSequence()),
+		attribute.Bool("cache.miss", false),
+	)
 	return note, nil
 }
 
-// List returns a filtered, paginated list of notes using the Badger index.
-// Only header metadata is returned (no event streams).
+// List returns a paginated list of note headers from Badger.
 func (p *Provider) List(ctx context.Context, opts repo.ListOptions) (*repo.ListResult, error) {
+	ctx, span := tracer().Start(ctx, "file.List")
+	defer span.End()
+	span.SetAttributes(
+		attribute.Int("opts.page_size", opts.PageSize),
+		attribute.Bool("opts.include_deleted", opts.IncludeDeleted),
+	)
+
 	if err := ctx.Err(); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return nil, err
 	}
+
+	p.mu.RLock()
+	defer p.mu.RUnlock()
 
 	idxOpts := index.ListOptions{
 		IncludeDeleted: opts.IncludeDeleted,
 		PageSize:       opts.PageSize,
 		PageToken:      opts.PageToken,
-	}
-	if opts.ProjectURN != "" {
-		idxOpts.ProjectURN = opts.ProjectURN
-	}
-	if opts.FolderURN != "" {
-		idxOpts.FolderURN = opts.FolderURN
+		ProjectURN:     opts.ProjectURN,
+		FolderURN:      opts.FolderURN,
 	}
 	if opts.FilterByType {
 		idxOpts.NoteType = opts.NoteTypeFilter.String()
 	}
 
+	_, idxSpan := tracer().Start(ctx, "file.List/index.List")
 	entries, nextToken, err := p.idx.List(idxOpts)
+	idxSpan.SetAttributes(attribute.Int("index.results", len(entries)))
+	idxSpan.End()
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return nil, fmt.Errorf("file provider: list index: %w", err)
 	}
 
@@ -209,56 +417,67 @@ func (p *Provider) List(ctx context.Context, opts repo.ListOptions) (*repo.ListR
 	for _, e := range entries {
 		n, err := noteFromIndexEntry(e)
 		if err != nil {
-			return nil, fmt.Errorf("file provider: reconstruct note from index: %w", err)
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+			return nil, fmt.Errorf("file provider: build note from index: %w", err)
 		}
 		notes = append(notes, n)
 	}
 
+	span.SetAttributes(attribute.Int("results.count", len(notes)))
 	return &repo.ListResult{
 		Notes:         notes,
 		NextPageToken: nextToken,
 	}, nil
 }
 
-// Update persists mutable header field changes for an existing note.
-// NoteType cannot be changed; returns repo.ErrNoteTypeImmutable if attempted.
+// Update persists changes to a note's mutable header fields.
+// NoteType is immutable; returns repo.ErrNoteTypeImmutable if altered.
 func (p *Provider) Update(ctx context.Context, note *core.Note) error {
+	ctx, span := tracer().Start(ctx, "file.Update")
+	defer span.End()
+
 	if err := ctx.Err(); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return err
 	}
 
 	urn := note.URN.String()
+	span.SetAttributes(attribute.String("note.urn", urn))
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	// Load existing meta to validate NoteType immutability.
-	existing, err := p.readMeta(urn)
+	existing, err := p.idx.Get(urn)
 	if err != nil {
-		return err
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return fmt.Errorf("file provider: index get for update: %w", err)
 	}
 	if existing == nil {
-		return fmt.Errorf("%w: %s", repo.ErrNotFound, urn)
+		err2 := fmt.Errorf("%w: %s", repo.ErrNotFound, urn)
+		span.RecordError(err2)
+		span.SetStatus(codes.Error, err2.Error())
+		return err2
 	}
 	if existing.NoteType != note.NoteType.String() {
-		return fmt.Errorf("%w: cannot change note_type from %q to %q",
+		err2 := fmt.Errorf("%w: cannot change note_type from %q to %q",
 			repo.ErrNoteTypeImmutable, existing.NoteType, note.NoteType.String())
+		span.RecordError(err2)
+		span.SetStatus(codes.Error, err2.Error())
+		return err2
 	}
 
-	// Persist updated meta.
-	meta := noteMetaFromNote(note)
-	if err := p.writeMeta(urn, meta); err != nil {
-		return err
-	}
-
-	// Update the index.
+	// Preserve head_sequence and content — only header metadata changes.
 	entry := index.IndexEntry{
-		URN:       urn,
-		Name:      note.Name,
-		NoteType:  note.NoteType.String(),
-		Deleted:   note.Deleted,
-		CreatedAt: note.CreatedAt.UTC().Format(time.RFC3339),
-		UpdatedAt: note.UpdatedAt.UTC().Format(time.RFC3339),
+		URN:          urn,
+		Name:         note.Name,
+		NoteType:     existing.NoteType,
+		Deleted:      note.Deleted,
+		CreatedAt:    existing.CreatedAt,
+		UpdatedAt:    note.UpdatedAt.UTC().Format(time.RFC3339),
+		HeadSequence: existing.HeadSequence,
 	}
 	if note.ProjectURN != nil {
 		entry.ProjectURN = note.ProjectURN.String()
@@ -267,50 +486,82 @@ func (p *Provider) Update(ctx context.Context, note *core.Note) error {
 		entry.FolderURN = note.FolderURN.String()
 	}
 
-	if err := p.idx.Upsert(entry, ""); err != nil {
+	// Get existing content to preserve it through the Upsert.
+	var content string
+	if existing.NoteType == "normal" {
+		content, err = p.idx.GetContent(urn)
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+			return fmt.Errorf("file provider: get content for update: %w", err)
+		}
+	}
+
+	_, idxSpan := tracer().Start(ctx, "file.Update/index.Upsert")
+	if err := p.idx.Upsert(entry, content); err != nil {
+		idxSpan.RecordError(err)
+		idxSpan.SetStatus(codes.Error, err.Error())
+		idxSpan.End()
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return fmt.Errorf("file provider: index update: %w", err)
 	}
+	idxSpan.End()
 	return nil
 }
 
 // Delete soft-deletes a note by setting its Deleted flag.
 // Returns repo.ErrNotFound if the note does not exist.
 func (p *Provider) Delete(ctx context.Context, urn string) error {
+	ctx, span := tracer().Start(ctx, "file.Delete")
+	defer span.End()
+	span.SetAttributes(attribute.String("note.urn", urn))
+
 	if err := ctx.Err(); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return err
 	}
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	meta, err := p.readMeta(urn)
+	existing, err := p.idx.Get(urn)
 	if err != nil {
-		return err
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return fmt.Errorf("file provider: index get for delete: %w", err)
 	}
-	if meta == nil {
-		return fmt.Errorf("%w: %s", repo.ErrNotFound, urn)
+	if existing == nil {
+		err2 := fmt.Errorf("%w: %s", repo.ErrNotFound, urn)
+		span.RecordError(err2)
+		span.SetStatus(codes.Error, err2.Error())
+		return err2
 	}
 
-	meta.Deleted = true
-	meta.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
-	if err := p.writeMeta(urn, meta); err != nil {
-		return err
+	existing.Deleted = true
+	existing.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+
+	var content string
+	if existing.NoteType == "normal" {
+		content, err = p.idx.GetContent(urn)
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+			return fmt.Errorf("file provider: get content for delete: %w", err)
+		}
 	}
 
-	// Update index entry — keep it present so list-with-deleted works.
-	entry := index.IndexEntry{
-		URN:        meta.URN,
-		Name:       meta.Name,
-		NoteType:   meta.NoteType,
-		ProjectURN: meta.ProjectURN,
-		FolderURN:  meta.FolderURN,
-		Deleted:    true,
-		CreatedAt:  meta.CreatedAt,
-		UpdatedAt:  meta.UpdatedAt,
-	}
-	if err := p.idx.Upsert(entry, ""); err != nil {
+	_, idxSpan := tracer().Start(ctx, "file.Delete/index.Upsert")
+	if err := p.idx.Upsert(*existing, content); err != nil {
+		idxSpan.RecordError(err)
+		idxSpan.SetStatus(codes.Error, err.Error())
+		idxSpan.End()
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return fmt.Errorf("file provider: index soft-delete: %w", err)
 	}
+	idxSpan.End()
 	return nil
 }
 
@@ -318,133 +569,252 @@ func (p *Provider) Delete(ctx context.Context, urn string) error {
 // Event stream
 // ─────────────────────────────────────────────────────────────────────────────
 
-// journaledEvent is the JSON record written to the event journal file.
-type journaledEvent struct {
-	URN       string         `json:"urn"`
-	NoteURN   string         `json:"note_urn"`
-	Sequence  int            `json:"sequence"`
-	AuthorURN string         `json:"author_urn"`
-	CreatedAt string         `json:"created_at"` // RFC3339
-	Entries   []journalEntry `json:"entries,omitempty"`
-	Encrypted *encryptedBlob `json:"encrypted,omitempty"`
-}
-
-type journalEntry struct {
-	LineNumber int    `json:"ln"`
-	Op         int    `json:"op"`
-	Content    string `json:"c,omitempty"`
-}
-
-// encryptedBlob holds the opaque secure-note payload. The server stores this
-// verbatim and never inspects the nonce, payload, or per-device keys.
-type encryptedBlob struct {
-	Nonce         []byte            `json:"nonce"`
-	Payload       []byte            `json:"payload"`
-	PerDeviceKeys map[string][]byte `json:"per_device_keys"`
-}
-
-// AppendEvent appends a single event to an existing note's event stream.
-// For normal notes the content is forwarded to the search index.
-// For secure notes the encrypted blob is stored verbatim; the index is never
-// updated with decrypted content.
+// AppendEvent appends a single event to the note's .notx file and updates
+// the Badger cache atomically (from the caller's perspective).
+//
+// Write sequence:
+//  1. Validate sequence via Badger (no file read).
+//  2. Append the event block to the .notx file (O_APPEND).
+//  3. Rewrite the # head_sequence header line in-place.
+//  4. Upsert Badger with updated metadata + new materialised content.
 func (p *Provider) AppendEvent(ctx context.Context, event *core.Event, opts repo.AppendEventOptions) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
+	ctx, span := tracer().Start(ctx, "file.AppendEvent")
+	defer span.End()
 
 	noteURN := event.NoteURN.String()
+	span.SetAttributes(
+		attribute.String("note.urn", noteURN),
+		attribute.Int("event.sequence", event.Sequence),
+		attribute.Int("event.entries", len(event.Entries)),
+	)
+
+	if err := ctx.Err(); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return err
+	}
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	meta, err := p.readMeta(noteURN)
+	// ── 1. Validate via Badger ────────────────────────────────────────────────
+	existing, err := p.idx.Get(noteURN)
 	if err != nil {
-		return err
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return fmt.Errorf("file provider: index get for append: %w", err)
 	}
-	if meta == nil {
-		return fmt.Errorf("%w: %s", repo.ErrNotFound, noteURN)
+	if existing == nil {
+		err2 := fmt.Errorf("%w: %s", repo.ErrNotFound, noteURN)
+		span.RecordError(err2)
+		span.SetStatus(codes.Error, err2.Error())
+		return err2
 	}
 
-	// Optimistic concurrency check.
-	if opts.ExpectSequence > 0 && meta.HeadSequence != opts.ExpectSequence-1 {
-		return fmt.Errorf("%w: expected head %d, got %d",
-			repo.ErrSequenceConflict, opts.ExpectSequence-1, meta.HeadSequence)
+	if opts.ExpectSequence > 0 && existing.HeadSequence != opts.ExpectSequence-1 {
+		err2 := fmt.Errorf("%w: expected head %d, got %d",
+			repo.ErrSequenceConflict, opts.ExpectSequence-1, existing.HeadSequence)
+		span.RecordError(err2)
+		span.SetStatus(codes.Error, err2.Error())
+		return err2
 	}
 
-	expectedSeq := meta.HeadSequence + 1
+	expectedSeq := existing.HeadSequence + 1
 	if event.Sequence != expectedSeq {
-		return fmt.Errorf("%w: expected sequence %d, got %d",
+		err2 := fmt.Errorf("%w: expected sequence %d, got %d",
 			repo.ErrSequenceConflict, expectedSeq, event.Sequence)
+		span.RecordError(err2)
+		span.SetStatus(codes.Error, err2.Error())
+		return err2
 	}
 
-	// Serialise to journal.
-	je := journaledEventFromCore(event)
-	if err := p.appendToJournal(noteURN, je); err != nil {
+	// ── 2. Append event to .notx file ─────────────────────────────────────────
+	_, notxSpan := tracer().Start(ctx, "file.AppendEvent/writeEventToNotx")
+	if err := p.writeEventToNotx(noteURN, event); err != nil {
+		notxSpan.RecordError(err)
+		notxSpan.SetStatus(codes.Error, err.Error())
+		notxSpan.End()
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return err
 	}
+	notxSpan.End()
 
-	// Update meta.
-	meta.HeadSequence = event.Sequence
-	meta.UpdatedAt = event.CreatedAt.UTC().Format(time.RFC3339)
-	if err := p.writeMeta(noteURN, meta); err != nil {
+	// ── 3. Update head_sequence header in .notx file ──────────────────────────
+	_, hdrSpan := tracer().Start(ctx, "file.AppendEvent/updateNotxHeader")
+	if err := p.updateNotxHeader(noteURN, event.Sequence); err != nil {
+		hdrSpan.RecordError(err)
+		hdrSpan.SetStatus(codes.Error, err.Error())
+		hdrSpan.End()
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return err
 	}
+	hdrSpan.End()
 
-	// Update index — only index content for normal notes.
-	idxEntry := index.IndexEntry{
-		URN:        meta.URN,
-		Name:       meta.Name,
-		NoteType:   meta.NoteType,
-		ProjectURN: meta.ProjectURN,
-		FolderURN:  meta.FolderURN,
-		Deleted:    meta.Deleted,
-		CreatedAt:  meta.CreatedAt,
-		UpdatedAt:  meta.UpdatedAt,
+	// ── 4. Update Badger cache ─────────────────────────────────────────────────
+	// Compute new materialised content by applying the event to the existing
+	// cached content — no full file re-parse needed.
+	_, idxSpan := tracer().Start(ctx, "file.AppendEvent/index.Upsert")
+
+	newContent, err := p.applyEventToContent(existing, event)
+	if err != nil {
+		idxSpan.RecordError(err)
+		idxSpan.SetStatus(codes.Error, err.Error())
+		idxSpan.End()
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return fmt.Errorf("file provider: apply event to content: %w", err)
 	}
 
-	var content string
-	if meta.NoteType == "normal" {
-		// Build content string from the line entries for indexing.
-		var sb strings.Builder
-		for _, e := range event.Entries {
-			if e.Op == core.LineOpSet && e.Content != "" {
-				sb.WriteString(e.Content)
-				sb.WriteRune(' ')
-			}
-		}
-		content = sb.String()
+	updated := index.IndexEntry{
+		URN:          existing.URN,
+		Name:         existing.Name,
+		NoteType:     existing.NoteType,
+		ProjectURN:   existing.ProjectURN,
+		FolderURN:    existing.FolderURN,
+		Deleted:      existing.Deleted,
+		CreatedAt:    existing.CreatedAt,
+		UpdatedAt:    event.CreatedAt.UTC().Format(time.RFC3339),
+		HeadSequence: event.Sequence,
 	}
-	// For secure notes content stays empty — index.Upsert enforces the rule.
 
-	if err := p.idx.Upsert(idxEntry, content); err != nil {
+	if err := p.idx.Upsert(updated, newContent); err != nil {
+		idxSpan.RecordError(err)
+		idxSpan.SetStatus(codes.Error, err.Error())
+		idxSpan.End()
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return fmt.Errorf("file provider: index append event: %w", err)
 	}
+	idxSpan.End()
 	return nil
 }
 
-// Events returns all events for a note starting at fromSequence (inclusive).
+// applyEventToContent fetches the current cached content from Badger and
+// applies the new event's line entries directly on the line slice — no Note
+// construction, no sequence-number gymnastics.  Returns "" for secure notes.
+func (p *Provider) applyEventToContent(existing *index.IndexEntry, event *core.Event) (string, error) {
+	if existing.NoteType != "normal" {
+		return "", nil
+	}
+
+	cached, err := p.idx.GetContent(existing.URN)
+	if err != nil {
+		return "", fmt.Errorf("get cached content: %w", err)
+	}
+
+	oldLines := core.SplitLines(cached)
+	newLines := applyEntriesToLines(oldLines, event.Entries)
+	return strings.Join(newLines, "\n"), nil
+}
+
+// applyEntriesToLines applies a slice of LineEntry operations to a line slice
+// and returns the updated slice.  It mirrors the semantics of core.applyEvent
+// but operates directly on []string so it can be used outside the Note type.
+func applyEntriesToLines(lines []string, entries []core.LineEntry) []string {
+	var deletes []int
+
+	for _, e := range entries {
+		switch e.Op {
+		case core.LineOpDelete:
+			deletes = append(deletes, e.LineNumber)
+		case core.LineOpSetEmpty:
+			idx := e.LineNumber - 1
+			switch {
+			case idx < len(lines):
+				lines[idx] = ""
+			case idx == len(lines):
+				lines = append(lines, "")
+			default:
+				for len(lines) < idx {
+					lines = append(lines, "")
+				}
+				lines = append(lines, "")
+			}
+		default: // LineOpSet
+			idx := e.LineNumber - 1
+			switch {
+			case idx < len(lines):
+				lines[idx] = e.Content
+			case idx == len(lines):
+				lines = append(lines, e.Content)
+			default:
+				for len(lines) < idx {
+					lines = append(lines, "")
+				}
+				lines = append(lines, e.Content)
+			}
+		}
+	}
+
+	// Apply deletes highest-first to avoid index drift.
+	for i := 0; i < len(deletes)-1; i++ {
+		for j := i + 1; j < len(deletes); j++ {
+			if deletes[j] > deletes[i] {
+				deletes[i], deletes[j] = deletes[j], deletes[i]
+			}
+		}
+	}
+	for _, lineNum := range deletes {
+		idx := lineNum - 1
+		if idx >= 0 && idx < len(lines) {
+			lines = append(lines[:idx], lines[idx+1:]...)
+		}
+	}
+
+	return lines
+}
+
+// Events returns the event stream for a note by parsing the .notx file.
+// This is the only operation that reads from disk after startup.
 func (p *Provider) Events(ctx context.Context, noteURN string, fromSequence int) ([]*core.Event, error) {
+	ctx, span := tracer().Start(ctx, "file.Events")
+	defer span.End()
+	span.SetAttributes(
+		attribute.String("note.urn", noteURN),
+		attribute.Int("from_sequence", fromSequence),
+	)
+
 	if err := ctx.Err(); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return nil, err
 	}
 
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
-	meta, err := p.readMeta(noteURN)
+	// Confirm the note exists.
+	existing, err := p.idx.Get(noteURN)
 	if err != nil {
-		return nil, err
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return nil, fmt.Errorf("file provider: index get for events: %w", err)
 	}
-	if meta == nil {
-		return nil, fmt.Errorf("%w: %s", repo.ErrNotFound, noteURN)
+	if existing == nil {
+		err2 := fmt.Errorf("%w: %s", repo.ErrNotFound, noteURN)
+		span.RecordError(err2)
+		span.SetStatus(codes.Error, err2.Error())
+		return nil, err2
 	}
 
-	all, err := p.readEventJournal(noteURN)
+	// Parse events from the .notx file.
+	_, parseSpan := tracer().Start(ctx, "file.Events/parseNotxFile")
+	notePath := p.noteFilePath(noteURN)
+	note, err := core.NewNoteFromFile(notePath)
+	parseSpan.End()
 	if err != nil {
-		return nil, err
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return nil, fmt.Errorf("file provider: parse note for events %q: %w", noteURN, err)
 	}
+
+	all := note.Events()
+	span.SetAttributes(attribute.Int("events.total", len(all)))
 
 	if fromSequence <= 1 {
+		span.SetAttributes(attribute.Int("events.returned", len(all)))
 		return all, nil
 	}
 
@@ -454,17 +824,22 @@ func (p *Provider) Events(ctx context.Context, noteURN string, fromSequence int)
 			filtered = append(filtered, ev)
 		}
 	}
+	span.SetAttributes(attribute.Int("events.returned", len(filtered)))
 	return filtered, nil
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Search
-// ─────────────────────────────────────────────────────────────────────────────
-
-// Search performs a full-text search over normal note content only.
-// Secure notes can never appear in results.
+// Search performs full-text search over normal note content via Badger.
 func (p *Provider) Search(ctx context.Context, opts repo.SearchOptions) (*repo.SearchResults, error) {
+	ctx, span := tracer().Start(ctx, "file.Search")
+	defer span.End()
+	span.SetAttributes(
+		attribute.String("query", opts.Query),
+		attribute.Int("opts.page_size", opts.PageSize),
+	)
+
 	if err := ctx.Err(); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return nil, err
 	}
 
@@ -473,8 +848,13 @@ func (p *Provider) Search(ctx context.Context, opts repo.SearchOptions) (*repo.S
 		maxResults = 50
 	}
 
+	_, idxSpan := tracer().Start(ctx, "file.Search/index.Search")
 	urns, err := p.idx.Search(opts.Query, maxResults)
+	idxSpan.SetAttributes(attribute.Int("index.hits", len(urns)))
+	idxSpan.End()
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return nil, fmt.Errorf("file provider: search: %w", err)
 	}
 
@@ -484,7 +864,6 @@ func (p *Provider) Search(ctx context.Context, opts repo.SearchOptions) (*repo.S
 		if err != nil || entry == nil {
 			continue
 		}
-		// Double-check: never return secure notes from search.
 		if entry.NoteType == "secure" {
 			continue
 		}
@@ -498,9 +877,277 @@ func (p *Provider) Search(ctx context.Context, opts repo.SearchOptions) (*repo.S
 		})
 	}
 
+	span.SetAttributes(attribute.Int("results.count", len(results)))
 	return &repo.SearchResults{
 		Results:       results,
-		NextPageToken: "", // pagination over search results is a future enhancement
+		NextPageToken: "",
+	}, nil
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ProjectRepository implementation
+// ─────────────────────────────────────────────────────────────────────────────
+
+func (p *Provider) CreateProject(ctx context.Context, proj *core.Project) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	existing, err := p.idx.GetProject(proj.URN.String())
+	if err != nil {
+		return fmt.Errorf("file provider: create project: %w", err)
+	}
+	if existing != nil {
+		return fmt.Errorf("%w: %s", repo.ErrAlreadyExists, proj.URN.String())
+	}
+
+	entry := index.ProjectEntry{
+		URN:         proj.URN.String(),
+		Name:        proj.Name,
+		Description: proj.Description,
+		Deleted:     proj.Deleted,
+		CreatedAt:   proj.CreatedAt.UTC().Format(time.RFC3339),
+		UpdatedAt:   proj.UpdatedAt.UTC().Format(time.RFC3339),
+	}
+	return p.idx.UpsertProject(entry)
+}
+
+func (p *Provider) GetProject(ctx context.Context, urn string) (*core.Project, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	entry, err := p.idx.GetProject(urn)
+	if err != nil {
+		return nil, fmt.Errorf("file provider: get project: %w", err)
+	}
+	if entry == nil {
+		return nil, fmt.Errorf("%w: %s", repo.ErrNotFound, urn)
+	}
+	return projectEntryToCore(entry)
+}
+
+func (p *Provider) ListProjects(ctx context.Context, opts repo.ProjectListOptions) (*repo.ProjectListResult, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	pageSize := opts.PageSize
+	if pageSize <= 0 {
+		pageSize = 50
+	}
+	entries, nextToken, err := p.idx.ListProjects(opts.IncludeDeleted, pageSize, opts.PageToken)
+	if err != nil {
+		return nil, fmt.Errorf("file provider: list projects: %w", err)
+	}
+	projects := make([]*core.Project, 0, len(entries))
+	for i := range entries {
+		proj, err := projectEntryToCore(&entries[i])
+		if err != nil {
+			return nil, err
+		}
+		projects = append(projects, proj)
+	}
+	return &repo.ProjectListResult{Projects: projects, NextPageToken: nextToken}, nil
+}
+
+func (p *Provider) UpdateProject(ctx context.Context, proj *core.Project) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	existing, err := p.idx.GetProject(proj.URN.String())
+	if err != nil {
+		return fmt.Errorf("file provider: update project: %w", err)
+	}
+	if existing == nil {
+		return fmt.Errorf("%w: %s", repo.ErrNotFound, proj.URN.String())
+	}
+
+	entry := index.ProjectEntry{
+		URN:         proj.URN.String(),
+		Name:        proj.Name,
+		Description: proj.Description,
+		Deleted:     proj.Deleted,
+		CreatedAt:   existing.CreatedAt, // preserve original
+		UpdatedAt:   proj.UpdatedAt.UTC().Format(time.RFC3339),
+	}
+	return p.idx.UpsertProject(entry)
+}
+
+func (p *Provider) DeleteProject(ctx context.Context, urn string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	existing, err := p.idx.GetProject(urn)
+	if err != nil {
+		return fmt.Errorf("file provider: delete project: %w", err)
+	}
+	if existing == nil {
+		return fmt.Errorf("%w: %s", repo.ErrNotFound, urn)
+	}
+
+	existing.Deleted = true
+	existing.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	return p.idx.UpsertProject(*existing)
+}
+
+func (p *Provider) CreateFolder(ctx context.Context, f *core.Folder) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	existing, err := p.idx.GetFolder(f.URN.String())
+	if err != nil {
+		return fmt.Errorf("file provider: create folder: %w", err)
+	}
+	if existing != nil {
+		return fmt.Errorf("%w: %s", repo.ErrAlreadyExists, f.URN.String())
+	}
+
+	entry := index.FolderEntry{
+		URN:         f.URN.String(),
+		ProjectURN:  f.ProjectURN.String(),
+		Name:        f.Name,
+		Description: f.Description,
+		Deleted:     f.Deleted,
+		CreatedAt:   f.CreatedAt.UTC().Format(time.RFC3339),
+		UpdatedAt:   f.UpdatedAt.UTC().Format(time.RFC3339),
+	}
+	return p.idx.UpsertFolder(entry)
+}
+
+func (p *Provider) GetFolder(ctx context.Context, urn string) (*core.Folder, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	entry, err := p.idx.GetFolder(urn)
+	if err != nil {
+		return nil, fmt.Errorf("file provider: get folder: %w", err)
+	}
+	if entry == nil {
+		return nil, fmt.Errorf("%w: %s", repo.ErrNotFound, urn)
+	}
+	return folderEntryToCore(entry)
+}
+
+func (p *Provider) ListFolders(ctx context.Context, opts repo.FolderListOptions) (*repo.FolderListResult, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	pageSize := opts.PageSize
+	if pageSize <= 0 {
+		pageSize = 50
+	}
+	entries, nextToken, err := p.idx.ListFolders(opts.ProjectURN, opts.IncludeDeleted, pageSize, opts.PageToken)
+	if err != nil {
+		return nil, fmt.Errorf("file provider: list folders: %w", err)
+	}
+	folders := make([]*core.Folder, 0, len(entries))
+	for i := range entries {
+		f, err := folderEntryToCore(&entries[i])
+		if err != nil {
+			return nil, err
+		}
+		folders = append(folders, f)
+	}
+	return &repo.FolderListResult{Folders: folders, NextPageToken: nextToken}, nil
+}
+
+func (p *Provider) UpdateFolder(ctx context.Context, f *core.Folder) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	existing, err := p.idx.GetFolder(f.URN.String())
+	if err != nil {
+		return fmt.Errorf("file provider: update folder: %w", err)
+	}
+	if existing == nil {
+		return fmt.Errorf("%w: %s", repo.ErrNotFound, f.URN.String())
+	}
+
+	entry := index.FolderEntry{
+		URN:         f.URN.String(),
+		ProjectURN:  f.ProjectURN.String(),
+		Name:        f.Name,
+		Description: f.Description,
+		Deleted:     f.Deleted,
+		CreatedAt:   existing.CreatedAt, // preserve original
+		UpdatedAt:   f.UpdatedAt.UTC().Format(time.RFC3339),
+	}
+	return p.idx.UpsertFolder(entry)
+}
+
+func (p *Provider) DeleteFolder(ctx context.Context, urn string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	existing, err := p.idx.GetFolder(urn)
+	if err != nil {
+		return fmt.Errorf("file provider: delete folder: %w", err)
+	}
+	if existing == nil {
+		return fmt.Errorf("%w: %s", repo.ErrNotFound, urn)
+	}
+
+	existing.Deleted = true
+	existing.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	return p.idx.UpsertFolder(*existing)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Project / folder conversion helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+func projectEntryToCore(e *index.ProjectEntry) (*core.Project, error) {
+	urn, err := core.ParseURN(e.URN)
+	if err != nil {
+		return nil, fmt.Errorf("file provider: parse project URN: %w", err)
+	}
+	createdAt, _ := time.Parse(time.RFC3339, e.CreatedAt)
+	updatedAt, _ := time.Parse(time.RFC3339, e.UpdatedAt)
+	return &core.Project{
+		URN:         urn,
+		Name:        e.Name,
+		Description: e.Description,
+		Deleted:     e.Deleted,
+		CreatedAt:   createdAt,
+		UpdatedAt:   updatedAt,
+	}, nil
+}
+
+func folderEntryToCore(e *index.FolderEntry) (*core.Folder, error) {
+	urn, err := core.ParseURN(e.URN)
+	if err != nil {
+		return nil, fmt.Errorf("file provider: parse folder URN: %w", err)
+	}
+	projURN, err := core.ParseURN(e.ProjectURN)
+	if err != nil {
+		return nil, fmt.Errorf("file provider: parse folder project URN: %w", err)
+	}
+	createdAt, _ := time.Parse(time.RFC3339, e.CreatedAt)
+	updatedAt, _ := time.Parse(time.RFC3339, e.UpdatedAt)
+	return &core.Folder{
+		URN:         urn,
+		ProjectURN:  projURN,
+		Name:        e.Name,
+		Description: e.Description,
+		Deleted:     e.Deleted,
+		CreatedAt:   createdAt,
+		UpdatedAt:   updatedAt,
 	}, nil
 }
 
@@ -508,18 +1155,8 @@ func (p *Provider) Search(ctx context.Context, opts repo.SearchOptions) (*repo.S
 // Internal helpers — file paths
 // ─────────────────────────────────────────────────────────────────────────────
 
-// noteFilePath returns the .notx file path for a given URN string.
-// URN colons are replaced with underscores to produce a safe filename.
 func (p *Provider) noteFilePath(urn string) string {
 	return filepath.Join(p.notesDir, sanitiseURN(urn)+".notx")
-}
-
-func (p *Provider) metaFilePath(urn string) string {
-	return filepath.Join(p.notesDir, sanitiseURN(urn)+".meta.json")
-}
-
-func (p *Provider) journalFilePath(urn string) string {
-	return filepath.Join(p.eventsDir, sanitiseURN(urn)+".jsonl")
 }
 
 func sanitiseURN(urn string) string {
@@ -527,90 +1164,20 @@ func sanitiseURN(urn string) string {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Internal helpers — meta sidecar
+// Internal helpers — .notx file writes
 // ─────────────────────────────────────────────────────────────────────────────
 
-// noteMeta is the JSON sidecar stored alongside each .notx file.
-// It caches mutable header fields so we avoid re-parsing the full .notx file
-// for list, update, and append operations.
-type noteMeta struct {
-	URN          string `json:"urn"`
-	Name         string `json:"name"`
-	NoteType     string `json:"note_type"`
-	ProjectURN   string `json:"project_urn,omitempty"`
-	FolderURN    string `json:"folder_urn,omitempty"`
-	Deleted      bool   `json:"deleted"`
-	CreatedAt    string `json:"created_at"`
-	UpdatedAt    string `json:"updated_at"`
-	HeadSequence int    `json:"head_sequence"`
-}
-
-func noteMetaFromNote(n *core.Note) *noteMeta {
-	m := &noteMeta{
-		URN:          n.URN.String(),
-		Name:         n.Name,
-		NoteType:     n.NoteType.String(),
-		Deleted:      n.Deleted,
-		CreatedAt:    n.CreatedAt.UTC().Format(time.RFC3339),
-		UpdatedAt:    n.UpdatedAt.UTC().Format(time.RFC3339),
-		HeadSequence: n.HeadSequence(),
-	}
-	if n.ProjectURN != nil {
-		m.ProjectURN = n.ProjectURN.String()
-	}
-	if n.FolderURN != nil {
-		m.FolderURN = n.FolderURN.String()
-	}
-	return m
-}
-
-func (p *Provider) writeMeta(urn string, meta *noteMeta) error {
-	data, err := json.MarshalIndent(meta, "", "  ")
-	if err != nil {
-		return fmt.Errorf("file provider: marshal meta for %q: %w", urn, err)
-	}
-	path := p.metaFilePath(urn)
-	if err := os.WriteFile(path, data, 0o644); err != nil {
-		return fmt.Errorf("file provider: write meta %q: %w", path, err)
-	}
-	return nil
-}
-
-func (p *Provider) readMeta(urn string) (*noteMeta, error) {
-	path := p.metaFilePath(urn)
-	data, err := os.ReadFile(path)
-	if os.IsNotExist(err) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("file provider: read meta %q: %w", path, err)
-	}
-	var meta noteMeta
-	if err := json.Unmarshal(data, &meta); err != nil {
-		return nil, fmt.Errorf("file provider: unmarshal meta %q: %w", path, err)
-	}
-	return &meta, nil
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Internal helpers — .notx stub
-// ─────────────────────────────────────────────────────────────────────────────
-
-// writeNotxStub writes a minimal valid .notx file header for a newly created
-// note. Events are journaled separately; the stub is a human-readable anchor.
+// writeNotxStub writes the initial .notx file header for a newly created note.
 func (p *Provider) writeNotxStub(note *core.Note) error {
 	urn := note.URN.String()
-	noteType := note.NoteType.String()
-	createdAt := note.CreatedAt.UTC().Format(time.RFC3339)
 
 	var sb strings.Builder
 	sb.WriteString("# notx/1.0\n")
 	fmt.Fprintf(&sb, "# note_urn:      %s\n", urn)
-	fmt.Fprintf(&sb, "# note_type:     %s\n", noteType)
+	fmt.Fprintf(&sb, "# note_type:     %s\n", note.NoteType.String())
 	fmt.Fprintf(&sb, "# name:          %s\n", note.Name)
-	fmt.Fprintf(&sb, "# created_at:    %s\n", createdAt)
+	fmt.Fprintf(&sb, "# created_at:    %s\n", note.CreatedAt.UTC().Format(time.RFC3339))
 	sb.WriteString("# head_sequence: 0\n")
-
 	if note.ProjectURN != nil {
 		fmt.Fprintf(&sb, "# project_urn:   %s\n", note.ProjectURN.String())
 	}
@@ -626,123 +1193,82 @@ func (p *Provider) writeNotxStub(note *core.Note) error {
 	return nil
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Internal helpers — event journal
-// ─────────────────────────────────────────────────────────────────────────────
+// writeEventToNotx appends a single event to the .notx file in lane format.
+func (p *Provider) writeEventToNotx(noteURN string, event *core.Event) error {
+	var buf bytes.Buffer
 
-func (p *Provider) appendToJournal(noteURN string, je journaledEvent) error {
-	data, err := json.Marshal(je)
-	if err != nil {
-		return fmt.Errorf("file provider: marshal event for %q: %w", noteURN, err)
+	fmt.Fprintf(&buf, "%d:%s:%s\n",
+		event.Sequence,
+		event.CreatedAt.UTC().Format(time.RFC3339),
+		event.AuthorURN.String(),
+	)
+	buf.WriteString("->\n")
+
+	for _, e := range event.Entries {
+		switch e.Op {
+		case core.LineOpDelete:
+			fmt.Fprintf(&buf, "%d |-\n", e.LineNumber)
+		case core.LineOpSetEmpty:
+			fmt.Fprintf(&buf, "%d |\n", e.LineNumber)
+		default:
+			fmt.Fprintf(&buf, "%d | %s\n", e.LineNumber, e.Content)
+		}
 	}
-	data = append(data, '\n')
+	buf.WriteString("\n")
 
-	f, err := os.OpenFile(p.journalFilePath(noteURN), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	notePath := p.noteFilePath(noteURN)
+	f, err := os.OpenFile(notePath, os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {
-		return fmt.Errorf("file provider: open journal for %q: %w", noteURN, err)
+		return fmt.Errorf("file provider: open notx for append %q: %w", notePath, err)
 	}
 	defer f.Close()
 
-	if _, err := f.Write(data); err != nil {
-		return fmt.Errorf("file provider: write journal for %q: %w", noteURN, err)
+	if _, err := f.Write(buf.Bytes()); err != nil {
+		return fmt.Errorf("file provider: write event to notx %q: %w", notePath, err)
 	}
 	return nil
 }
 
-func (p *Provider) readEventJournal(noteURN string) ([]*core.Event, error) {
-	path := p.journalFilePath(noteURN)
-	data, err := os.ReadFile(path)
-	if os.IsNotExist(err) {
-		return nil, nil
-	}
+// updateNotxHeader rewrites just the # head_sequence line in the .notx header.
+func (p *Provider) updateNotxHeader(noteURN string, headSequence int) error {
+	notePath := p.noteFilePath(noteURN)
+
+	data, err := os.ReadFile(notePath)
 	if err != nil {
-		return nil, fmt.Errorf("file provider: read journal for %q: %w", noteURN, err)
+		return fmt.Errorf("file provider: read notx for header update %q: %w", notePath, err)
 	}
 
-	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
-	events := make([]*core.Event, 0, len(lines))
+	var out bytes.Buffer
+	scanner := bufio.NewScanner(bytes.NewReader(data))
+	updated := false
 
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !updated && strings.HasPrefix(line, "# head_sequence:") {
+			fmt.Fprintf(&out, "# head_sequence: %d\n", headSequence)
+			updated = true
+		} else {
+			out.WriteString(line)
+			out.WriteByte('\n')
 		}
-		var je journaledEvent
-		if err := json.Unmarshal([]byte(line), &je); err != nil {
-			return nil, fmt.Errorf("file provider: parse journal line for %q: %w", noteURN, err)
-		}
-		ev, err := coreEventFromJournaled(je)
-		if err != nil {
-			return nil, fmt.Errorf("file provider: decode event for %q: %w", noteURN, err)
-		}
-		events = append(events, ev)
 	}
-	return events, nil
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("file provider: scan notx for header update %q: %w", notePath, err)
+	}
+
+	if err := os.WriteFile(notePath, out.Bytes(), 0o644); err != nil {
+		return fmt.Errorf("file provider: write notx after header update %q: %w", notePath, err)
+	}
+	return nil
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Internal helpers — content injection
+// ─────────────────────────────────────────────────────────────────────────────
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Conversion helpers
 // ─────────────────────────────────────────────────────────────────────────────
-
-func journaledEventFromCore(ev *core.Event) journaledEvent {
-	je := journaledEvent{
-		URN:       ev.URN.String(),
-		NoteURN:   ev.NoteURN.String(),
-		Sequence:  ev.Sequence,
-		AuthorURN: ev.AuthorURN.String(),
-		CreatedAt: ev.CreatedAt.UTC().Format(time.RFC3339),
-	}
-	for _, e := range ev.Entries {
-		je.Entries = append(je.Entries, journalEntry{
-			LineNumber: e.LineNumber,
-			Op:         int(e.Op),
-			Content:    e.Content,
-		})
-	}
-	return je
-}
-
-func coreEventFromJournaled(je journaledEvent) (*core.Event, error) {
-	noteURN, err := core.ParseURN(je.NoteURN)
-	if err != nil {
-		return nil, fmt.Errorf("parse note_urn: %w", err)
-	}
-	authorURN, err := core.ParseURN(je.AuthorURN)
-	if err != nil {
-		return nil, fmt.Errorf("parse author_urn: %w", err)
-	}
-	createdAt, err := time.Parse(time.RFC3339, je.CreatedAt)
-	if err != nil {
-		return nil, fmt.Errorf("parse created_at: %w", err)
-	}
-
-	var urn core.URN
-	if je.URN != "" && je.URN != "::" {
-		urn, err = core.ParseURN(je.URN)
-		if err != nil {
-			// Non-fatal: events may not carry their own URN.
-			urn = core.URN{}
-		}
-	}
-
-	entries := make([]core.LineEntry, 0, len(je.Entries))
-	for _, e := range je.Entries {
-		entries = append(entries, core.LineEntry{
-			LineNumber: e.LineNumber,
-			Op:         core.LineOp(e.Op),
-			Content:    e.Content,
-		})
-	}
-
-	return &core.Event{
-		URN:       urn,
-		NoteURN:   noteURN,
-		Sequence:  je.Sequence,
-		AuthorURN: authorURN,
-		CreatedAt: createdAt,
-		Entries:   entries,
-	}, nil
-}
 
 func noteFromIndexEntry(e index.IndexEntry) (*core.Note, error) {
 	urn, err := core.ParseURN(e.URN)
@@ -782,4 +1308,30 @@ func noteFromIndexEntry(e index.IndexEntry) (*core.Note, error) {
 	}
 
 	return n, nil
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Cleanup helpers (used by tests / migrations)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// RemoveLegacyFiles deletes any .meta.json and .jsonl files left over from the
+// previous provider implementation. Safe to call on a live provider; the files
+// are no longer read or written.
+func RemoveLegacyFiles(dataDir string) error {
+	for _, subdir := range []string{
+		filepath.Join(dataDir, notesSubdir),
+		filepath.Join(dataDir, "events"),
+	} {
+		_ = filepath.WalkDir(subdir, func(path string, d fs.DirEntry, err error) error {
+			if err != nil || d.IsDir() {
+				return nil
+			}
+			name := d.Name()
+			if strings.HasSuffix(name, ".meta.json") || strings.HasSuffix(name, ".jsonl") {
+				_ = os.Remove(path)
+			}
+			return nil
+		})
+	}
+	return nil
 }

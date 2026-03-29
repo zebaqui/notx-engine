@@ -32,7 +32,7 @@ func TestParser_SimpleFile(t *testing.T) {
 		t.Errorf("HeadSequence: got %d, want 1", note.HeadSequence())
 	}
 
-	expectedContent := " Line one\n Line two"
+	expectedContent := "Line one\nLine two"
 	if got := note.Content(); got != expectedContent {
 		t.Errorf("Content:\ngot:  %q\nwant: %q", got, expectedContent)
 	}
@@ -64,7 +64,7 @@ func TestParser_MultipleEvents(t *testing.T) {
 		t.Errorf("EventCount: got %d, want 2", note.EventCount())
 	}
 
-	expectedContent := " First\n Second"
+	expectedContent := "First\nSecond"
 	if got := note.Content(); got != expectedContent {
 		t.Errorf("Content:\ngot:  %q\nwant: %q", got, expectedContent)
 	}
@@ -99,7 +99,7 @@ func TestParser_DeleteOperation(t *testing.T) {
 		t.Fatalf("Parse error: %v", err)
 	}
 
-	expectedContent := " Line A\n Line C"
+	expectedContent := "Line A\nLine C"
 	if got := note.Content(); got != expectedContent {
 		t.Errorf("Content after delete:\ngot:  %q\nwant: %q", got, expectedContent)
 	}
@@ -125,7 +125,7 @@ func TestParser_EmptyLineOperation(t *testing.T) {
 		t.Fatalf("Parse error: %v", err)
 	}
 
-	expectedContent := " Text\n\n More text"
+	expectedContent := "Text\n\nMore text"
 	if got := note.Content(); got != expectedContent {
 		t.Errorf("Content with empty line:\ngot:  %q\nwant: %q", got, expectedContent)
 	}
@@ -219,12 +219,12 @@ func TestParser_GapAndAppend(t *testing.T) {
 		t.Errorf("Lines after gap: got %d, want 5", len(lines))
 	}
 
-	if lines[0] != " First" {
-		t.Errorf("line[0]: got %q, want %q", lines[0], " First")
+	if lines[0] != "First" {
+		t.Errorf("line[0]: got %q, want %q", lines[0], "First")
 	}
 
-	if lines[4] != " Fifth" {
-		t.Errorf("line[4]: got %q, want %q", lines[4], " Fifth")
+	if lines[4] != "Fifth" {
+		t.Errorf("line[4]: got %q, want %q", lines[4], "Fifth")
 	}
 }
 
@@ -256,19 +256,19 @@ func TestParser_ContentAt(t *testing.T) {
 
 	// At sequence 1
 	content1, _ := note.ContentAt(1)
-	if content1 != " A" {
-		t.Errorf("ContentAt(1): got %q, want %q", content1, " A")
+	if content1 != "A" {
+		t.Errorf("ContentAt(1): got %q, want %q", content1, "A")
 	}
 
 	// At sequence 2
 	content2, _ := note.ContentAt(2)
-	if content2 != " A\n B" {
-		t.Errorf("ContentAt(2): got %q, want %q", content2, " A\n B")
+	if content2 != "A\nB" {
+		t.Errorf("ContentAt(2): got %q, want %q", content2, "A\nB")
 	}
 
 	// At sequence 3
 	content3, _ := note.ContentAt(3)
-	if content3 != " A\n B\n C" {
-		t.Errorf("ContentAt(3): got %q, want %q", content3, " A\n B\n C")
+	if content3 != "A\nB\nC" {
+		t.Errorf("ContentAt(3): got %q, want %q", content3, "A\nB\nC")
 	}
 }

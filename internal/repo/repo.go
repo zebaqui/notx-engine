@@ -227,3 +227,136 @@ type IndexEntry struct {
 	// HeadSequence is the sequence number of the last persisted event.
 	HeadSequence int `json:"head_sequence"`
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ProjectRepository — storage for projects and folders
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ProjectListOptions controls filtering and pagination for
+// ProjectRepository.ListProjects.
+type ProjectListOptions struct {
+	// IncludeDeleted includes soft-deleted projects when true.
+	IncludeDeleted bool
+	// PageSize / PageToken mirror the semantics on ListOptions.
+	PageSize  int
+	PageToken string
+}
+
+// ProjectListResult is the return value of ProjectRepository.ListProjects.
+type ProjectListResult struct {
+	Projects      []*core.Project
+	NextPageToken string
+}
+
+// FolderListOptions controls filtering and pagination for
+// ProjectRepository.ListFolders.
+type FolderListOptions struct {
+	// ProjectURN, if non-empty, restricts results to folders inside this project.
+	ProjectURN string
+	// IncludeDeleted includes soft-deleted folders when true.
+	IncludeDeleted bool
+	// PageSize / PageToken mirror the semantics on ListOptions.
+	PageSize  int
+	PageToken string
+}
+
+// FolderListResult is the return value of ProjectRepository.ListFolders.
+type FolderListResult struct {
+	Folders       []*core.Folder
+	NextPageToken string
+}
+
+// ProjectRepository is the storage abstraction for projects and folders.
+// Both entity types are index-only — they have no on-disk file counterpart.
+//
+// All methods accept a context.Context and must respect cancellation.
+// Implementations must be safe for concurrent use.
+type ProjectRepository interface {
+	// ── Projects ─────────────────────────────────────────────────────────────
+
+	// CreateProject persists a new project.
+	// Returns ErrAlreadyExists if a project with the same URN already exists.
+	CreateProject(ctx context.Context, p *core.Project) error
+
+	// GetProject retrieves a project by URN.
+	// Returns ErrNotFound if no project with that URN exists.
+	GetProject(ctx context.Context, urn string) (*core.Project, error)
+
+	// ListProjects returns a filtered, paginated list of projects.
+	ListProjects(ctx context.Context, opts ProjectListOptions) (*ProjectListResult, error)
+
+	// UpdateProject persists changes to a project's mutable fields
+	// (Name, Description, Deleted).
+	// Returns ErrNotFound if the project does not exist.
+	UpdateProject(ctx context.Context, p *core.Project) error
+
+	// DeleteProject soft-deletes a project by setting its Deleted flag.
+	// Returns ErrNotFound if the project does not exist.
+	DeleteProject(ctx context.Context, urn string) error
+
+	// ── Folders ──────────────────────────────────────────────────────────────
+
+	// CreateFolder persists a new folder.
+	// Returns ErrAlreadyExists if a folder with the same URN already exists.
+	CreateFolder(ctx context.Context, f *core.Folder) error
+
+	// GetFolder retrieves a folder by URN.
+	// Returns ErrNotFound if no folder with that URN exists.
+	GetFolder(ctx context.Context, urn string) (*core.Folder, error)
+
+	// ListFolders returns a filtered, paginated list of folders.
+	ListFolders(ctx context.Context, opts FolderListOptions) (*FolderListResult, error)
+
+	// UpdateFolder persists changes to a folder's mutable fields
+	// (Name, Description, Deleted).
+	// Returns ErrNotFound if the folder does not exist.
+	UpdateFolder(ctx context.Context, f *core.Folder) error
+
+	// DeleteFolder soft-deletes a folder by setting its Deleted flag.
+	// Returns ErrNotFound if the folder does not exist.
+	DeleteFolder(ctx context.Context, urn string) error
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DeviceListOptions / DeviceListResult
+// ─────────────────────────────────────────────────────────────────────────────
+
+// DeviceListOptions controls filtering for DeviceRepository.ListDevices.
+type DeviceListOptions struct {
+	// OwnerURN, if non-empty, restricts results to devices owned by this user.
+	OwnerURN string
+	// IncludeRevoked includes revoked devices in the result when true.
+	IncludeRevoked bool
+}
+
+// DeviceListResult is the return value of DeviceRepository.ListDevices.
+type DeviceListResult struct {
+	Devices []*core.Device
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DeviceRepository — storage for registered devices
+// ─────────────────────────────────────────────────────────────────────────────
+
+// DeviceRepository is the storage abstraction for client devices.
+// Implementations must be safe for concurrent use.
+type DeviceRepository interface {
+	// RegisterDevice persists a new device.
+	// Returns ErrAlreadyExists if a device with the same URN already exists.
+	RegisterDevice(ctx context.Context, d *core.Device) error
+
+	// GetDevice retrieves a device by URN.
+	// Returns ErrNotFound if no device with that URN exists.
+	GetDevice(ctx context.Context, urn string) (*core.Device, error)
+
+	// ListDevices returns devices, optionally filtered by owner.
+	ListDevices(ctx context.Context, opts DeviceListOptions) (*DeviceListResult, error)
+
+	// UpdateDevice persists changes to mutable fields (Name, LastSeenAt).
+	// Returns ErrNotFound if the device does not exist.
+	UpdateDevice(ctx context.Context, d *core.Device) error
+
+	// RevokeDevice permanently revokes a device by setting Revoked=true.
+	// Returns ErrNotFound if the device does not exist.
+	RevokeDevice(ctx context.Context, urn string) error
+}

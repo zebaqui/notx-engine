@@ -278,15 +278,25 @@ func (p *ParserV1) parseEventEntries(lines []string, start int) ([]LineEntry, in
 		matches := lineEntryRe.FindStringSubmatch(trimmed)
 		if len(matches) == 3 {
 			lineNum, _ := strconv.Atoi(matches[1])
-			content := matches[2]
+			raw := matches[2]
 
 			var op LineOp
-			if content == "-" {
+			var content string
+			if raw == "-" {
 				op = LineOpDelete
-			} else if content == "" {
+			} else if raw == "" {
 				op = LineOpSetEmpty
 			} else {
 				op = LineOpSet
+				// The format is "N | content" — matches[2] captures everything
+				// after the "|", which includes the mandatory space separator.
+				// Strip exactly that one leading space so stored content matches
+				// what was originally written (e.g. " hello world" → "hello world").
+				if len(raw) > 0 && raw[0] == ' ' {
+					content = raw[1:]
+				} else {
+					content = raw
+				}
 			}
 
 			entries = append(entries, LineEntry{
@@ -322,7 +332,16 @@ func (p *ParserV1) parseSnapshotEntries(lines []string, start int) ([]string, in
 		matches := lineEntryRe.FindStringSubmatch(trimmed)
 		if len(matches) == 3 {
 			lineNum, _ := strconv.Atoi(matches[1])
-			content := matches[2]
+			raw := matches[2]
+
+			// Strip the mandatory space separator between "|" and content,
+			// same as in parseEventEntries (e.g. " hello world" → "hello world").
+			var content string
+			if len(raw) > 0 && raw[0] == ' ' {
+				content = raw[1:]
+			} else {
+				content = raw
+			}
 
 			for len(result) < lineNum {
 				result = append(result, "")

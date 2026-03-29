@@ -25,9 +25,11 @@ import (
 // Server is the top-level orchestrator. It owns the lifecycle of the HTTP
 // and gRPC servers and coordinates graceful shutdown when a signal arrives.
 type Server struct {
-	cfg  *config.Config
-	repo repo.NoteRepository
-	log  *slog.Logger
+	cfg      *config.Config
+	repo     repo.NoteRepository
+	projRepo repo.ProjectRepository
+	devRepo  repo.DeviceRepository
+	log      *slog.Logger
 
 	httpHandler *httpsvc.Handler
 	grpcServer  *googlegrpc.Server
@@ -35,23 +37,25 @@ type Server struct {
 
 // New creates a Server from the given config and repository.
 // It wires all sub-components but does not start any listeners yet.
-func New(cfg *config.Config, r repo.NoteRepository, log *slog.Logger) (*Server, error) {
+func New(cfg *config.Config, r repo.NoteRepository, projRepo repo.ProjectRepository, devRepo repo.DeviceRepository, log *slog.Logger) (*Server, error) {
 	if log == nil {
 		log = slog.New(slog.NewTextHandler(os.Stderr, nil))
 	}
 
 	s := &Server{
-		cfg:  cfg,
-		repo: r,
-		log:  log,
+		cfg:      cfg,
+		repo:     r,
+		projRepo: projRepo,
+		devRepo:  devRepo,
+		log:      log,
 	}
 
 	if cfg.EnableHTTP {
-		s.httpHandler = httpsvc.New(cfg, r, log)
+		s.httpHandler = httpsvc.New(cfg, r, projRepo, devRepo, log)
 	}
 
 	if cfg.EnableGRPC {
-		grpcSrv, err := buildGRPCServer(cfg, r, log)
+		grpcSrv, err := buildGRPCServer(cfg, r, projRepo, log)
 		if err != nil {
 			return nil, fmt.Errorf("server: build gRPC server: %w", err)
 		}
@@ -184,7 +188,7 @@ func (s *Server) initiateShutdown(ctx context.Context) {
 // gRPC server construction
 // ─────────────────────────────────────────────────────────────────────────────
 
-func buildGRPCServer(cfg *config.Config, r repo.NoteRepository, log *slog.Logger) (*googlegrpc.Server, error) {
+func buildGRPCServer(cfg *config.Config, r repo.NoteRepository, projRepo repo.ProjectRepository, log *slog.Logger) (*googlegrpc.Server, error) {
 	opts := []googlegrpc.ServerOption{
 		googlegrpc.UnaryInterceptor(loggingUnaryInterceptor(log)),
 		googlegrpc.StreamInterceptor(loggingStreamInterceptor(log)),
@@ -206,6 +210,7 @@ func buildGRPCServer(cfg *config.Config, r repo.NoteRepository, log *slog.Logger
 	// Register services.
 	pb.RegisterNoteServiceServer(srv, grpcsvc.NewNoteServiceServer(r, cfg.DefaultPageSize, cfg.MaxPageSize))
 	pb.RegisterDeviceServiceServer(srv, grpcsvc.NewDeviceServiceServer())
+	pb.RegisterProjectServiceServer(srv, grpcsvc.NewProjectServiceServer(projRepo, cfg.DefaultPageSize, cfg.MaxPageSize))
 
 	// Enable server reflection so grpcurl and other tools work out of the box.
 	reflection.Register(srv)

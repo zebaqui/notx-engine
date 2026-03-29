@@ -26,6 +26,8 @@ import (
 type Handler struct {
 	cfg    *config.Config
 	repo   repo.NoteRepository
+	proj   repo.ProjectRepository
+	dev    repo.DeviceRepository
 	log    *slog.Logger
 	mux    *http.ServeMux
 	server *http.Server
@@ -33,10 +35,12 @@ type Handler struct {
 
 // New creates a new Handler, registers all routes, and returns it.
 // The caller must call Serve to start accepting connections.
-func New(cfg *config.Config, r repo.NoteRepository, log *slog.Logger) *Handler {
+func New(cfg *config.Config, r repo.NoteRepository, proj repo.ProjectRepository, dev repo.DeviceRepository, log *slog.Logger) *Handler {
 	h := &Handler{
 		cfg:  cfg,
 		repo: r,
+		proj: proj,
+		dev:  dev,
 		log:  log,
 		mux:  http.NewServeMux(),
 	}
@@ -94,6 +98,15 @@ func (h *Handler) routes() {
 	h.mux.HandleFunc("/v1/events", h.withMiddleware(h.routeAppendEvent))
 	// Search
 	h.mux.HandleFunc("/v1/search", h.withMiddleware(h.routeSearch))
+	// Projects
+	h.mux.HandleFunc("/v1/projects", h.withMiddleware(h.routeProjects))
+	h.mux.HandleFunc("/v1/projects/", h.withMiddleware(h.routeProject))
+	// Folders
+	h.mux.HandleFunc("/v1/folders", h.withMiddleware(h.routeFolders))
+	h.mux.HandleFunc("/v1/folders/", h.withMiddleware(h.routeFolder))
+	// Devices
+	h.mux.HandleFunc("/v1/devices", h.withMiddleware(h.routeDevices))
+	h.mux.HandleFunc("/v1/devices/", h.withMiddleware(h.routeDevice))
 	// Health / readiness probes
 	h.mux.HandleFunc("/healthz", h.handleHealthz)
 	h.mux.HandleFunc("/readyz", h.handleReadyz)
@@ -931,7 +944,653 @@ func decodeJSON(r *http.Request, v any) error {
 	return nil
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Projects
+// ─────────────────────────────────────────────────────────────────────────────
+
+func (h *Handler) routeProjects(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		h.handleListProjects(w, r)
+	case http.MethodPost:
+		h.handleCreateProject(w, r)
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+func (h *Handler) routeProject(w http.ResponseWriter, r *http.Request) {
+	urn := strings.TrimPrefix(r.URL.Path, "/v1/projects/")
+	if urn == "" {
+		writeError(w, http.StatusBadRequest, "project URN is required")
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		h.handleGetProject(w, r, urn)
+	case http.MethodPatch:
+		h.handleUpdateProject(w, r, urn)
+	case http.MethodDelete:
+		h.handleDeleteProject(w, r, urn)
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+func (h *Handler) routeFolders(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		h.handleListFolders(w, r)
+	case http.MethodPost:
+		h.handleCreateFolder(w, r)
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+func (h *Handler) routeFolder(w http.ResponseWriter, r *http.Request) {
+	urn := strings.TrimPrefix(r.URL.Path, "/v1/folders/")
+	if urn == "" {
+		writeError(w, http.StatusBadRequest, "folder URN is required")
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		h.handleGetFolder(w, r, urn)
+	case http.MethodPatch:
+		h.handleUpdateFolder(w, r, urn)
+	case http.MethodDelete:
+		h.handleDeleteFolder(w, r, urn)
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+type projectJSON struct {
+	URN         string `json:"urn"`
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	Deleted     bool   `json:"deleted,omitempty"`
+	CreatedAt   string `json:"created_at"`
+	UpdatedAt   string `json:"updated_at"`
+}
+
+type createProjectRequest struct {
+	URN         string `json:"urn"`
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+}
+
+type updateProjectRequest struct {
+	Name        *string `json:"name,omitempty"`
+	Description *string `json:"description,omitempty"`
+	Deleted     *bool   `json:"deleted,omitempty"`
+}
+
+type listProjectsResponse struct {
+	Projects      []*projectJSON `json:"projects"`
+	NextPageToken string         `json:"next_page_token,omitempty"`
+}
+
+func projectToJSON(p *core.Project) *projectJSON {
+	return &projectJSON{
+		URN:         p.URN.String(),
+		Name:        p.Name,
+		Description: p.Description,
+		Deleted:     p.Deleted,
+		CreatedAt:   p.CreatedAt.UTC().Format(time.RFC3339),
+		UpdatedAt:   p.UpdatedAt.UTC().Format(time.RFC3339),
+	}
+}
+
+// GET /v1/projects
+func (h *Handler) handleListProjects(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	includeDeleted := q.Get("include_deleted") == "true"
+	pageSize := 0
+	if ps := q.Get("page_size"); ps != "" {
+		fmt.Sscanf(ps, "%d", &pageSize)
+	}
+	pageToken := q.Get("page_token")
+
+	result, err := h.proj.ListProjects(r.Context(), repo.ProjectListOptions{
+		IncludeDeleted: includeDeleted,
+		PageSize:       pageSize,
+		PageToken:      pageToken,
+	})
+	if err != nil {
+		h.internalError(w, r, "list projects", err)
+		return
+	}
+
+	out := make([]*projectJSON, 0, len(result.Projects))
+	for _, p := range result.Projects {
+		out = append(out, projectToJSON(p))
+	}
+	writeJSON(w, http.StatusOK, &listProjectsResponse{
+		Projects:      out,
+		NextPageToken: result.NextPageToken,
+	})
+}
+
+// POST /v1/projects
+func (h *Handler) handleCreateProject(w http.ResponseWriter, r *http.Request) {
+	var req createProjectRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if req.Name == "" {
+		writeError(w, http.StatusBadRequest, "name is required")
+		return
+	}
+	if req.URN == "" {
+		writeError(w, http.StatusBadRequest, "urn is required")
+		return
+	}
+
+	urn, err := core.ParseURN(req.URN)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid urn: %v", err))
+		return
+	}
+
+	now := time.Now().UTC()
+	proj := &core.Project{
+		URN:         urn,
+		Name:        req.Name,
+		Description: req.Description,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+
+	if err := h.proj.CreateProject(r.Context(), proj); err != nil {
+		if errors.Is(err, repo.ErrAlreadyExists) {
+			writeError(w, http.StatusConflict, "project already exists")
+			return
+		}
+		h.internalError(w, r, "create project", err)
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, projectToJSON(proj))
+}
+
+// GET /v1/projects/<urn>
+func (h *Handler) handleGetProject(w http.ResponseWriter, r *http.Request, urn string) {
+	proj, err := h.proj.GetProject(r.Context(), urn)
+	if err != nil {
+		if errors.Is(err, repo.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "project not found")
+			return
+		}
+		h.internalError(w, r, "get project", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, projectToJSON(proj))
+}
+
+// PATCH /v1/projects/<urn>
+func (h *Handler) handleUpdateProject(w http.ResponseWriter, r *http.Request, urn string) {
+	var req updateProjectRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	proj, err := h.proj.GetProject(r.Context(), urn)
+	if err != nil {
+		if errors.Is(err, repo.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "project not found")
+			return
+		}
+		h.internalError(w, r, "get project for update", err)
+		return
+	}
+
+	if req.Name != nil {
+		proj.Name = *req.Name
+	}
+	if req.Description != nil {
+		proj.Description = *req.Description
+	}
+	if req.Deleted != nil {
+		proj.Deleted = *req.Deleted
+	}
+	proj.UpdatedAt = time.Now().UTC()
+
+	if err := h.proj.UpdateProject(r.Context(), proj); err != nil {
+		h.internalError(w, r, "update project", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, projectToJSON(proj))
+}
+
+// DELETE /v1/projects/<urn>
+func (h *Handler) handleDeleteProject(w http.ResponseWriter, r *http.Request, urn string) {
+	if err := h.proj.DeleteProject(r.Context(), urn); err != nil {
+		if errors.Is(err, repo.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "project not found")
+			return
+		}
+		h.internalError(w, r, "delete project", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"deleted": true})
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Folders
+// ─────────────────────────────────────────────────────────────────────────────
+
+type folderJSON struct {
+	URN         string `json:"urn"`
+	ProjectURN  string `json:"project_urn"`
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	Deleted     bool   `json:"deleted,omitempty"`
+	CreatedAt   string `json:"created_at"`
+	UpdatedAt   string `json:"updated_at"`
+}
+
+type createFolderRequest struct {
+	URN         string `json:"urn"`
+	ProjectURN  string `json:"project_urn"`
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+}
+
+type updateFolderRequest struct {
+	Name        *string `json:"name,omitempty"`
+	Description *string `json:"description,omitempty"`
+	Deleted     *bool   `json:"deleted,omitempty"`
+}
+
+type listFoldersResponse struct {
+	Folders       []*folderJSON `json:"folders"`
+	NextPageToken string        `json:"next_page_token,omitempty"`
+}
+
+func folderToJSON(f *core.Folder) *folderJSON {
+	return &folderJSON{
+		URN:         f.URN.String(),
+		ProjectURN:  f.ProjectURN.String(),
+		Name:        f.Name,
+		Description: f.Description,
+		Deleted:     f.Deleted,
+		CreatedAt:   f.CreatedAt.UTC().Format(time.RFC3339),
+		UpdatedAt:   f.UpdatedAt.UTC().Format(time.RFC3339),
+	}
+}
+
+// GET /v1/folders
+func (h *Handler) handleListFolders(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	projectURN := q.Get("project_urn")
+	includeDeleted := q.Get("include_deleted") == "true"
+	pageSize := 0
+	if ps := q.Get("page_size"); ps != "" {
+		fmt.Sscanf(ps, "%d", &pageSize)
+	}
+	pageToken := q.Get("page_token")
+
+	result, err := h.proj.ListFolders(r.Context(), repo.FolderListOptions{
+		ProjectURN:     projectURN,
+		IncludeDeleted: includeDeleted,
+		PageSize:       pageSize,
+		PageToken:      pageToken,
+	})
+	if err != nil {
+		h.internalError(w, r, "list folders", err)
+		return
+	}
+
+	out := make([]*folderJSON, 0, len(result.Folders))
+	for _, f := range result.Folders {
+		out = append(out, folderToJSON(f))
+	}
+	writeJSON(w, http.StatusOK, &listFoldersResponse{
+		Folders:       out,
+		NextPageToken: result.NextPageToken,
+	})
+}
+
+// POST /v1/folders
+func (h *Handler) handleCreateFolder(w http.ResponseWriter, r *http.Request) {
+	var req createFolderRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if req.URN == "" {
+		writeError(w, http.StatusBadRequest, "urn is required")
+		return
+	}
+	if req.ProjectURN == "" {
+		writeError(w, http.StatusBadRequest, "project_urn is required")
+		return
+	}
+	if req.Name == "" {
+		writeError(w, http.StatusBadRequest, "name is required")
+		return
+	}
+
+	urn, err := core.ParseURN(req.URN)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid urn: %v", err))
+		return
+	}
+	projURN, err := core.ParseURN(req.ProjectURN)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid project_urn: %v", err))
+		return
+	}
+
+	now := time.Now().UTC()
+	f := &core.Folder{
+		URN:         urn,
+		ProjectURN:  projURN,
+		Name:        req.Name,
+		Description: req.Description,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+
+	if err := h.proj.CreateFolder(r.Context(), f); err != nil {
+		if errors.Is(err, repo.ErrAlreadyExists) {
+			writeError(w, http.StatusConflict, "folder already exists")
+			return
+		}
+		h.internalError(w, r, "create folder", err)
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, folderToJSON(f))
+}
+
+// GET /v1/folders/<urn>
+func (h *Handler) handleGetFolder(w http.ResponseWriter, r *http.Request, urn string) {
+	f, err := h.proj.GetFolder(r.Context(), urn)
+	if err != nil {
+		if errors.Is(err, repo.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "folder not found")
+			return
+		}
+		h.internalError(w, r, "get folder", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, folderToJSON(f))
+}
+
+// PATCH /v1/folders/<urn>
+func (h *Handler) handleUpdateFolder(w http.ResponseWriter, r *http.Request, urn string) {
+	var req updateFolderRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	f, err := h.proj.GetFolder(r.Context(), urn)
+	if err != nil {
+		if errors.Is(err, repo.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "folder not found")
+			return
+		}
+		h.internalError(w, r, "get folder for update", err)
+		return
+	}
+
+	if req.Name != nil {
+		f.Name = *req.Name
+	}
+	if req.Description != nil {
+		f.Description = *req.Description
+	}
+	if req.Deleted != nil {
+		f.Deleted = *req.Deleted
+	}
+	f.UpdatedAt = time.Now().UTC()
+
+	if err := h.proj.UpdateFolder(r.Context(), f); err != nil {
+		h.internalError(w, r, "update folder", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, folderToJSON(f))
+}
+
+// DELETE /v1/folders/<urn>
+func (h *Handler) handleDeleteFolder(w http.ResponseWriter, r *http.Request, urn string) {
+	if err := h.proj.DeleteFolder(r.Context(), urn); err != nil {
+		if errors.Is(err, repo.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "folder not found")
+			return
+		}
+		h.internalError(w, r, "delete folder", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"deleted": true})
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
 func (h *Handler) internalError(w http.ResponseWriter, r *http.Request, op string, err error) {
 	loggerFromCtx(r.Context(), h.log).Error("internal error", "op", op, "err", err)
 	writeError(w, http.StatusInternalServerError, "internal server error")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Devices
+// ─────────────────────────────────────────────────────────────────────────────
+
+func (h *Handler) routeDevices(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		h.handleListDevices(w, r)
+	case http.MethodPost:
+		h.handleRegisterDevice(w, r)
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+func (h *Handler) routeDevice(w http.ResponseWriter, r *http.Request) {
+	urn := strings.TrimPrefix(r.URL.Path, "/v1/devices/")
+	if urn == "" {
+		writeError(w, http.StatusBadRequest, "device URN is required")
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		h.handleGetDevice(w, r, urn)
+	case http.MethodPatch:
+		h.handleUpdateDevice(w, r, urn)
+	case http.MethodDelete:
+		h.handleRevokeDevice(w, r, urn)
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+type deviceJSON struct {
+	URN          string `json:"urn"`
+	Name         string `json:"name"`
+	OwnerURN     string `json:"owner_urn"`
+	PublicKeyB64 string `json:"public_key_b64"`
+	Revoked      bool   `json:"revoked,omitempty"`
+	RegisteredAt string `json:"registered_at"`
+	LastSeenAt   string `json:"last_seen_at,omitempty"`
+}
+
+type registerDeviceRequest struct {
+	URN          string `json:"urn"`
+	Name         string `json:"name"`
+	OwnerURN     string `json:"owner_urn"`
+	PublicKeyB64 string `json:"public_key_b64"`
+}
+
+type updateDeviceRequest struct {
+	Name       *string `json:"name,omitempty"`
+	LastSeenAt *string `json:"last_seen_at,omitempty"`
+}
+
+type listDevicesResponse struct {
+	Devices []*deviceJSON `json:"devices"`
+}
+
+func deviceToJSON(d *core.Device) *deviceJSON {
+	j := &deviceJSON{
+		URN:          d.URN.String(),
+		Name:         d.Name,
+		OwnerURN:     d.OwnerURN.String(),
+		PublicKeyB64: d.PublicKeyB64,
+		Revoked:      d.Revoked,
+		RegisteredAt: d.RegisteredAt.UTC().Format(time.RFC3339),
+	}
+	if !d.LastSeenAt.IsZero() {
+		j.LastSeenAt = d.LastSeenAt.UTC().Format(time.RFC3339)
+	}
+	return j
+}
+
+// GET /v1/devices
+func (h *Handler) handleListDevices(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	ownerURN := q.Get("owner_urn")
+	includeRevoked := q.Get("include_revoked") == "true"
+
+	result, err := h.dev.ListDevices(r.Context(), repo.DeviceListOptions{
+		OwnerURN:       ownerURN,
+		IncludeRevoked: includeRevoked,
+	})
+	if err != nil {
+		h.internalError(w, r, "list devices", err)
+		return
+	}
+
+	out := make([]*deviceJSON, len(result.Devices))
+	for i, d := range result.Devices {
+		out[i] = deviceToJSON(d)
+	}
+	writeJSON(w, http.StatusOK, &listDevicesResponse{Devices: out})
+}
+
+// POST /v1/devices
+func (h *Handler) handleRegisterDevice(w http.ResponseWriter, r *http.Request) {
+	var req registerDeviceRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if req.URN == "" {
+		writeError(w, http.StatusBadRequest, "urn is required")
+		return
+	}
+	if req.Name == "" {
+		writeError(w, http.StatusBadRequest, "name is required")
+		return
+	}
+	if req.OwnerURN == "" {
+		writeError(w, http.StatusBadRequest, "owner_urn is required")
+		return
+	}
+
+	deviceURN, err := core.ParseURN(req.URN)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid device URN: "+err.Error())
+		return
+	}
+	ownerURN, err := core.ParseURN(req.OwnerURN)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid owner_urn: "+err.Error())
+		return
+	}
+
+	now := time.Now().UTC()
+	d := &core.Device{
+		URN:          deviceURN,
+		Name:         req.Name,
+		OwnerURN:     ownerURN,
+		PublicKeyB64: req.PublicKeyB64,
+		RegisteredAt: now,
+	}
+
+	if err := h.dev.RegisterDevice(r.Context(), d); err != nil {
+		if errors.Is(err, repo.ErrAlreadyExists) {
+			writeError(w, http.StatusConflict, "device already registered")
+			return
+		}
+		h.internalError(w, r, "register device", err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, deviceToJSON(d))
+}
+
+// GET /v1/devices/:urn
+func (h *Handler) handleGetDevice(w http.ResponseWriter, r *http.Request, urn string) {
+	d, err := h.dev.GetDevice(r.Context(), urn)
+	if err != nil {
+		if errors.Is(err, repo.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "device not found")
+			return
+		}
+		h.internalError(w, r, "get device", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, deviceToJSON(d))
+}
+
+// PATCH /v1/devices/:urn
+func (h *Handler) handleUpdateDevice(w http.ResponseWriter, r *http.Request, urn string) {
+	var req updateDeviceRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	d, err := h.dev.GetDevice(r.Context(), urn)
+	if err != nil {
+		if errors.Is(err, repo.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "device not found")
+			return
+		}
+		h.internalError(w, r, "get device for update", err)
+		return
+	}
+
+	if req.Name != nil {
+		d.Name = *req.Name
+	}
+	if req.LastSeenAt != nil {
+		ts, err := time.Parse(time.RFC3339, *req.LastSeenAt)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid last_seen_at: "+err.Error())
+			return
+		}
+		d.LastSeenAt = ts.UTC()
+	}
+
+	if err := h.dev.UpdateDevice(r.Context(), d); err != nil {
+		if errors.Is(err, repo.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "device not found")
+			return
+		}
+		h.internalError(w, r, "update device", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, deviceToJSON(d))
+}
+
+// DELETE /v1/devices/:urn
+func (h *Handler) handleRevokeDevice(w http.ResponseWriter, r *http.Request, urn string) {
+	if err := h.dev.RevokeDevice(r.Context(), urn); err != nil {
+		if errors.Is(err, repo.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "device not found")
+			return
+		}
+		h.internalError(w, r, "revoke device", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"revoked": true})
 }

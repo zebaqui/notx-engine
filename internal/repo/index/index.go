@@ -20,10 +20,17 @@ import (
 // ─────────────────────────────────────────────────────────────────────────────
 
 const (
-	prefixNote   = "note:"
-	prefixSearch = "search:"
-	prefixName   = "name:"
+	prefixNote    = "note:"
+	prefixSearch  = "search:"
+	prefixName    = "name:"
+	prefixContent = "content:"
+	prefixProject = "proj:"
+	prefixFolder  = "folder:"
 )
+
+func contentKey(urn string) []byte {
+	return []byte(prefixContent + urn)
+}
 
 func noteKey(urn string) []byte {
 	return []byte(prefixNote + urn)
@@ -45,14 +52,15 @@ func searchKey(token, urn string) []byte {
 // It mirrors NoteHeader fields so callers can reconstruct list responses
 // without touching the file layer.
 type IndexEntry struct {
-	URN        string `json:"urn"`
-	Name       string `json:"name"`
-	NoteType   string `json:"note_type"`   // "normal" | "secure"
-	ProjectURN string `json:"project_urn"` // empty if absent
-	FolderURN  string `json:"folder_urn"`  // empty if absent
-	Deleted    bool   `json:"deleted"`
-	CreatedAt  string `json:"created_at"` // RFC3339
-	UpdatedAt  string `json:"updated_at"` // RFC3339
+	URN          string `json:"urn"`
+	Name         string `json:"name"`
+	NoteType     string `json:"note_type"`   // "normal" | "secure"
+	ProjectURN   string `json:"project_urn"` // empty if absent
+	FolderURN    string `json:"folder_urn"`  // empty if absent
+	Deleted      bool   `json:"deleted"`
+	CreatedAt    string `json:"created_at"` // RFC3339
+	UpdatedAt    string `json:"updated_at"` // RFC3339
+	HeadSequence int    `json:"head_sequence"`
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -124,6 +132,11 @@ func (idx *Index) Upsert(entry IndexEntry, content string) error {
 			return nil
 		}
 
+		// Normal notes: store materialised content for fast Get reads.
+		if err := txn.Set(contentKey(entry.URN), []byte(content)); err != nil {
+			return fmt.Errorf("index: write content key: %w", err)
+		}
+
 		// Normal notes: tokenise and write search keys.
 		for _, token := range tokenise(content) {
 			if err := txn.Set(searchKey(token, entry.URN), []byte{}); err != nil {
@@ -135,13 +148,14 @@ func (idx *Index) Upsert(entry IndexEntry, content string) error {
 }
 
 // Delete removes all index records associated with the given note URN.
-// This includes the metadata record, name record, and any search tokens.
+// This includes the metadata record, name record, content, and any search tokens.
 // It is safe to call Delete on a URN that does not exist.
 func (idx *Index) Delete(urn string) error {
 	return idx.db.Update(func(txn *badger.Txn) error {
-		// Remove the metadata and name records.
+		// Remove the metadata, name, and content records.
 		_ = txn.Delete(noteKey(urn))
 		_ = txn.Delete(nameKey(urn))
+		_ = txn.Delete(contentKey(urn))
 
 		// Collect and remove all search keys for this note.
 		searchKeys, err := collectSearchKeysForURN(txn, urn)
@@ -155,6 +169,31 @@ func (idx *Index) Delete(urn string) error {
 		}
 		return nil
 	})
+}
+
+// GetContent returns the materialised plain-text content stored for a normal
+// note. Returns ("", nil) when no content has been stored yet (e.g. the note
+// has no events, or it is a secure note).
+func (idx *Index) GetContent(urn string) (string, error) {
+	var content string
+
+	err := idx.db.View(func(txn *badger.Txn) error {
+		item, err := txn.Get(contentKey(urn))
+		if err == badger.ErrKeyNotFound {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("index: get content key: %w", err)
+		}
+		return item.Value(func(val []byte) error {
+			content = string(val)
+			return nil
+		})
+	})
+	if err != nil {
+		return "", err
+	}
+	return content, nil
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -402,4 +441,230 @@ func collectSearchKeysForURN(txn *badger.Txn, urn string) ([][]byte, error) {
 		}
 	}
 	return keys, nil
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Project and Folder key helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+func projectKey(urn string) []byte {
+	return []byte(prefixProject + urn)
+}
+
+func folderKey(urn string) []byte {
+	return []byte(prefixFolder + urn)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ProjectEntry
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ProjectEntry is the record stored in the index for each project.
+type ProjectEntry struct {
+	URN         string `json:"urn"`
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	Deleted     bool   `json:"deleted"`
+	CreatedAt   string `json:"created_at"` // RFC3339
+	UpdatedAt   string `json:"updated_at"` // RFC3339
+}
+
+// FolderEntry is the record stored in the index for each folder.
+type FolderEntry struct {
+	URN         string `json:"urn"`
+	ProjectURN  string `json:"project_urn"`
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	Deleted     bool   `json:"deleted"`
+	CreatedAt   string `json:"created_at"` // RFC3339
+	UpdatedAt   string `json:"updated_at"` // RFC3339
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Project methods
+// ─────────────────────────────────────────────────────────────────────────────
+
+// UpsertProject stores or updates a ProjectEntry.
+func (idx *Index) UpsertProject(entry ProjectEntry) error {
+	data, err := json.Marshal(entry)
+	if err != nil {
+		return fmt.Errorf("index: marshal project %q: %w", entry.URN, err)
+	}
+	return idx.db.Update(func(txn *badger.Txn) error {
+		return txn.Set(projectKey(entry.URN), data)
+	})
+}
+
+// GetProject returns the ProjectEntry for the given URN.
+// Returns (nil, nil) if not found.
+func (idx *Index) GetProject(urn string) (*ProjectEntry, error) {
+	var entry ProjectEntry
+	found := false
+	err := idx.db.View(func(txn *badger.Txn) error {
+		item, err := txn.Get(projectKey(urn))
+		if err == badger.ErrKeyNotFound {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("index: get project key: %w", err)
+		}
+		return item.Value(func(val []byte) error {
+			found = true
+			return json.Unmarshal(val, &entry)
+		})
+	})
+	if err != nil {
+		return nil, err
+	}
+	if !found {
+		return nil, nil
+	}
+	return &entry, nil
+}
+
+// ListProjects returns all ProjectEntries matching the given options.
+func (idx *Index) ListProjects(includeDeleted bool, pageSize int, pageToken string) ([]ProjectEntry, string, error) {
+	var results []ProjectEntry
+	err := idx.db.View(func(txn *badger.Txn) error {
+		iterOpts := badger.DefaultIteratorOptions
+		iterOpts.Prefix = []byte(prefixProject)
+		it := txn.NewIterator(iterOpts)
+		defer it.Close()
+
+		startKey := []byte(prefixProject)
+		if pageToken != "" {
+			startKey = []byte(prefixProject + pageToken)
+		}
+
+		for it.Seek(startKey); it.Valid(); it.Next() {
+			var entry ProjectEntry
+			if err := it.Item().Value(func(val []byte) error {
+				return json.Unmarshal(val, &entry)
+			}); err != nil {
+				return fmt.Errorf("index: unmarshal project: %w", err)
+			}
+			if !includeDeleted && entry.Deleted {
+				continue
+			}
+			if pageToken != "" && entry.URN == pageToken {
+				continue
+			}
+			results = append(results, entry)
+			if pageSize > 0 && len(results) >= pageSize {
+				break
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, "", err
+	}
+	nextToken := ""
+	if pageSize > 0 && len(results) == pageSize {
+		nextToken = results[len(results)-1].URN
+	}
+	return results, nextToken, nil
+}
+
+// DeleteProject removes the ProjectEntry for the given URN.
+func (idx *Index) DeleteProject(urn string) error {
+	return idx.db.Update(func(txn *badger.Txn) error {
+		return txn.Delete(projectKey(urn))
+	})
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Folder methods
+// ─────────────────────────────────────────────────────────────────────────────
+
+// UpsertFolder stores or updates a FolderEntry.
+func (idx *Index) UpsertFolder(entry FolderEntry) error {
+	data, err := json.Marshal(entry)
+	if err != nil {
+		return fmt.Errorf("index: marshal folder %q: %w", entry.URN, err)
+	}
+	return idx.db.Update(func(txn *badger.Txn) error {
+		return txn.Set(folderKey(entry.URN), data)
+	})
+}
+
+// GetFolder returns the FolderEntry for the given URN.
+// Returns (nil, nil) if not found.
+func (idx *Index) GetFolder(urn string) (*FolderEntry, error) {
+	var entry FolderEntry
+	found := false
+	err := idx.db.View(func(txn *badger.Txn) error {
+		item, err := txn.Get(folderKey(urn))
+		if err == badger.ErrKeyNotFound {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("index: get folder key: %w", err)
+		}
+		return item.Value(func(val []byte) error {
+			found = true
+			return json.Unmarshal(val, &entry)
+		})
+	})
+	if err != nil {
+		return nil, err
+	}
+	if !found {
+		return nil, nil
+	}
+	return &entry, nil
+}
+
+// ListFolders returns all FolderEntries matching the given options.
+func (idx *Index) ListFolders(projectURN string, includeDeleted bool, pageSize int, pageToken string) ([]FolderEntry, string, error) {
+	var results []FolderEntry
+	err := idx.db.View(func(txn *badger.Txn) error {
+		iterOpts := badger.DefaultIteratorOptions
+		iterOpts.Prefix = []byte(prefixFolder)
+		it := txn.NewIterator(iterOpts)
+		defer it.Close()
+
+		startKey := []byte(prefixFolder)
+		if pageToken != "" {
+			startKey = []byte(prefixFolder + pageToken)
+		}
+
+		for it.Seek(startKey); it.Valid(); it.Next() {
+			var entry FolderEntry
+			if err := it.Item().Value(func(val []byte) error {
+				return json.Unmarshal(val, &entry)
+			}); err != nil {
+				return fmt.Errorf("index: unmarshal folder: %w", err)
+			}
+			if !includeDeleted && entry.Deleted {
+				continue
+			}
+			if projectURN != "" && entry.ProjectURN != projectURN {
+				continue
+			}
+			if pageToken != "" && entry.URN == pageToken {
+				continue
+			}
+			results = append(results, entry)
+			if pageSize > 0 && len(results) >= pageSize {
+				break
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, "", err
+	}
+	nextToken := ""
+	if pageSize > 0 && len(results) == pageSize {
+		nextToken = results[len(results)-1].URN
+	}
+	return results, nextToken, nil
+}
+
+// DeleteFolder removes the FolderEntry for the given URN.
+func (idx *Index) DeleteFolder(urn string) error {
+	return idx.db.Update(func(txn *badger.Txn) error {
+		return txn.Delete(folderKey(urn))
+	})
 }

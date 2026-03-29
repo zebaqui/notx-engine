@@ -16,16 +16,22 @@ import (
 // It is intended exclusively for testing. No data survives beyond the lifetime
 // of the Provider instance. All operations are safe for concurrent use.
 type Provider struct {
-	mu     sync.RWMutex
-	notes  map[string]*core.Note    // urn → note (header + applied events)
-	events map[string][]*core.Event // urn → ordered event slice
+	mu       sync.RWMutex
+	notes    map[string]*core.Note    // urn → note (header + applied events)
+	events   map[string][]*core.Event // urn → ordered event slice
+	projects map[string]*core.Project // urn → project
+	folders  map[string]*core.Folder  // urn → folder
+	devices  map[string]*core.Device  // urn → device
 }
 
 // New returns an empty, ready-to-use in-memory Provider.
 func New() *Provider {
 	return &Provider{
-		notes:  make(map[string]*core.Note),
-		events: make(map[string][]*core.Event),
+		notes:    make(map[string]*core.Note),
+		events:   make(map[string][]*core.Event),
+		projects: make(map[string]*core.Project),
+		folders:  make(map[string]*core.Folder),
+		devices:  make(map[string]*core.Device),
 	}
 }
 
@@ -355,6 +361,324 @@ func (p *Provider) Search(ctx context.Context, opts repo.SearchOptions) (*repo.S
 	}
 
 	return &repo.SearchResults{Results: results}, nil
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ProjectRepository implementation
+// ─────────────────────────────────────────────────────────────────────────────
+
+func (p *Provider) CreateProject(ctx context.Context, proj *core.Project) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	urn := proj.URN.String()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if _, exists := p.projects[urn]; exists {
+		return fmt.Errorf("%w: %s", repo.ErrAlreadyExists, urn)
+	}
+	clone := *proj
+	p.projects[urn] = &clone
+	return nil
+}
+
+func (p *Provider) GetProject(ctx context.Context, urn string) (*core.Project, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	proj, ok := p.projects[urn]
+	if !ok {
+		return nil, fmt.Errorf("%w: %s", repo.ErrNotFound, urn)
+	}
+	clone := *proj
+	return &clone, nil
+}
+
+func (p *Provider) ListProjects(ctx context.Context, opts repo.ProjectListOptions) (*repo.ProjectListResult, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	urns := make([]string, 0, len(p.projects))
+	for urn := range p.projects {
+		urns = append(urns, urn)
+	}
+	sort.Strings(urns)
+
+	pageSize := opts.PageSize
+	if pageSize <= 0 {
+		pageSize = 50
+	}
+
+	startIdx := 0
+	if opts.PageToken != "" {
+		for i, u := range urns {
+			if u == opts.PageToken {
+				startIdx = i + 1
+				break
+			}
+		}
+	}
+
+	var results []*core.Project
+	for _, urn := range urns[startIdx:] {
+		proj := p.projects[urn]
+		if !opts.IncludeDeleted && proj.Deleted {
+			continue
+		}
+		clone := *proj
+		results = append(results, &clone)
+		if len(results) >= pageSize {
+			break
+		}
+	}
+
+	nextToken := ""
+	if len(results) == pageSize {
+		nextToken = results[len(results)-1].URN.String()
+	}
+	if results == nil {
+		results = []*core.Project{}
+	}
+	return &repo.ProjectListResult{Projects: results, NextPageToken: nextToken}, nil
+}
+
+func (p *Provider) UpdateProject(ctx context.Context, proj *core.Project) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	urn := proj.URN.String()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if _, ok := p.projects[urn]; !ok {
+		return fmt.Errorf("%w: %s", repo.ErrNotFound, urn)
+	}
+	clone := *proj
+	p.projects[urn] = &clone
+	return nil
+}
+
+func (p *Provider) DeleteProject(ctx context.Context, urn string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	proj, ok := p.projects[urn]
+	if !ok {
+		return fmt.Errorf("%w: %s", repo.ErrNotFound, urn)
+	}
+	proj.Deleted = true
+	return nil
+}
+
+func (p *Provider) CreateFolder(ctx context.Context, f *core.Folder) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	urn := f.URN.String()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if _, exists := p.folders[urn]; exists {
+		return fmt.Errorf("%w: %s", repo.ErrAlreadyExists, urn)
+	}
+	clone := *f
+	p.folders[urn] = &clone
+	return nil
+}
+
+func (p *Provider) GetFolder(ctx context.Context, urn string) (*core.Folder, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	f, ok := p.folders[urn]
+	if !ok {
+		return nil, fmt.Errorf("%w: %s", repo.ErrNotFound, urn)
+	}
+	clone := *f
+	return &clone, nil
+}
+
+func (p *Provider) ListFolders(ctx context.Context, opts repo.FolderListOptions) (*repo.FolderListResult, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	urns := make([]string, 0, len(p.folders))
+	for urn := range p.folders {
+		urns = append(urns, urn)
+	}
+	sort.Strings(urns)
+
+	pageSize := opts.PageSize
+	if pageSize <= 0 {
+		pageSize = 50
+	}
+
+	startIdx := 0
+	if opts.PageToken != "" {
+		for i, u := range urns {
+			if u == opts.PageToken {
+				startIdx = i + 1
+				break
+			}
+		}
+	}
+
+	var results []*core.Folder
+	for _, urn := range urns[startIdx:] {
+		f := p.folders[urn]
+		if !opts.IncludeDeleted && f.Deleted {
+			continue
+		}
+		if opts.ProjectURN != "" && f.ProjectURN.String() != opts.ProjectURN {
+			continue
+		}
+		clone := *f
+		results = append(results, &clone)
+		if len(results) >= pageSize {
+			break
+		}
+	}
+
+	nextToken := ""
+	if len(results) == pageSize {
+		nextToken = results[len(results)-1].URN.String()
+	}
+	if results == nil {
+		results = []*core.Folder{}
+	}
+	return &repo.FolderListResult{Folders: results, NextPageToken: nextToken}, nil
+}
+
+func (p *Provider) UpdateFolder(ctx context.Context, f *core.Folder) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	urn := f.URN.String()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if _, ok := p.folders[urn]; !ok {
+		return fmt.Errorf("%w: %s", repo.ErrNotFound, urn)
+	}
+	clone := *f
+	p.folders[urn] = &clone
+	return nil
+}
+
+func (p *Provider) DeleteFolder(ctx context.Context, urn string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	f, ok := p.folders[urn]
+	if !ok {
+		return fmt.Errorf("%w: %s", repo.ErrNotFound, urn)
+	}
+	f.Deleted = true
+	return nil
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DeviceRepository
+// ─────────────────────────────────────────────────────────────────────────────
+
+func (p *Provider) RegisterDevice(ctx context.Context, d *core.Device) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	urn := d.URN.String()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if _, exists := p.devices[urn]; exists {
+		return fmt.Errorf("%w: %s", repo.ErrAlreadyExists, urn)
+	}
+	clone := *d
+	p.devices[urn] = &clone
+	return nil
+}
+
+func (p *Provider) GetDevice(ctx context.Context, urn string) (*core.Device, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	d, ok := p.devices[urn]
+	if !ok {
+		return nil, fmt.Errorf("%w: %s", repo.ErrNotFound, urn)
+	}
+	clone := *d
+	return &clone, nil
+}
+
+func (p *Provider) ListDevices(ctx context.Context, opts repo.DeviceListOptions) (*repo.DeviceListResult, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	urns := make([]string, 0, len(p.devices))
+	for urn := range p.devices {
+		urns = append(urns, urn)
+	}
+	sort.Strings(urns)
+
+	var results []*core.Device
+	for _, urn := range urns {
+		d := p.devices[urn]
+		if !opts.IncludeRevoked && d.Revoked {
+			continue
+		}
+		if opts.OwnerURN != "" && d.OwnerURN.String() != opts.OwnerURN {
+			continue
+		}
+		clone := *d
+		results = append(results, &clone)
+	}
+	if results == nil {
+		results = []*core.Device{}
+	}
+	return &repo.DeviceListResult{Devices: results}, nil
+}
+
+func (p *Provider) UpdateDevice(ctx context.Context, d *core.Device) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	urn := d.URN.String()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if _, ok := p.devices[urn]; !ok {
+		return fmt.Errorf("%w: %s", repo.ErrNotFound, urn)
+	}
+	clone := *d
+	p.devices[urn] = &clone
+	return nil
+}
+
+func (p *Provider) RevokeDevice(ctx context.Context, urn string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	d, ok := p.devices[urn]
+	if !ok {
+		return fmt.Errorf("%w: %s", repo.ErrNotFound, urn)
+	}
+	d.Revoked = true
+	return nil
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
