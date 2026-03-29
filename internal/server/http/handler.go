@@ -170,6 +170,13 @@ func (h *Handler) routeNote(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Check for /v1/notes/<urn>/content suffix (replace full content).
+	if strings.HasSuffix(path, "/content") {
+		noteURN := strings.TrimSuffix(path, "/content")
+		h.handleReplaceContent(w, r, noteURN)
+		return
+	}
+
 	switch r.Method {
 	case http.MethodGet:
 		h.handleGetNote(w, r, path)
@@ -341,8 +348,8 @@ func (h *Handler) handleCreateNote(w http.ResponseWriter, r *http.Request) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 type getNoteResponse struct {
-	Header *noteHeaderJSON `json:"header"`
-	Events []*eventJSON    `json:"events"`
+	Header  *noteHeaderJSON `json:"header"`
+	Content string          `json:"content"`
 }
 
 func (h *Handler) handleGetNote(w http.ResponseWriter, r *http.Request, urn string) {
@@ -357,15 +364,8 @@ func (h *Handler) handleGetNote(w http.ResponseWriter, r *http.Request, urn stri
 	}
 
 	resp := &getNoteResponse{
-		Header: noteToHeaderJSON(note),
-		Events: make([]*eventJSON, 0, note.EventCount()),
-	}
-	for i := 1; i <= note.EventCount(); i++ {
-		ev, err := note.EventAt(i)
-		if err != nil {
-			continue
-		}
-		resp.Events = append(resp.Events, eventToJSON(ev))
+		Header:  noteToHeaderJSON(note),
+		Content: note.Content(),
 	}
 
 	writeJSON(w, http.StatusOK, resp)
@@ -572,6 +572,107 @@ func (h *Handler) handleAppendEvent(w http.ResponseWriter, r *http.Request) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // GET /v1/notes/:urn/events?from=<seq>
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /v1/notes/:urn/content
+// ─────────────────────────────────────────────────────────────────────────────
+
+type replaceContentRequest struct {
+	Content   string `json:"content"`
+	AuthorURN string `json:"author_urn,omitempty"`
+}
+
+type replaceContentResponse struct {
+	Sequence int    `json:"sequence"`
+	Changed  bool   `json:"changed"`
+	NoteURN  string `json:"note_urn"`
+}
+
+func (h *Handler) handleReplaceContent(w http.ResponseWriter, r *http.Request, noteURN string) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	var req replaceContentRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	note, err := h.repo.Get(r.Context(), noteURN)
+	if err != nil {
+		if errors.Is(err, repo.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "note not found")
+			return
+		}
+		h.internalError(w, r, "get note for content replace", err)
+		return
+	}
+
+	if note.NoteType == core.NoteTypeSecure {
+		writeError(w, http.StatusBadRequest, "content replacement is not supported for secure notes")
+		return
+	}
+
+	// Diff the incoming content against the current document state.
+	oldLines := core.SplitLines(note.Content())
+	newLines := core.SplitLines(req.Content)
+	entries := core.DiffLines(oldLines, newLines)
+
+	// Nothing changed — return early without writing an event.
+	if len(entries) == 0 {
+		writeJSON(w, http.StatusOK, &replaceContentResponse{
+			Sequence: note.HeadSequence(),
+			Changed:  false,
+			NoteURN:  noteURN,
+		})
+		return
+	}
+
+	// Resolve author URN (default to anon).
+	authorURNStr := fmt.Sprintf("%s:usr:anon", note.URN.Namespace)
+	if req.AuthorURN != "" {
+		authorURNStr = req.AuthorURN
+	}
+	authorURN, err := core.ParseURN(authorURNStr)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid author_urn: %v", err))
+		return
+	}
+
+	nextSeq := note.HeadSequence() + 1
+	event := &core.Event{
+		NoteURN:   note.URN,
+		Sequence:  nextSeq,
+		AuthorURN: authorURN,
+		CreatedAt: time.Now().UTC(),
+		Entries:   entries,
+	}
+
+	opts := repo.AppendEventOptions{
+		ExpectSequence: nextSeq,
+	}
+
+	if err := h.repo.AppendEvent(r.Context(), event, opts); err != nil {
+		if errors.Is(err, repo.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "note not found")
+			return
+		}
+		if errors.Is(err, repo.ErrSequenceConflict) {
+			writeError(w, http.StatusConflict, err.Error())
+			return
+		}
+		h.internalError(w, r, "append content event", err)
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, &replaceContentResponse{
+		Sequence: nextSeq,
+		Changed:  true,
+		NoteURN:  noteURN,
+	})
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 
 type streamEventsResponse struct {

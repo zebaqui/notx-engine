@@ -503,6 +503,81 @@ func (n *Note) AuthorURNs() []URN {
 // Utility
 // ──────────────────────────────────────────────────────────────────────────────
 
+// DiffLines computes the minimal set of LineEntry operations needed to
+// transform the document's current content into newContent.
+//
+// The algorithm does a line-by-line comparison:
+//   - Lines that exist in both old and new at the same position with the same
+//     content produce no entry (no-op).
+//   - Lines that changed produce a LineOpSet (or LineOpSetEmpty for blank lines).
+//   - Lines that exist in old but not in new (i.e. the new document is shorter)
+//     produce LineOpDelete entries, emitted highest-to-lowest so the caller can
+//     feed them directly into an Event without worrying about index drift.
+//
+// The returned slice is empty (not nil) when old and new are identical.
+// sequence is passed through to help callers build the Event but is not used
+// internally by this function.
+func DiffLines(oldLines, newLines []string) []LineEntry {
+	oldLen := len(oldLines)
+	newLen := len(newLines)
+
+	var entries []LineEntry
+
+	// Walk the overlapping region.
+	limit := oldLen
+	if newLen > oldLen {
+		limit = newLen
+	}
+
+	for i := 0; i < limit; i++ {
+		lineNum := i + 1 // 1-based
+
+		if i < newLen {
+			// Line exists in new document.
+			newLine := newLines[i]
+			if i >= oldLen {
+				// New document is longer — append line.
+				if newLine == "" {
+					entries = append(entries, LineEntry{LineNumber: lineNum, Op: LineOpSetEmpty})
+				} else {
+					entries = append(entries, LineEntry{LineNumber: lineNum, Op: LineOpSet, Content: newLine})
+				}
+			} else {
+				// Line exists in both — only emit if changed.
+				if oldLines[i] != newLine {
+					if newLine == "" {
+						entries = append(entries, LineEntry{LineNumber: lineNum, Op: LineOpSetEmpty})
+					} else {
+						entries = append(entries, LineEntry{LineNumber: lineNum, Op: LineOpSet, Content: newLine})
+					}
+				}
+			}
+		}
+	}
+
+	// Old document is longer — delete the trailing lines highest-first so index
+	// arithmetic stays correct when the event is replayed.
+	if oldLen > newLen {
+		for i := oldLen; i > newLen; i-- {
+			entries = append(entries, LineEntry{LineNumber: i, Op: LineOpDelete})
+		}
+	}
+
+	if entries == nil {
+		return []LineEntry{}
+	}
+	return entries
+}
+
+// SplitLines splits a string into lines on '\n'. An empty string returns an
+// empty slice (not a one-element slice containing "").
+func SplitLines(s string) []string {
+	if s == "" {
+		return []string{}
+	}
+	return strings.Split(s, "\n")
+}
+
 // joinLines joins a slice of lines with '\n'. Returns an empty string for a
 // nil or empty slice.
 func joinLines(lines []string) string {

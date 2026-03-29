@@ -56,6 +56,12 @@ desktop.ini
 *.o
 *.mod.tidy
 
+# Admin UI — generated files (populated by scripts/build.sh)
+/internal/admin/ui/
+/ui/admin/dist/
+/ui/admin/node_modules/
+/data/
+
 # IDE specific files
 *.iml
 .project
