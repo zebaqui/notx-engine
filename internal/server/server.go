@@ -67,7 +67,7 @@ func New(cfg *config.Config, r repo.NoteRepository, projRepo repo.ProjectReposit
 	}
 
 	if cfg.EnableHTTP {
-		s.httpHandler = httpsvc.New(cfg, r, projRepo, devRepo, userRepo, log)
+		s.httpHandler = httpsvc.New(cfg, r, projRepo, devRepo, userRepo, log, s.pairingService, secretStore)
 	}
 
 	if cfg.Pairing.Enabled {

@@ -14,6 +14,9 @@ import type {
   Device,
   ListUsersResponse,
   User,
+  ListServersResponse,
+  PairingSecret,
+  CACertificateResponse,
 } from "./types";
 
 // LOCAL_ADMIN_DEVICE_URN is the well-known built-in sentinel device that the
@@ -362,6 +365,41 @@ export async function updateUser(
 
 export async function deleteUser(urn: string): Promise<void> {
   await http.delete(`/v1/users/${encodeURIComponent(urn)}`);
+}
+
+// ─── Servers (Pairing) ───────────────────────────────────────────────────────
+
+export interface ListServersParams {
+  include_revoked?: boolean;
+}
+
+export async function fetchServers(
+  params: ListServersParams = {},
+): Promise<ListServersResponse> {
+  const query = new URLSearchParams();
+  if (params.include_revoked) query.set("include_revoked", "true");
+  const qs = query.toString() ? `?${query}` : "";
+  const { data } = await http.get<ListServersResponse>(`/v1/servers${qs}`);
+  return data;
+}
+
+export async function revokeServer(urn: string): Promise<void> {
+  await http.delete(`/v1/servers/${encodeURIComponent(urn)}`);
+}
+
+export async function fetchCACertificate(): Promise<CACertificateResponse> {
+  const { data } = await http.get<CACertificateResponse>("/v1/servers/ca");
+  return data;
+}
+
+export async function createPairingSecret(payload: {
+  label?: string;
+}): Promise<PairingSecret> {
+  const { data } = await http.post<PairingSecret>(
+    "/v1/servers/pairing/secrets",
+    payload,
+  );
+  return data;
 }
 
 // ─── Metrics (assembled from list endpoint) ───────────────────────────────

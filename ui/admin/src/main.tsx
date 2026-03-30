@@ -18,6 +18,7 @@ import ProjectsPage from "./pages/ProjectsPage";
 import DevicesPage from "./pages/DevicesPage";
 import UsersPage from "./pages/UsersPage";
 import ConfigPage from "./pages/ConfigPage";
+import ServersPage from "./pages/ServersPage";
 
 // ─── Query client ─────────────────────────────────────────────────────────────
 
@@ -87,12 +88,19 @@ const configRoute = createRoute({
   component: ConfigPage,
 });
 
+const serversRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/servers",
+  component: ServersPage,
+});
+
 const routeTree = rootRoute.addChildren([
   indexRoute,
   overviewRoute,
   notesRoute,
   projectsRoute,
   devicesRoute,
+  serversRoute,
   usersRoute,
   configRoute,
 ]);

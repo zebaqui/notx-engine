@@ -153,3 +153,30 @@ export interface ListUsersResponse {
   users: User[];
   next_page_token: string;
 }
+
+// ─── Server Pairing ───────────────────────────────────────────────────────────
+
+export interface ServerInfo {
+  urn: string;
+  name: string;
+  endpoint: string;
+  revoked: boolean;
+  registered_at: string; // ISO-8601
+  expires_at: string; // ISO-8601
+  last_seen_at?: string; // ISO-8601, optional
+}
+
+export interface ListServersResponse {
+  servers: ServerInfo[];
+}
+
+export interface PairingSecret {
+  id: string;
+  label: string;
+  plaintext: string; // shown only once on creation
+  expires_at: string; // ISO-8601
+}
+
+export interface CACertificateResponse {
+  ca_certificate: string; // PEM-encoded CA cert
+}

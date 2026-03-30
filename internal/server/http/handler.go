@@ -18,10 +18,15 @@ import (
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"github.com/zebaqui/notx-engine/core"
+	"github.com/zebaqui/notx-engine/internal/pairing"
 	"github.com/zebaqui/notx-engine/internal/repo"
 	"github.com/zebaqui/notx-engine/internal/server/config"
+	grpcsvc "github.com/zebaqui/notx-engine/internal/server/grpc"
+	pb "github.com/zebaqui/notx-engine/internal/server/proto"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -31,27 +36,33 @@ import (
 // Handler wires all HTTP routes and holds the dependencies needed to serve them.
 // It implements http.Handler so it can be passed directly to http.Server.
 type Handler struct {
-	cfg    *config.Config
-	repo   repo.NoteRepository
-	proj   repo.ProjectRepository
-	dev    repo.DeviceRepository
-	users  repo.UserRepository
-	log    *slog.Logger
-	mux    *http.ServeMux
-	server *http.Server
+	cfg         *config.Config
+	repo        repo.NoteRepository
+	proj        repo.ProjectRepository
+	dev         repo.DeviceRepository
+	users       repo.UserRepository
+	pairing     *grpcsvc.PairingService
+	secretStore repo.PairingSecretStore
+	log         *slog.Logger
+	mux         *http.ServeMux
+	server      *http.Server
 }
 
 // New creates a new Handler, registers all routes, and returns it.
 // The caller must call Serve to start accepting connections.
-func New(cfg *config.Config, r repo.NoteRepository, proj repo.ProjectRepository, dev repo.DeviceRepository, users repo.UserRepository, log *slog.Logger) *Handler {
+// pairingSvc and secretStore may be nil when server pairing is disabled;
+// the relevant endpoints will return 503 in that case.
+func New(cfg *config.Config, r repo.NoteRepository, proj repo.ProjectRepository, dev repo.DeviceRepository, users repo.UserRepository, log *slog.Logger, pairingSvc *grpcsvc.PairingService, secretStore repo.PairingSecretStore) *Handler {
 	h := &Handler{
-		cfg:   cfg,
-		repo:  r,
-		proj:  proj,
-		dev:   dev,
-		users: users,
-		log:   log,
-		mux:   http.NewServeMux(),
+		cfg:         cfg,
+		repo:        r,
+		proj:        proj,
+		dev:         dev,
+		users:       users,
+		pairing:     pairingSvc,
+		secretStore: secretStore,
+		log:         log,
+		mux:         http.NewServeMux(),
 	}
 	h.routes()
 	return h
@@ -184,6 +195,12 @@ func (h *Handler) routes() {
 	// Health / readiness probes
 	h.mux.HandleFunc("/healthz", h.handleHealthz)
 	h.mux.HandleFunc("/readyz", h.handleReadyz)
+
+	// Servers (pairing management)
+	h.mux.HandleFunc("/v1/servers/pairing/secrets", h.withMiddleware(h.routePairingSecrets))
+	h.mux.HandleFunc("/v1/servers/ca", h.withMiddleware(h.routeServersCA))
+	h.mux.HandleFunc("/v1/servers", h.withMiddleware(h.routeServers))
+	h.mux.HandleFunc("/v1/servers/", h.withMiddleware(h.routeServer))
 }
 
 // withMiddleware wraps a handler with logging and panic recovery.
@@ -2072,7 +2089,176 @@ func (h *Handler) handleUpdateUser(w http.ResponseWriter, r *http.Request, urn s
 	writeJSON(w, http.StatusOK, userToJSON(u))
 }
 
-// DELETE /v1/users/:urn
+// ─────────────────────────────────────────────────────────────────────────────
+// Servers (pairing management)
+// ─────────────────────────────────────────────────────────────────────────────
+
+func (h *Handler) routePairingSecrets(w http.ResponseWriter, r *http.Request) {
+	if h.pairing == nil || h.secretStore == nil {
+		writeError(w, http.StatusServiceUnavailable, "server pairing is not enabled")
+		return
+	}
+	switch r.Method {
+	case http.MethodPost:
+		h.handleCreatePairingSecret(w, r)
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+func (h *Handler) routeServersCA(w http.ResponseWriter, r *http.Request) {
+	if h.pairing == nil {
+		writeError(w, http.StatusServiceUnavailable, "server pairing is not enabled")
+		return
+	}
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	h.handleGetCACertificate(w, r)
+}
+
+func (h *Handler) routeServers(w http.ResponseWriter, r *http.Request) {
+	if h.pairing == nil {
+		writeError(w, http.StatusServiceUnavailable, "server pairing is not enabled")
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		h.handleListServers(w, r)
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+func (h *Handler) routeServer(w http.ResponseWriter, r *http.Request) {
+	if h.pairing == nil {
+		writeError(w, http.StatusServiceUnavailable, "server pairing is not enabled")
+		return
+	}
+	urn := strings.TrimPrefix(r.URL.Path, "/v1/servers/")
+	if urn == "" {
+		writeError(w, http.StatusBadRequest, "missing server URN")
+		return
+	}
+	switch r.Method {
+	case http.MethodDelete:
+		h.handleRevokeServer(w, r, urn)
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+// ── Request / Response types ────────────────────────────────────────────────
+
+type createPairingSecretRequest struct {
+	Label string `json:"label"`
+}
+
+type createPairingSecretResponse struct {
+	ID        string    `json:"id"`
+	Label     string    `json:"label"`
+	Plaintext string    `json:"plaintext"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
+type serverInfoJSON struct {
+	URN          string     `json:"urn"`
+	Name         string     `json:"name"`
+	Endpoint     string     `json:"endpoint"`
+	Revoked      bool       `json:"revoked"`
+	RegisteredAt time.Time  `json:"registered_at"`
+	ExpiresAt    time.Time  `json:"expires_at"`
+	LastSeenAt   *time.Time `json:"last_seen_at,omitempty"`
+}
+
+type listServersResponse struct {
+	Servers []serverInfoJSON `json:"servers"`
+}
+
+type caCertificateResponse struct {
+	CACertificate string `json:"ca_certificate"`
+}
+
+// ── Handlers ────────────────────────────────────────────────────────────────
+
+func (h *Handler) handleCreatePairingSecret(w http.ResponseWriter, r *http.Request) {
+	var req createPairingSecretRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if req.Label == "" {
+		req.Label = "admin-generated"
+	}
+	plaintext, record, err := pairing.GenerateSecret(req.Label, h.cfg.Pairing.SecretTTL)
+	if err != nil {
+		h.internalError(w, r, "generate pairing secret", err)
+		return
+	}
+	if err := h.secretStore.AddSecret(r.Context(), record); err != nil {
+		h.internalError(w, r, "store pairing secret", err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, createPairingSecretResponse{
+		ID:        record.ID,
+		Label:     record.LabelHint,
+		Plaintext: plaintext,
+		ExpiresAt: record.ExpiresAt,
+	})
+}
+
+func (h *Handler) handleListServers(w http.ResponseWriter, r *http.Request) {
+	includeRevoked := r.URL.Query().Get("include_revoked") == "true"
+	resp, err := h.pairing.ListServers(r.Context(), &pb.ListServersRequest{
+		IncludeRevoked: includeRevoked,
+	})
+	if err != nil {
+		h.internalError(w, r, "list servers", err)
+		return
+	}
+	servers := make([]serverInfoJSON, 0, len(resp.Servers))
+	for _, sv := range resp.Servers {
+		info := serverInfoJSON{
+			URN:          sv.ServerUrn,
+			Name:         sv.ServerName,
+			Endpoint:     sv.Endpoint,
+			Revoked:      sv.Revoked,
+			RegisteredAt: sv.RegisteredAt.AsTime(),
+			ExpiresAt:    sv.ExpiresAt.AsTime(),
+		}
+		if sv.LastSeenAt != nil {
+			t := sv.LastSeenAt.AsTime()
+			info.LastSeenAt = &t
+		}
+		servers = append(servers, info)
+	}
+	writeJSON(w, http.StatusOK, listServersResponse{Servers: servers})
+}
+
+func (h *Handler) handleRevokeServer(w http.ResponseWriter, r *http.Request, urn string) {
+	_, err := h.pairing.RevokeServer(r.Context(), &pb.RevokeServerRequest{ServerUrn: urn})
+	if err != nil {
+		st, ok := status.FromError(err)
+		if ok && st.Code() == codes.NotFound {
+			writeError(w, http.StatusNotFound, "server not found")
+			return
+		}
+		h.internalError(w, r, "revoke server", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"revoked": true})
+}
+
+func (h *Handler) handleGetCACertificate(w http.ResponseWriter, r *http.Request) {
+	resp, err := h.pairing.GetCACertificate(r.Context(), &pb.GetCACertificateRequest{})
+	if err != nil {
+		h.internalError(w, r, "get CA certificate", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, caCertificateResponse{CACertificate: string(resp.CaCertificate)})
+}
+
 func (h *Handler) handleDeleteUser(w http.ResponseWriter, r *http.Request, urn string) {
 	if err := h.users.DeleteUser(r.Context(), urn); err != nil {
 		if errors.Is(err, repo.ErrNotFound) {

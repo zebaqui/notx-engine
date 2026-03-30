@@ -7,6 +7,7 @@ import {
   FolderOpen,
   Monitor,
   Users,
+  Server,
 } from "lucide-react";
 
 // ─── Nav definition ───────────────────────────────────────────────────────────
@@ -16,6 +17,7 @@ const NAV = [
   { path: "/notes", label: "Notes", icon: <FileText size={16} /> },
   { path: "/projects", label: "Projects", icon: <FolderOpen size={16} /> },
   { path: "/devices", label: "Devices", icon: <Monitor size={16} /> },
+  { path: "/servers", label: "Servers", icon: <Server size={16} /> },
   { path: "/users", label: "Users", icon: <Users size={16} /> },
   { path: "/config", label: "Configuration", icon: <Settings size={16} /> },
 ] as const;
@@ -25,6 +27,7 @@ const PAGE_TITLES: Record<string, string> = {
   "/notes": "Notes",
   "/projects": "Projects & Folders",
   "/devices": "Devices",
+  "/servers": "Peer Servers",
   "/users": "Users",
   "/config": "Configuration",
 };
@@ -32,10 +35,10 @@ const PAGE_TITLES: Record<string, string> = {
 // ─── Shell ────────────────────────────────────────────────────────────────────
 
 export default function Shell({ children }: { children: React.ReactNode }) {
-  const navigate   = useNavigate();
+  const navigate = useNavigate();
   const routerState = useRouterState();
-  const pathname   = routerState.location.pathname;
-  const title      = PAGE_TITLES[pathname] ?? "notx admin";
+  const pathname = routerState.location.pathname;
+  const title = PAGE_TITLES[pathname] ?? "notx admin";
 
   return (
     <div className="shell">
