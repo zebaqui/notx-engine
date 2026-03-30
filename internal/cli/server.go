@@ -1,11 +1,20 @@
 package cli
 
 import (
+	"bufio"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"syscall"
+	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/zebaqui/notx-engine/internal/clientconfig"
@@ -14,14 +23,60 @@ import (
 	"github.com/zebaqui/notx-engine/internal/server/config"
 )
 
-// adminURNsFromConfig returns the admin device and owner URNs stored in the
-// client config, falling back to the well-known all-zero sentinels only when
-// the config cannot be loaded at all (should never happen in practice because
-// runServer calls EnsureConfig first).
+// ─────────────────────────────────────────────────────────────────────────────
+// Daemon file paths
+// ─────────────────────────────────────────────────────────────────────────────
+
+func notxDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ".notx"
+	}
+	return filepath.Join(home, ".notx")
+}
+
+func pidFilePath() string { return filepath.Join(notxDir(), "server.pid") }
+func logFilePath() string { return filepath.Join(notxDir(), "server.log") }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PID helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+func writePID(pid int) error {
+	return os.WriteFile(pidFilePath(), []byte(strconv.Itoa(pid)+"\n"), 0o644)
+}
+
+func readPID() (int, error) {
+	data, err := os.ReadFile(pidFilePath())
+	if err != nil {
+		return 0, err
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil {
+		return 0, fmt.Errorf("corrupt pid file: %w", err)
+	}
+	return pid, nil
+}
+
+func removePID() { os.Remove(pidFilePath()) }
+
+// processAlive returns true when a process with the given PID exists and is
+// reachable via kill(pid, 0).
+func processAlive(pid int) bool {
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	return proc.Signal(syscall.Signal(0)) == nil
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Admin URN helper (unchanged from previous version)
+// ─────────────────────────────────────────────────────────────────────────────
+
 func adminURNsFromConfig(fileCfg *clientconfig.Config) (deviceURN, ownerURN string) {
 	deviceURN = fileCfg.Admin.AdminDeviceURN
 	ownerURN = fileCfg.Admin.AdminOwnerURN
-
 	if deviceURN == "" {
 		deviceURN = config.DefaultAdminDeviceURN
 	}
@@ -31,32 +86,10 @@ func adminURNsFromConfig(fileCfg *clientconfig.Config) (deviceURN, ownerURN stri
 	return deviceURN, ownerURN
 }
 
-var serverCmd = &cobra.Command{
-	Use:   "server",
-	Short: "Start the notx server",
-	Long: `Start the notx server with HTTP and/or gRPC listeners.
+// ─────────────────────────────────────────────────────────────────────────────
+// serverFlags — shared by the daemon worker invocation
+// ─────────────────────────────────────────────────────────────────────────────
 
-Default values are read from ~/.notx/config.json. Flags override the config
-for a single invocation. Run "notx config" to edit the config interactively.
-
-Examples:
-  # Start both servers using config defaults
-  notx server
-
-  # HTTP only on a custom port
-  notx server --grpc=false --http-port 8080
-
-  # gRPC only with TLS
-  notx server --http=false --tls-cert server.crt --tls-key server.key
-
-  # Both servers, mTLS, custom data directory
-  notx server --data-dir /var/notx --tls-cert s.crt --tls-key s.key --tls-ca ca.crt
-`,
-	RunE: runServer,
-}
-
-// serverFlags holds the raw flag values populated by cobra.
-// Defaults are seeded from ~/.notx/config.json in init(); flags override them.
 var serverFlags struct {
 	httpEnabled bool
 	grpcEnabled bool
@@ -75,21 +108,50 @@ var serverFlags struct {
 
 	deviceAutoApprove bool
 	adminPassphrase   string
+
+	// internal — set when this process is the background worker itself
+	daemon bool
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// serverCmd (notx server)
+// ─────────────────────────────────────────────────────────────────────────────
+
+var serverCmd = &cobra.Command{
+	Use:   "server",
+	Short: "Manage the notx background server",
+	Long: `Start and manage the notx server as a background daemon.
+
+Running "notx server" (with no sub-command) starts the server in the
+background and returns immediately.  The server process writes its PID to
+~/.notx/server.pid and all output to ~/.notx/server.log.
+
+Sub-commands:
+  status   — show whether the server is running
+  stop     — gracefully stop the running server
+  restart  — stop then start the server
+  logs     — print the server log (--tail to follow)
+
+Examples:
+  notx server                  # start in background
+  notx server status
+  notx server stop
+  notx server restart
+  notx server logs
+  notx server logs --tail
+`,
+	RunE: runServerStart,
 }
 
 func init() {
-	// Seed defaults from config so flags show the real effective value in --help.
 	fileCfg, _ := clientconfig.Load()
-
 	f := serverCmd.Flags()
 
-	// Protocol toggles
 	f.BoolVar(&serverFlags.httpEnabled, "http", fileCfg.Server.EnableHTTP,
 		"Enable the HTTP/JSON API server")
 	f.BoolVar(&serverFlags.grpcEnabled, "grpc", fileCfg.Server.EnableGRPC,
 		"Enable the gRPC server")
 
-	// Network — parse host:port from config addrs, fall back to package defaults.
 	httpPort := portFromAddr(fileCfg.Server.HTTPAddr, config.DefaultHTTPPort)
 	grpcPort := portFromAddr(fileCfg.Server.GRPCAddr, config.DefaultGRPCPort)
 	host := hostFromAddr(fileCfg.Server.HTTPAddr, "")
@@ -101,11 +163,9 @@ func init() {
 	f.StringVar(&serverFlags.host, "host", host,
 		"Bind address for both servers (default: all interfaces)")
 
-	// Storage
 	f.StringVar(&serverFlags.dataDir, "data-dir", fileCfg.Storage.DataDir,
 		"Root directory for note files and the Badger index")
 
-	// TLS / mTLS
 	f.StringVar(&serverFlags.tlsCert, "tls-cert", fileCfg.TLS.CertFile,
 		"Path to the PEM-encoded server TLS certificate (leave empty to disable TLS)")
 	f.StringVar(&serverFlags.tlsKey, "tls-key", fileCfg.TLS.KeyFile,
@@ -113,35 +173,112 @@ func init() {
 	f.StringVar(&serverFlags.tlsCA, "tls-ca", fileCfg.TLS.CAFile,
 		"Path to the PEM-encoded CA certificate for mTLS client verification")
 
-	// Operational
 	f.StringVar(&serverFlags.logLevel, "log-level", fileCfg.EffectiveLogLevel(fileCfg.Server.LogLevel),
 		"Log verbosity: debug, info, warn, error")
 
-	// Device onboarding
 	f.BoolVar(&serverFlags.deviceAutoApprove, "device-auto-approve", false,
-		"Automatically approve newly registered devices (skip manual approval step)")
+		"Automatically approve newly registered devices")
 
-	// Admin passphrase — when set, remote `notx admin --remote` can register
-	// an admin device by presenting this passphrase. The plaintext is never
-	// stored; only a bcrypt hash is kept in memory for the lifetime of the
-	// server process.
 	f.StringVar(&serverFlags.adminPassphrase, "admin-passphrase", "",
-		"Passphrase required to register an admin device from a remote machine (plaintext; hashed at startup)")
+		"Passphrase required to register an admin device from a remote machine")
+
+	// Hidden flag — used internally when this process is the daemon worker.
+	f.BoolVar(&serverFlags.daemon, "daemon", false, "run as background worker (internal use)")
+	f.MarkHidden("daemon") //nolint:errcheck
+
+	serverCmd.AddCommand(serverStatusCmd)
+	serverCmd.AddCommand(serverStopCmd)
+	serverCmd.AddCommand(serverRestartCmd)
+	serverCmd.AddCommand(serverLogsCmd)
 
 	rootCmd.AddCommand(serverCmd)
 }
 
-func runServer(cmd *cobra.Command, args []string) error {
-	// ── Ensure ~/.notx/config.json exists on first run ───────────────────────
+// runServerStart is called when the user runs `notx server` (no sub-command).
+// If --daemon is set this process IS the worker; otherwise it forks a daemon.
+func runServerStart(cmd *cobra.Command, args []string) error {
+	if serverFlags.daemon {
+		return runDaemonWorker(cmd, args)
+	}
+	return spawnDaemon(cmd)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Spawn helper — fork this binary as a background worker
+// ─────────────────────────────────────────────────────────────────────────────
+
+func spawnDaemon(cmd *cobra.Command) error {
+	// If a server is already running, tell the user.
+	if pid, err := readPID(); err == nil && processAlive(pid) {
+		fmt.Fprintf(os.Stdout, "  \033[33m⚠\033[0m  notx server is already running (pid %d)\n", pid)
+		fmt.Fprintf(os.Stdout, "       Run \033[1mnotx server status\033[0m for details.\n")
+		return nil
+	}
+
+	// Ensure the ~/.notx directory exists.
+	if err := os.MkdirAll(notxDir(), 0o700); err != nil {
+		return fmt.Errorf("create notx dir: %w", err)
+	}
+
+	// Re-execute this binary with --daemon plus every flag the user passed.
+	self, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("resolve executable path: %w", err)
+	}
+
+	// Build the argv for the child, forwarding only explicitly-changed flags.
+	argv := []string{self, "server", "--daemon"}
+	cmd.Flags().Visit(func(f *pflag.Flag) {
+		if f.Name == "daemon" {
+			return
+		}
+		argv = append(argv, "--"+f.Name, f.Value.String())
+	})
+
+	logFile, err := os.OpenFile(logFilePath(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return fmt.Errorf("open log file: %w", err)
+	}
+	defer logFile.Close()
+
+	child := exec.Command(argv[0], argv[1:]...)
+	child.Stdout = logFile
+	child.Stderr = logFile
+	child.Stdin = nil
+	// Detach from the current process group so the child survives the parent.
+	child.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+
+	if err := child.Start(); err != nil {
+		return fmt.Errorf("start daemon: %w", err)
+	}
+
+	pid := child.Process.Pid
+	if err := writePID(pid); err != nil {
+		// Non-fatal — server is still running.
+		fmt.Fprintf(os.Stderr, "  \033[33m⚠\033[0m  Could not write pid file: %v\n", err)
+	}
+
+	// Detach — let the child run independently.
+	child.Process.Release() //nolint:errcheck
+
+	fmt.Fprintf(os.Stdout, "  \033[1;32m✓\033[0m  notx server started \033[2m(pid %d)\033[0m\n", pid)
+	fmt.Fprintf(os.Stdout, "       Logs → \033[36m%s\033[0m\n", logFilePath())
+	fmt.Fprintf(os.Stdout, "       Run \033[1mnotx server logs --tail\033[0m to follow output.\n")
+	return nil
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Daemon worker — the actual server process
+// ─────────────────────────────────────────────────────────────────────────────
+
+func runDaemonWorker(cmd *cobra.Command, args []string) error {
 	if created, err := clientconfig.EnsureConfig(); err != nil {
 		fmt.Fprintf(os.Stderr, "  \033[33m⚠\033[0m  Could not write default config: %v\n", err)
 	} else if created {
 		path, _ := clientconfig.Path()
 		fmt.Fprintf(os.Stdout, "\n  \033[1;32m✓\033[0m  First run — created default config at \033[36m%s\033[0m\n", path)
-		fmt.Fprintf(os.Stdout, "       Run \033[1mnotx config\033[0m to customise it.\n\n")
 	}
 
-	// ── Build config from flags (already seeded from ~/.notx/config.json) ─────
 	cfg := config.Default()
 	cfg.EnableHTTP = serverFlags.httpEnabled
 	cfg.EnableGRPC = serverFlags.grpcEnabled
@@ -155,30 +292,22 @@ func runServer(cmd *cobra.Command, args []string) error {
 	cfg.LogLevel = serverFlags.logLevel
 	cfg.DeviceOnboarding.AutoApprove = serverFlags.deviceAutoApprove
 
-	// Populate admin URNs from the persisted config so that every installation
-	// has its own unique, unpredictable admin identity rather than the shared
-	// all-zero sentinel. EnsureConfig (called above) guarantees these are
-	// already written to ~/.notx/config.json before we reach this point.
 	fileCfg, _ := clientconfig.Load()
 	cfg.Admin.DeviceURN, cfg.Admin.OwnerURN = adminURNsFromConfig(fileCfg)
 
-	// Hash the admin passphrase if one was supplied.
 	if serverFlags.adminPassphrase != "" {
 		hash, err := bcrypt.GenerateFromPassword([]byte(serverFlags.adminPassphrase), bcrypt.DefaultCost)
 		if err != nil {
 			return fmt.Errorf("hash admin passphrase: %w", err)
 		}
 		cfg.Admin.AdminPassphraseHash = string(hash)
-		fmt.Fprintf(os.Stdout, "  \033[1;32m✓\033[0m  Admin passphrase set — remote admin registration enabled\n\n")
 	}
 
 	if err := cfg.Validate(); err != nil {
 		return err
 	}
 
-	// ── Build logger ─────────────────────────────────────────────────────────
 	log := buildLogger(cfg.LogLevel)
-
 	log.Info("notx server starting",
 		"http", cfg.EnableHTTP,
 		"http_addr", cfg.HTTPAddr(),
@@ -190,7 +319,6 @@ func runServer(cmd *cobra.Command, args []string) error {
 		"device_auto_approve", cfg.DeviceOnboarding.AutoApprove,
 	)
 
-	// ── Open file provider ───────────────────────────────────────────────────
 	provider, err := file.New(cfg.DataDir)
 	if err != nil {
 		return fmt.Errorf("open file provider at %q: %w", cfg.DataDir, err)
@@ -201,28 +329,191 @@ func runServer(cmd *cobra.Command, args []string) error {
 		}
 	}()
 
-	// ── Build and run server ─────────────────────────────────────────────────
 	srv, err := server.New(cfg, provider, provider, provider, provider, log)
 	if err != nil {
 		return fmt.Errorf("build server: %w", err)
 	}
 
-	return srv.Run()
+	runErr := srv.Run()
+
+	// Clean up the PID file when the server exits normally.
+	removePID()
+
+	log.Info("notx server stopped")
+	return runErr
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Address helpers
+// notx server status
 // ─────────────────────────────────────────────────────────────────────────────
 
-// portFromAddr parses a "host:port" string and returns the port as an int.
-// Returns fallback if the string is empty or cannot be parsed.
+var serverStatusCmd = &cobra.Command{
+	Use:   "status",
+	Short: "Show whether the notx server is running",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		pid, err := readPID()
+		if err != nil {
+			fmt.Fprintf(os.Stdout, "  \033[31m✗\033[0m  notx server is \033[1mnot running\033[0m\n")
+			fmt.Fprintf(os.Stdout, "       Run \033[1mnotx server\033[0m to start it.\n")
+			return nil
+		}
+
+		if !processAlive(pid) {
+			fmt.Fprintf(os.Stdout, "  \033[31m✗\033[0m  notx server is \033[1mnot running\033[0m \033[2m(stale pid %d)\033[0m\n", pid)
+			removePID()
+			fmt.Fprintf(os.Stdout, "       Run \033[1mnotx server\033[0m to start it.\n")
+			return nil
+		}
+
+		fmt.Fprintf(os.Stdout, "  \033[1;32m✓\033[0m  notx server is \033[1;32mrunning\033[0m \033[2m(pid %d)\033[0m\n", pid)
+		fmt.Fprintf(os.Stdout, "       Log file → \033[36m%s\033[0m\n", logFilePath())
+		return nil
+	},
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// notx server stop
+// ─────────────────────────────────────────────────────────────────────────────
+
+var serverStopCmd = &cobra.Command{
+	Use:   "stop",
+	Short: "Gracefully stop the running notx server",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		pid, err := readPID()
+		if err != nil {
+			fmt.Fprintf(os.Stdout, "  \033[33m⚠\033[0m  notx server does not appear to be running.\n")
+			return nil
+		}
+
+		if !processAlive(pid) {
+			fmt.Fprintf(os.Stdout, "  \033[33m⚠\033[0m  notx server is not running \033[2m(stale pid %d — cleaned up)\033[0m\n", pid)
+			removePID()
+			return nil
+		}
+
+		proc, err := os.FindProcess(pid)
+		if err != nil {
+			return fmt.Errorf("find process %d: %w", pid, err)
+		}
+
+		fmt.Fprintf(os.Stdout, "  \033[33m→\033[0m  Sending SIGTERM to notx server \033[2m(pid %d)\033[0m…\n", pid)
+		if err := proc.Signal(syscall.SIGTERM); err != nil {
+			return fmt.Errorf("send SIGTERM to pid %d: %w", pid, err)
+		}
+
+		// Wait up to 10 s for the process to exit.
+		deadline := time.Now().Add(10 * time.Second)
+		for time.Now().Before(deadline) {
+			if !processAlive(pid) {
+				removePID()
+				fmt.Fprintf(os.Stdout, "  \033[1;32m✓\033[0m  notx server stopped.\n")
+				return nil
+			}
+			time.Sleep(200 * time.Millisecond)
+		}
+
+		// Escalate to SIGKILL.
+		fmt.Fprintf(os.Stdout, "  \033[33m⚠\033[0m  Server did not stop in time — sending SIGKILL…\n")
+		if err := proc.Signal(syscall.SIGKILL); err != nil {
+			return fmt.Errorf("send SIGKILL to pid %d: %w", pid, err)
+		}
+		time.Sleep(500 * time.Millisecond)
+		removePID()
+		fmt.Fprintf(os.Stdout, "  \033[1;32m✓\033[0m  notx server killed.\n")
+		return nil
+	},
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// notx server restart
+// ─────────────────────────────────────────────────────────────────────────────
+
+var serverRestartCmd = &cobra.Command{
+	Use:   "restart",
+	Short: "Stop then start the notx server",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		// Attempt stop (best-effort — server may not be running).
+		if err := serverStopCmd.RunE(cmd, args); err != nil {
+			fmt.Fprintf(os.Stderr, "  \033[33m⚠\033[0m  stop error (continuing): %v\n", err)
+		}
+
+		// Brief pause to let ports be released.
+		time.Sleep(500 * time.Millisecond)
+
+		fmt.Fprintf(os.Stdout, "  \033[33m→\033[0m  Starting notx server…\n")
+		return spawnDaemon(serverCmd)
+	},
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// notx server logs [--tail]
+// ─────────────────────────────────────────────────────────────────────────────
+
+var serverLogsFlags struct {
+	tail bool
+}
+
+var serverLogsCmd = &cobra.Command{
+	Use:   "logs",
+	Short: "Print the notx server log",
+	Long: `Print the notx server log file (~/.notx/server.log).
+
+Use --tail / -f to follow the log in real-time (like "tail -f").
+Press Ctrl-C to stop following.`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		logPath := logFilePath()
+
+		f, err := os.Open(logPath)
+		if err != nil {
+			if os.IsNotExist(err) {
+				fmt.Fprintf(os.Stdout, "  \033[33m⚠\033[0m  No log file found at %s\n", logPath)
+				fmt.Fprintf(os.Stdout, "       Run \033[1mnotx server\033[0m to start the server first.\n")
+				return nil
+			}
+			return fmt.Errorf("open log file: %w", err)
+		}
+		defer f.Close()
+
+		if !serverLogsFlags.tail {
+			// Dump the whole file and exit.
+			_, err := io.Copy(os.Stdout, f)
+			return err
+		}
+
+		// --tail: print existing content then follow new writes.
+		reader := bufio.NewReader(f)
+		for {
+			line, err := reader.ReadString('\n')
+			if len(line) > 0 {
+				fmt.Print(line)
+			}
+			if err != nil {
+				if err == io.EOF {
+					// No new data yet — sleep briefly and retry.
+					time.Sleep(200 * time.Millisecond)
+					continue
+				}
+				return err
+			}
+		}
+	},
+}
+
+func init() {
+	serverLogsCmd.Flags().BoolVarP(&serverLogsFlags.tail, "tail", "f", false,
+		"Follow the log output in real-time (Ctrl-C to stop)")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Address helpers (unchanged)
+// ─────────────────────────────────────────────────────────────────────────────
+
 func portFromAddr(addr string, fallback int) int {
 	if addr == "" {
 		return fallback
 	}
 	var port int
 	if _, err := fmt.Sscanf(addr[len(addr)-5:], ":%d", &port); err != nil {
-		// Try full string as ":PORT"
 		if _, err2 := fmt.Sscanf(addr, ":%d", &port); err2 != nil {
 			return fallback
 		}
@@ -233,8 +524,6 @@ func portFromAddr(addr string, fallback int) int {
 	return port
 }
 
-// hostFromAddr parses a "host:port" string and returns the host portion.
-// Returns fallback (typically "") if addr is just ":port".
 func hostFromAddr(addr string, fallback string) string {
 	if addr == "" {
 		return fallback
@@ -252,10 +541,9 @@ func hostFromAddr(addr string, fallback string) string {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Logger
+// Logger (unchanged)
 // ─────────────────────────────────────────────────────────────────────────────
 
-// buildLogger constructs a structured slog.Logger for the given level string.
 func buildLogger(level string) *slog.Logger {
 	var lvl slog.Level
 	switch level {
@@ -268,9 +556,6 @@ func buildLogger(level string) *slog.Logger {
 	default:
 		lvl = slog.LevelInfo
 	}
-
-	handler := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
-		Level: lvl,
-	})
+	handler := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: lvl})
 	return slog.New(handler)
 }

@@ -1,7 +1,4 @@
-import {
-  useNavigate,
-  useRouterState,
-} from "@tanstack/react-router";
+import { useNavigate, useRouterState } from "@tanstack/react-router";
 import {
   LayoutDashboard,
   Settings,
@@ -15,21 +12,21 @@ import {
 // ─── Nav definition ───────────────────────────────────────────────────────────
 
 const NAV = [
-  { path: "/overview", label: "Overview",      icon: <LayoutDashboard size={16} /> },
-  { path: "/notes",    label: "Notes",          icon: <FileText size={16} /> },
-  { path: "/projects", label: "Projects",       icon: <FolderOpen size={16} /> },
-  { path: "/devices",  label: "Devices",        icon: <Monitor size={16} /> },
-  { path: "/users",    label: "Users",          icon: <Users size={16} /> },
-  { path: "/config",   label: "Configuration",  icon: <Settings size={16} /> },
+  { path: "/overview", label: "Overview", icon: <LayoutDashboard size={16} /> },
+  { path: "/notes", label: "Notes", icon: <FileText size={16} /> },
+  { path: "/projects", label: "Projects", icon: <FolderOpen size={16} /> },
+  { path: "/devices", label: "Devices", icon: <Monitor size={16} /> },
+  { path: "/users", label: "Users", icon: <Users size={16} /> },
+  { path: "/config", label: "Configuration", icon: <Settings size={16} /> },
 ] as const;
 
 const PAGE_TITLES: Record<string, string> = {
   "/overview": "Overview",
-  "/notes":    "Notes",
+  "/notes": "Notes",
   "/projects": "Projects & Folders",
-  "/devices":  "Devices",
-  "/users":    "Users",
-  "/config":   "Configuration",
+  "/devices": "Devices",
+  "/users": "Users",
+  "/config": "Configuration",
 };
 
 // ─── Shell ────────────────────────────────────────────────────────────────────
@@ -77,11 +74,11 @@ export default function Shell({ children }: { children: React.ReactNode }) {
 
         <div
           style={{
-            padding:     "12px 16px",
-            borderTop:   "1px solid var(--border)",
-            fontSize:    11,
-            color:       "var(--text-muted)",
-            lineHeight:  1.6,
+            padding: "12px 16px",
+            borderTop: "1px solid var(--border)",
+            fontSize: 11,
+            color: "var(--text-muted)",
+            lineHeight: 1.6,
           }}
         >
           <div style={{ fontWeight: 600, marginBottom: 2 }}>notx-engine</div>
@@ -96,8 +93,8 @@ export default function Shell({ children }: { children: React.ReactNode }) {
           <div className="topbar-right">
             <span
               style={{
-                fontSize:   11,
-                color:      "var(--text-muted)",
+                fontSize: 11,
+                color: "var(--text-muted)",
                 fontFamily: "var(--font-mono)",
               }}
             >
@@ -106,9 +103,7 @@ export default function Shell({ children }: { children: React.ReactNode }) {
           </div>
         </header>
 
-        <main className="page-content">
-          {children}
-        </main>
+        <main className="page-content">{children}</main>
       </div>
     </div>
   );
