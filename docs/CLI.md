@@ -179,6 +179,67 @@ Prompts for confirmation, then calls `clientconfig.Save(clientconfig.Default())`
 
 Starts the notx HTTP+gRPC server. On first run, calls `clientconfig.EnsureConfig()` to create `~/.notx/config.json` if absent, then prints a notice to stdout. Flag defaults are seeded from the `server.*` section of the config file. See `docs/SERVER.md` for the complete server reference.
 
+#### Flags
+
+| Flag                    | Type     | Default        | Description                                               |
+| ----------------------- | -------- | -------------- | --------------------------------------------------------- |
+| `--http`                | `bool`   | `true`         | Enable the HTTP/JSON API server                           |
+| `--http-port`           | `int`    | `4060`         | TCP port for the HTTP server                              |
+| `--grpc`                | `bool`   | `true`         | Enable the gRPC server                                    |
+| `--grpc-port`           | `int`    | `50051`        | TCP port for the gRPC server                              |
+| `--host`                | `string` | `""`           | Bind address for both servers (default: all interfaces)   |
+| `--data-dir`            | `string` | `~/.notx/data` | Root directory for notes and the Badger index             |
+| `--tls-cert`            | `string` | `""`           | Path to PEM-encoded server TLS certificate                |
+| `--tls-key`             | `string` | `""`           | Path to PEM-encoded server TLS private key                |
+| `--tls-ca`              | `string` | `""`           | Path to PEM CA cert for mTLS client verification          |
+| `--log-level`           | `string` | `"info"`       | Log verbosity: `debug`, `info`, `warn`, `error`           |
+| `--device-auto-approve` | `bool`   | `false`        | Automatically approve newly registered devices            |
+| `--admin-passphrase`    | `string` | `""`           | Passphrase required to register an admin device remotely  |
+| `--pairing`             | `bool`   | `false`        | Enable the `ServerPairingService` (authority mode)        |
+| `--pairing-port`        | `int`    | `50052`        | Bootstrap listener port for server pairing                |
+| `--peer-authority`      | `string` | `""`           | Authority gRPC endpoint for this joining server           |
+| `--peer-secret`         | `string` | `""`           | NTXP-… pairing secret for initial registration            |
+| `--peer-cert-dir`       | `string` | `""`           | Directory to store this server's mTLS client cert and key |
+
+---
+
+### `notx server pairing add-secret [flags]`
+
+**File**: `internal/cli/server.go`
+
+Generates a new `NTXP-…` pairing secret, prints it **once** to stdout, and persists only the bcrypt hash under `<data-dir>/pairing_secrets/`. The plaintext is never stored on disk.
+
+The secret must be distributed out-of-band (e.g. via a secrets manager or encrypted message) to the operator of the joining server, who passes it via `--peer-secret`.
+
+#### Flags
+
+| Flag         | Type       | Default | Description                                                           |
+| ------------ | ---------- | ------- | --------------------------------------------------------------------- |
+| `--label`    | `string`   | `""`    | Human-readable label recorded in audit logs                           |
+| `--ttl`      | `duration` | `15m`   | How long the secret remains valid                                     |
+| `--data-dir` | `string`   | `""`    | Root data directory (defaults to `server --data-dir` or config value) |
+
+#### Example output
+
+```
+  Pairing secret (copy this — it will NOT be shown again):
+
+    NTXP-ABCDE-FGHIJ-KLMNO-PQRST-UVWXY-Z
+
+  Label:   datacenter-b
+  Expires: 2025-01-15T10:15:00Z
+```
+
+#### Secret format
+
+```
+NTXP-ABCDE-FGHIJ-KLMNO-PQRST-UVWXY-Z
+└──┘ └──────────────────────────────┘
+prefix   26 base32 chars (128-bit entropy)
+```
+
+The `NTXP-` prefix makes secrets visually distinct and detectable by secret-scanning tools (GitHub, GitLab, etc.). The secret is single-use and refused after first registration or expiry.
+
 ---
 
 ### `notx admin [flags]`
@@ -316,15 +377,16 @@ Pipeline steps when run without flags:
 
 ## Command Routing Summary
 
-| Input                        | Cobra route           | Handler                             |
-| ---------------------------- | --------------------- | ----------------------------------- |
-| `notx meeting-notes.txt`     | `rootCmd.RunE`        | `runAddNoteFromRoot` → `runAddNote` |
-| `notx add meeting-notes.txt` | `addNoteCmd.RunE`     | `runAddNote`                        |
-| `notx config`                | `configCmd.RunE`      | interactive editor                  |
-| `notx config show`           | `configShowCmd.RunE`  | print table                         |
-| `notx config reset`          | `configResetCmd.RunE` | confirm + save defaults             |
-| `notx server`                | `serverCmd.RunE`      | start HTTP+gRPC server              |
-| `notx admin`                 | `adminCmd.RunE`       | start admin UI server               |
-| `notx info <file>`           | `infoCmd.RunE`        | parse + display analysis            |
-| `notx validate <file>`       | `validateCmd.RunE`    | parse + validate, exit 1 on failure |
-| `notx` (no args)             | `rootCmd.RunE`        | `cmd.Help()`                        |
+| Input                            | Cobra route                | Handler                             |
+| -------------------------------- | -------------------------- | ----------------------------------- |
+| `notx meeting-notes.txt`         | `rootCmd.RunE`             | `runAddNoteFromRoot` → `runAddNote` |
+| `notx add meeting-notes.txt`     | `addNoteCmd.RunE`          | `runAddNote`                        |
+| `notx config`                    | `configCmd.RunE`           | interactive editor                  |
+| `notx config show`               | `configShowCmd.RunE`       | print table                         |
+| `notx config reset`              | `configResetCmd.RunE`      | confirm + save defaults             |
+| `notx server`                    | `serverCmd.RunE`           | start HTTP+gRPC server              |
+| `notx admin`                     | `adminCmd.RunE`            | start admin UI server               |
+| `notx info <file>`               | `infoCmd.RunE`             | parse + display analysis            |
+| `notx validate <file>`           | `validateCmd.RunE`         | parse + validate, exit 1 on failure |
+| `notx server pairing add-secret` | `pairingAddSecretCmd.RunE` | generate + store secret             |
+| `notx` (no args)                 | `rootCmd.RunE`             | `cmd.Help()`                        |

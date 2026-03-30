@@ -462,3 +462,73 @@ message DeleteFolderRequest {
 message DeleteFolderResponse {
   bool deleted = 1;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ServerPairingService — server-to-server registration and cert lifecycle
+// ─────────────────────────────────────────────────────────────────────────────
+
+service ServerPairingService {
+  rpc RegisterServer(RegisterServerRequest) returns (RegisterServerResponse);
+  rpc RenewCertificate(RenewCertificateRequest) returns (RenewCertificateResponse);
+  rpc GetCACertificate(GetCACertificateRequest) returns (GetCACertificateResponse);
+  rpc ListServers(ListServersRequest) returns (ListServersResponse);
+  rpc RevokeServer(RevokeServerRequest) returns (RevokeServerResponse);
+}
+
+message RegisterServerRequest {
+  string server_urn = 1;
+  bytes csr = 2;
+  string pairing_secret = 3;
+  string server_name = 4;
+  string endpoint = 5;
+}
+
+message RegisterServerResponse {
+  string server_urn = 1;
+  bytes certificate = 2;
+  bytes ca_certificate = 3;
+  google.protobuf.Timestamp expires_at = 4;
+  google.protobuf.Timestamp registered_at = 5;
+}
+
+message RenewCertificateRequest {
+  string server_urn = 1;
+  bytes csr = 2;
+}
+
+message RenewCertificateResponse {
+  bytes certificate = 1;
+  google.protobuf.Timestamp expires_at = 2;
+}
+
+message GetCACertificateRequest {}
+
+message GetCACertificateResponse {
+  bytes ca_certificate = 1;
+}
+
+message ListServersRequest {
+  bool include_revoked = 1;
+}
+
+message ListServersResponse {
+  repeated ServerInfo servers = 1;
+}
+
+message ServerInfo {
+  string server_urn = 1;
+  string server_name = 2;
+  string endpoint = 3;
+  bool revoked = 4;
+  google.protobuf.Timestamp registered_at = 5;
+  google.protobuf.Timestamp expires_at = 6;
+  google.protobuf.Timestamp last_seen_at = 7;
+}
+
+message RevokeServerRequest {
+  string server_urn = 1;
+}
+
+message RevokeServerResponse {
+  bool revoked = 1;
+}

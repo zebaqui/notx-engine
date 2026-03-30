@@ -72,8 +72,10 @@ USER notx
 
 # HTTP API
 EXPOSE 4060
-# gRPC
+# gRPC (primary, mTLS)
 EXPOSE 50051
+# gRPC (bootstrap pairing listener, TLS only)
+EXPOSE 50052
 
 # Default: start the server with the file provider writing to /data.
 # Override the entire CMD to pass flags such as --admin-passphrase.

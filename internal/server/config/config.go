@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"path/filepath"
 	"time"
 )
 
@@ -67,6 +68,48 @@ type AdminConfig struct {
 	// accepts the plaintext passphrase and hashes it automatically).
 	// Never store the plaintext passphrase in the config.
 	AdminPassphraseHash string
+}
+
+// ServerPairingConfig controls the server-to-server pairing subsystem.
+type ServerPairingConfig struct {
+	// Enabled activates the ServerPairingService on this instance.
+	Enabled bool
+
+	// BootstrapPort is the TCP port the pairing bootstrap listener binds to.
+	// Default: 50052.
+	BootstrapPort int
+
+	// CertTTL is how long issued server certificates are valid.
+	// Default: 720h (30 days).
+	CertTTL time.Duration
+
+	// SecretTTL is how long a generated pairing secret remains valid.
+	// Default: 15m.
+	SecretTTL time.Duration
+
+	// CADir is the directory where the authority CA key and cert are stored.
+	// Default: "<data-dir>/ca".
+	CADir string
+
+	// RenewalCheckInterval is how often a joining server checks its cert expiry.
+	// Default: 6h.
+	RenewalCheckInterval time.Duration
+
+	// RenewalThreshold is the remaining TTL at which the joining server
+	// automatically renews its certificate.
+	// Default: 168h (7 days).
+	RenewalThreshold time.Duration
+
+	// PeerAuthority is the gRPC endpoint of the authority server this instance
+	// should pair with (joining server mode).
+	PeerAuthority string
+
+	// PeerSecret is the NTXP-... pairing secret used once at startup to register.
+	// Cleared from memory after successful registration.
+	PeerSecret string
+
+	// PeerCertDir is the directory where this server's client cert and key are stored.
+	PeerCertDir string
 }
 
 // Config holds all runtime configuration for the notx server.
@@ -149,6 +192,9 @@ type Config struct {
 	// This device is upserted on every startup with ApprovalStatus "approved"
 	// so administrative operations are never blocked by the device auth gate.
 	Admin AdminConfig
+
+	// Pairing holds the configuration for the server-to-server pairing subsystem.
+	Pairing ServerPairingConfig
 }
 
 // DefaultAdminDeviceURN is the well-known URN reserved for the server's
@@ -181,6 +227,14 @@ func Default() *Config {
 			DeviceURN: DefaultAdminDeviceURN,
 			OwnerURN:  DefaultAdminOwnerURN,
 		},
+		Pairing: ServerPairingConfig{
+			Enabled:              false,
+			BootstrapPort:        50052,
+			CertTTL:              720 * time.Hour,
+			SecretTTL:            15 * time.Minute,
+			RenewalCheckInterval: 6 * time.Hour,
+			RenewalThreshold:     168 * time.Hour,
+		},
 	}
 }
 
@@ -188,6 +242,19 @@ func Default() *Config {
 // e.g. ":4060" or "127.0.0.1:4060".
 func (c *Config) HTTPAddr() string {
 	return formatAddr(c.Host, c.HTTPPort)
+}
+
+// PairingBootstrapAddr returns the bind address for the bootstrap gRPC listener.
+func (c *Config) PairingBootstrapAddr() string {
+	return formatAddr(c.Host, c.Pairing.BootstrapPort)
+}
+
+// CADir returns the resolved CA directory (defaults to <DataDir>/ca).
+func (c *Config) CADir() string {
+	if c.Pairing.CADir != "" {
+		return c.Pairing.CADir
+	}
+	return filepath.Join(c.DataDir, "ca")
 }
 
 // GRPCAddr returns the full bind address string for the gRPC server,

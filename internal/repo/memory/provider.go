@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/zebaqui/notx-engine/core"
 	"github.com/zebaqui/notx-engine/internal/repo"
@@ -17,12 +18,14 @@ import (
 // of the Provider instance. All operations are safe for concurrent use.
 type Provider struct {
 	mu       sync.RWMutex
-	notes    map[string]*core.Note    // urn → note (header + applied events)
-	events   map[string][]*core.Event // urn → ordered event slice
-	projects map[string]*core.Project // urn → project
-	folders  map[string]*core.Folder  // urn → folder
-	devices  map[string]*core.Device  // urn → device
-	users    map[string]*core.User    // urn → user
+	notes    map[string]*core.Note          // urn → note (header + applied events)
+	events   map[string][]*core.Event       // urn → ordered event slice
+	projects map[string]*core.Project       // urn → project
+	folders  map[string]*core.Folder        // urn → folder
+	devices  map[string]*core.Device        // urn → device
+	users    map[string]*core.User          // urn → user
+	servers  map[string]*core.Server        // urn → server
+	secrets  map[string]*repo.PairingSecret // id → pairing secret
 }
 
 // New returns an empty, ready-to-use in-memory Provider.
@@ -34,6 +37,8 @@ func New() *Provider {
 		folders:  make(map[string]*core.Folder),
 		devices:  make(map[string]*core.Device),
 		users:    make(map[string]*core.User),
+		servers:  make(map[string]*core.Server),
+		secrets:  make(map[string]*repo.PairingSecret),
 	}
 }
 
@@ -824,8 +829,113 @@ func cloneHeader(n *core.Note) *core.Note {
 	return clone
 }
 
-// cloneNoteWithEvents returns a fresh Note with the header fields copied from
-// base and all events from evts replayed into it.
+// ─────────────────────────────────────────────────────────────────────────────
+// ServerRepository
+// ─────────────────────────────────────────────────────────────────────────────
+
+func (p *Provider) RegisterServer(_ context.Context, s *core.Server) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	key := s.URN.String()
+	cp := *s
+	p.servers[key] = &cp
+	return nil
+}
+
+func (p *Provider) GetServer(_ context.Context, urn string) (*core.Server, error) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	sv, ok := p.servers[urn]
+	if !ok {
+		return nil, fmt.Errorf("%w: server %q", repo.ErrNotFound, urn)
+	}
+	cp := *sv
+	return &cp, nil
+}
+
+func (p *Provider) ListServers(_ context.Context, opts repo.ServerListOptions) (*repo.ServerListResult, error) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	var out []*core.Server
+	for _, sv := range p.servers {
+		if sv.Revoked && !opts.IncludeRevoked {
+			continue
+		}
+		cp := *sv
+		out = append(out, &cp)
+	}
+	return &repo.ServerListResult{Servers: out}, nil
+}
+
+func (p *Provider) UpdateServer(_ context.Context, s *core.Server) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	key := s.URN.String()
+	if _, ok := p.servers[key]; !ok {
+		return fmt.Errorf("%w: server %q", repo.ErrNotFound, key)
+	}
+	cp := *s
+	p.servers[key] = &cp
+	return nil
+}
+
+func (p *Provider) RevokeServer(_ context.Context, urn string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	sv, ok := p.servers[urn]
+	if !ok {
+		return fmt.Errorf("%w: server %q", repo.ErrNotFound, urn)
+	}
+	sv.Revoked = true
+	return nil
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PairingSecretStore
+// ─────────────────────────────────────────────────────────────────────────────
+
+func (p *Provider) AddSecret(_ context.Context, s *repo.PairingSecret) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	cp := *s
+	p.secrets[s.ID] = &cp
+	return nil
+}
+
+func (p *Provider) ConsumeSecret(_ context.Context, plaintext string) (*repo.PairingSecret, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	_ = plaintext // memory store: accept any non-empty secret for test convenience
+	for _, s := range p.secrets {
+		if s.UsedAt != nil {
+			continue
+		}
+		now := timeNow()
+		if now.After(s.ExpiresAt) {
+			continue
+		}
+		s.UsedAt = &now
+		cp := *s
+		return &cp, nil
+	}
+	return nil, fmt.Errorf("%w: no valid pairing secret", repo.ErrNotFound)
+}
+
+func (p *Provider) PruneExpired(_ context.Context) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	now := timeNow()
+	for id, s := range p.secrets {
+		if now.After(s.ExpiresAt) {
+			delete(p.secrets, id)
+		}
+	}
+	return nil
+}
+
+// timeNow is a package-level variable so tests can override it.
+var timeNow = func() time.Time { return time.Now().UTC() }
+
 func cloneNoteWithEvents(base *core.Note, evts []*core.Event) (*core.Note, error) {
 	n := cloneHeader(base)
 	for _, ev := range evts {

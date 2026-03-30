@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"io"
 	"log/slog"
@@ -18,6 +19,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/zebaqui/notx-engine/internal/clientconfig"
+	pairingsecret "github.com/zebaqui/notx-engine/internal/pairing"
 	"github.com/zebaqui/notx-engine/internal/repo/file"
 	"github.com/zebaqui/notx-engine/internal/server"
 	"github.com/zebaqui/notx-engine/internal/server/config"
@@ -109,6 +111,12 @@ var serverFlags struct {
 	deviceAutoApprove bool
 	adminPassphrase   string
 
+	pairingEnabled   bool
+	pairingPort      int
+	peeringAuthority string
+	peerSecret       string
+	peerCertDir      string
+
 	// internal — set when this process is the background worker itself
 	daemon bool
 }
@@ -127,18 +135,33 @@ background and returns immediately.  The server process writes its PID to
 ~/.notx/server.pid and all output to ~/.notx/server.log.
 
 Sub-commands:
-  status   — show whether the server is running
-  stop     — gracefully stop the running server
-  restart  — stop then start the server
-  logs     — print the server log (--tail to follow)
+  status          — show whether the server is running
+  stop            — gracefully stop the running server
+  restart         — stop then start the server
+  logs            — print the server log (--tail to follow)
+  pairing         — manage server-to-server pairing
+
+Pairing sub-commands (notx server pairing ...):
+  add-secret      — generate a new NTXP-... pairing secret (authority)
 
 Examples:
-  notx server                  # start in background
+  notx server                        # start in background
   notx server status
   notx server stop
   notx server restart
   notx server logs
   notx server logs --tail
+
+  # Authority mode — enable pairing service + bootstrap listener
+  notx server --pairing
+
+  # Generate a secret for a joining server
+  notx server pairing add-secret --label "dc-b" --data-dir /var/notx/data
+
+  # Joining server mode — pair with an authority on first startup
+  notx server --peer-authority grpc.authority.example.com:50052 \
+              --peer-secret "NTXP-ABCDE-FGHIJ-KLMNO-PQRST-UVWXY-Z" \
+              --peer-cert-dir /var/notx/certs
 `,
 	RunE: runServerStart,
 }
@@ -183,6 +206,17 @@ func init() {
 		"Passphrase required to register an admin device from a remote machine")
 
 	// Hidden flag — used internally when this process is the daemon worker.
+	f.BoolVar(&serverFlags.pairingEnabled, "pairing", false,
+		"Enable the ServerPairingService on this instance (authority mode)")
+	f.IntVar(&serverFlags.pairingPort, "pairing-port", 50052,
+		"Bootstrap listener port for server pairing")
+	f.StringVar(&serverFlags.peeringAuthority, "peer-authority", "",
+		"Authority gRPC endpoint this server should pair with (joining server mode)")
+	f.StringVar(&serverFlags.peerSecret, "peer-secret", "",
+		"Pairing secret for initial registration (used once, then ignored)")
+	f.StringVar(&serverFlags.peerCertDir, "peer-cert-dir", "",
+		"Directory to store this server's client cert and key")
+
 	f.BoolVar(&serverFlags.daemon, "daemon", false, "run as background worker (internal use)")
 	f.MarkHidden("daemon") //nolint:errcheck
 
@@ -303,6 +337,12 @@ func runDaemonWorker(cmd *cobra.Command, args []string) error {
 		cfg.Admin.AdminPassphraseHash = string(hash)
 	}
 
+	cfg.Pairing.Enabled = serverFlags.pairingEnabled
+	cfg.Pairing.BootstrapPort = serverFlags.pairingPort
+	cfg.Pairing.PeerAuthority = serverFlags.peeringAuthority
+	cfg.Pairing.PeerSecret = serverFlags.peerSecret
+	cfg.Pairing.PeerCertDir = serverFlags.peerCertDir
+
 	if err := cfg.Validate(); err != nil {
 		return err
 	}
@@ -329,7 +369,7 @@ func runDaemonWorker(cmd *cobra.Command, args []string) error {
 		}
 	}()
 
-	srv, err := server.New(cfg, provider, provider, provider, provider, log)
+	srv, err := server.New(cfg, provider, provider, provider, provider, provider, provider, log)
 	if err != nil {
 		return fmt.Errorf("build server: %w", err)
 	}
@@ -502,6 +542,82 @@ Press Ctrl-C to stop following.`,
 func init() {
 	serverLogsCmd.Flags().BoolVarP(&serverLogsFlags.tail, "tail", "f", false,
 		"Follow the log output in real-time (Ctrl-C to stop)")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// notx server pairing — pairing management subcommands
+// ─────────────────────────────────────────────────────────────────────────────
+
+var pairingCmd = &cobra.Command{
+	Use:   "pairing",
+	Short: "Manage server-to-server pairing",
+	Long: `Manage server-to-server pairing on this notx instance.
+
+Use 'add-secret' to generate a registration token for a joining server.
+
+The pairing service must be enabled with --pairing when starting the server.`,
+}
+
+var pairingAddSecretFlags struct {
+	label   string
+	ttl     time.Duration
+	dataDir string
+}
+
+var pairingAddSecretCmd = &cobra.Command{
+	Use:   "add-secret",
+	Short: "Generate a new NTXP-... pairing secret",
+	Long: `Generate a new pairing secret and print it once to stdout.
+The plaintext is never stored — only the bcrypt hash is persisted.
+
+The generated secret must be passed to the joining server via --peer-secret.`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		dataDir := pairingAddSecretFlags.dataDir
+		if dataDir == "" {
+			dataDir = serverFlags.dataDir
+		}
+		if dataDir == "" {
+			cfg, _ := clientconfig.Load()
+			dataDir = cfg.Storage.DataDir
+		}
+		if dataDir == "" {
+			dataDir = "./data"
+		}
+
+		secretsDir := filepath.Join(dataDir, "pairing_secrets")
+		store, err := pairingsecret.NewFileSecretStore(secretsDir)
+		if err != nil {
+			return fmt.Errorf("open secret store: %w", err)
+		}
+
+		ttl := pairingAddSecretFlags.ttl
+		if ttl == 0 {
+			ttl = 15 * time.Minute
+		}
+
+		plaintext, record, err := pairingsecret.GenerateSecret(pairingAddSecretFlags.label, ttl)
+		if err != nil {
+			return fmt.Errorf("generate secret: %w", err)
+		}
+		if err := store.AddSecret(context.Background(), record); err != nil {
+			return fmt.Errorf("store secret: %w", err)
+		}
+
+		fmt.Printf("\n  Pairing secret (copy this — it will NOT be shown again):\n\n")
+		fmt.Printf("    %s\n\n", plaintext)
+		fmt.Printf("  Label:   %s\n", record.LabelHint)
+		fmt.Printf("  Expires: %s\n\n", record.ExpiresAt.Format(time.RFC3339))
+		return nil
+	},
+}
+
+func init() {
+	pairingAddSecretCmd.Flags().StringVar(&pairingAddSecretFlags.label, "label", "", "Human-readable label for audit logs")
+	pairingAddSecretCmd.Flags().DurationVar(&pairingAddSecretFlags.ttl, "ttl", 15*time.Minute, "How long the secret is valid")
+	pairingAddSecretCmd.Flags().StringVar(&pairingAddSecretFlags.dataDir, "data-dir", "", "Root data directory (defaults to server --data-dir or config value)")
+
+	pairingCmd.AddCommand(pairingAddSecretCmd)
+	serverCmd.AddCommand(pairingCmd)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

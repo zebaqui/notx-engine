@@ -17,6 +17,7 @@ import (
 	"google.golang.org/grpc/reflection"
 
 	"github.com/zebaqui/notx-engine/core"
+	"github.com/zebaqui/notx-engine/internal/ca"
 	"github.com/zebaqui/notx-engine/internal/repo"
 	"github.com/zebaqui/notx-engine/internal/server/config"
 	grpcsvc "github.com/zebaqui/notx-engine/internal/server/grpc"
@@ -27,31 +28,37 @@ import (
 // Server is the top-level orchestrator. It owns the lifecycle of the HTTP
 // and gRPC servers and coordinates graceful shutdown when a signal arrives.
 type Server struct {
-	cfg      *config.Config
-	repo     repo.NoteRepository
-	projRepo repo.ProjectRepository
-	devRepo  repo.DeviceRepository
-	userRepo repo.UserRepository
-	log      *slog.Logger
+	cfg         *config.Config
+	repo        repo.NoteRepository
+	projRepo    repo.ProjectRepository
+	devRepo     repo.DeviceRepository
+	userRepo    repo.UserRepository
+	srvRepo     repo.ServerRepository
+	secretStore repo.PairingSecretStore
+	log         *slog.Logger
 
-	httpHandler *httpsvc.Handler
-	grpcServer  *googlegrpc.Server
+	httpHandler     *httpsvc.Handler
+	grpcServer      *googlegrpc.Server
+	pairingService  *grpcsvc.PairingService
+	bootstrapServer *googlegrpc.Server
 }
 
 // New creates a Server from the given config and repository.
 // It wires all sub-components but does not start any listeners yet.
-func New(cfg *config.Config, r repo.NoteRepository, projRepo repo.ProjectRepository, devRepo repo.DeviceRepository, userRepo repo.UserRepository, log *slog.Logger) (*Server, error) {
+func New(cfg *config.Config, r repo.NoteRepository, projRepo repo.ProjectRepository, devRepo repo.DeviceRepository, userRepo repo.UserRepository, srvRepo repo.ServerRepository, secretStore repo.PairingSecretStore, log *slog.Logger) (*Server, error) {
 	if log == nil {
 		log = slog.New(slog.NewTextHandler(os.Stderr, nil))
 	}
 
 	s := &Server{
-		cfg:      cfg,
-		repo:     r,
-		projRepo: projRepo,
-		devRepo:  devRepo,
-		userRepo: userRepo,
-		log:      log,
+		cfg:         cfg,
+		repo:        r,
+		projRepo:    projRepo,
+		devRepo:     devRepo,
+		userRepo:    userRepo,
+		srvRepo:     srvRepo,
+		secretStore: secretStore,
+		log:         log,
 	}
 
 	// ── Bootstrap the built-in admin device ─────────────────────────────────
@@ -63,8 +70,30 @@ func New(cfg *config.Config, r repo.NoteRepository, projRepo repo.ProjectReposit
 		s.httpHandler = httpsvc.New(cfg, r, projRepo, devRepo, userRepo, log)
 	}
 
+	if cfg.Pairing.Enabled {
+		authority, err := ca.LoadOrGenerate(cfg.CADir())
+		if err != nil {
+			return nil, fmt.Errorf("server: load/generate CA: %w", err)
+		}
+		log.Info("authority CA ready", "ca_dir", cfg.CADir())
+
+		pairingSvc := grpcsvc.NewPairingService(authority, srvRepo, secretStore, cfg.Pairing.CertTTL, log)
+		if err := pairingSvc.RebuildDenySet(context.Background()); err != nil {
+			return nil, fmt.Errorf("server: rebuild deny set: %w", err)
+		}
+
+		s.pairingService = pairingSvc
+
+		// Bootstrap listener (TLS only, no client cert).
+		bootstrapSrv, err := buildBootstrapGRPCServer(cfg, pairingSvc, log)
+		if err != nil {
+			return nil, fmt.Errorf("server: build bootstrap gRPC server: %w", err)
+		}
+		s.bootstrapServer = bootstrapSrv
+	}
+
 	if cfg.EnableGRPC {
-		grpcSrv, err := buildGRPCServer(cfg, r, projRepo, devRepo, log)
+		grpcSrv, err := buildGRPCServer(cfg, r, projRepo, devRepo, s.pairingService, log)
 		if err != nil {
 			return nil, fmt.Errorf("server: build gRPC server: %w", err)
 		}
@@ -170,7 +199,7 @@ func (s *Server) RunWithContext(ctx context.Context) error {
 
 // run is the shared implementation used by both Run and RunWithContext.
 func (s *Server) run(ctx context.Context) error {
-	errCh := make(chan error, 2) // at most two servers
+	errCh := make(chan error, 3) // at most three servers (http, grpc, bootstrap)
 	var wg sync.WaitGroup
 
 	// ── Start HTTP ───────────────────────────────────────────────────────────
@@ -201,6 +230,26 @@ func (s *Server) run(ctx context.Context) error {
 			s.log.Info("grpc server starting", "addr", s.cfg.GRPCAddr())
 			if err := s.grpcServer.Serve(ln); err != nil {
 				errCh <- fmt.Errorf("grpc server: %w", err)
+			}
+		}()
+	}
+
+	// ── Start bootstrap gRPC (pairing) ───────────────────────────────────────
+	if s.bootstrapServer != nil {
+		bootstrapAddr := s.cfg.PairingBootstrapAddr()
+		ln, err := net.Listen("tcp", bootstrapAddr)
+		if err != nil {
+			s.initiateShutdown(context.Background())
+			wg.Wait()
+			return fmt.Errorf("bootstrap grpc: listen on %s: %w", bootstrapAddr, err)
+		}
+
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			s.log.Info("bootstrap grpc server starting", "addr", bootstrapAddr)
+			if err := s.bootstrapServer.Serve(ln); err != nil {
+				errCh <- fmt.Errorf("bootstrap grpc server: %w", err)
 			}
 		}()
 	}
@@ -266,6 +315,25 @@ func (s *Server) initiateShutdown(ctx context.Context) {
 		}()
 	}
 
+	if s.bootstrapServer != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			s.log.Info("shutting down bootstrap grpc server")
+			stopped := make(chan struct{})
+			go func() {
+				s.bootstrapServer.GracefulStop()
+				close(stopped)
+			}()
+			select {
+			case <-stopped:
+			case <-ctx.Done():
+				s.log.Warn("bootstrap grpc graceful stop timed out — forcing stop")
+				s.bootstrapServer.Stop()
+			}
+		}()
+	}
+
 	wg.Wait()
 }
 
@@ -273,7 +341,7 @@ func (s *Server) initiateShutdown(ctx context.Context) {
 // gRPC server construction
 // ─────────────────────────────────────────────────────────────────────────────
 
-func buildGRPCServer(cfg *config.Config, r repo.NoteRepository, projRepo repo.ProjectRepository, devRepo repo.DeviceRepository, log *slog.Logger) (*googlegrpc.Server, error) {
+func buildGRPCServer(cfg *config.Config, r repo.NoteRepository, projRepo repo.ProjectRepository, devRepo repo.DeviceRepository, pairingSvc *grpcsvc.PairingService, log *slog.Logger) (*googlegrpc.Server, error) {
 	opts := []googlegrpc.ServerOption{
 		googlegrpc.UnaryInterceptor(loggingUnaryInterceptor(log)),
 		googlegrpc.StreamInterceptor(loggingStreamInterceptor(log)),
@@ -297,9 +365,34 @@ func buildGRPCServer(cfg *config.Config, r repo.NoteRepository, projRepo repo.Pr
 	pb.RegisterDeviceServiceServer(srv, grpcsvc.NewDeviceServiceServer(devRepo))
 	pb.RegisterProjectServiceServer(srv, grpcsvc.NewProjectServiceServer(projRepo, cfg.DefaultPageSize, cfg.MaxPageSize))
 
+	if pairingSvc != nil {
+		pb.RegisterServerPairingServiceServer(srv, pairingSvc)
+	}
+
 	// Enable server reflection so grpcurl and other tools work out of the box.
 	reflection.Register(srv)
 
+	return srv, nil
+}
+
+// buildBootstrapGRPCServer builds a TLS-only gRPC server for the bootstrap
+// pairing listener (port 50052). Client certificates are not required.
+func buildBootstrapGRPCServer(cfg *config.Config, pairingSvc *grpcsvc.PairingService, log *slog.Logger) (*googlegrpc.Server, error) {
+	opts := []googlegrpc.ServerOption{
+		googlegrpc.UnaryInterceptor(loggingUnaryInterceptor(log)),
+	}
+
+	if cfg.TLSEnabled() {
+		creds, err := credentials.NewServerTLSFromFile(cfg.TLSCertFile, cfg.TLSKeyFile)
+		if err != nil {
+			return nil, fmt.Errorf("bootstrap: load TLS credentials: %w", err)
+		}
+		opts = append(opts, googlegrpc.Creds(creds))
+	}
+
+	srv := googlegrpc.NewServer(opts...)
+	pb.RegisterServerPairingServiceServer(srv, pairingSvc)
+	reflection.Register(srv)
 	return srv, nil
 }
 

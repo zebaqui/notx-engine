@@ -18,6 +18,7 @@ import (
 	oteltrace "go.opentelemetry.io/otel/trace"
 
 	"github.com/zebaqui/notx-engine/core"
+	pairingsecret "github.com/zebaqui/notx-engine/internal/pairing"
 	"github.com/zebaqui/notx-engine/internal/repo"
 	"github.com/zebaqui/notx-engine/internal/repo/index"
 )
@@ -1617,4 +1618,182 @@ func RemoveLegacyFiles(dataDir string) error {
 		})
 	}
 	return nil
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ServerRepository implementation
+// ─────────────────────────────────────────────────────────────────────────────
+
+func (p *Provider) RegisterServer(ctx context.Context, s *core.Server) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	existing, err := p.idx.GetServer(s.URN.String())
+	if err != nil {
+		return fmt.Errorf("file provider: register server: %w", err)
+	}
+	if existing != nil {
+		return fmt.Errorf("%w: %s", repo.ErrAlreadyExists, s.URN.String())
+	}
+
+	entry := serverToEntry(s)
+	return p.idx.UpsertServer(entry)
+}
+
+func (p *Provider) GetServer(ctx context.Context, urn string) (*core.Server, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	entry, err := p.idx.GetServer(urn)
+	if err != nil {
+		return nil, fmt.Errorf("file provider: get server: %w", err)
+	}
+	if entry == nil {
+		return nil, fmt.Errorf("%w: %s", repo.ErrNotFound, urn)
+	}
+	return serverEntryToCore(entry)
+}
+
+func (p *Provider) ListServers(ctx context.Context, opts repo.ServerListOptions) (*repo.ServerListResult, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	entries, err := p.idx.ListServers(opts.IncludeRevoked)
+	if err != nil {
+		return nil, fmt.Errorf("file provider: list servers: %w", err)
+	}
+	servers := make([]*core.Server, 0, len(entries))
+	for i := range entries {
+		s, err := serverEntryToCore(&entries[i])
+		if err != nil {
+			return nil, err
+		}
+		servers = append(servers, s)
+	}
+	return &repo.ServerListResult{Servers: servers}, nil
+}
+
+func (p *Provider) UpdateServer(ctx context.Context, s *core.Server) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	existing, err := p.idx.GetServer(s.URN.String())
+	if err != nil {
+		return fmt.Errorf("file provider: update server: %w", err)
+	}
+	if existing == nil {
+		return fmt.Errorf("%w: %s", repo.ErrNotFound, s.URN.String())
+	}
+	entry := serverToEntry(s)
+	entry.RegisteredAt = existing.RegisteredAt // preserve original registration time
+	return p.idx.UpsertServer(entry)
+}
+
+func (p *Provider) RevokeServer(ctx context.Context, urn string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	existing, err := p.idx.GetServer(urn)
+	if err != nil {
+		return fmt.Errorf("file provider: revoke server: %w", err)
+	}
+	if existing == nil {
+		return fmt.Errorf("%w: %s", repo.ErrNotFound, urn)
+	}
+	existing.Revoked = true
+	return p.idx.UpsertServer(*existing)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PairingSecretStore implementation (file-backed via pairing.FileSecretStore)
+//
+// The CLI's `notx server pairing add-secret` command also uses FileSecretStore
+// and writes JSON records to <dataDir>/pairing_secrets/.  By delegating here
+// to the same store the running server and the CLI share a single source of
+// truth without requiring the CLI to open the Badger database (which only
+// allows one writer at a time).
+// ─────────────────────────────────────────────────────────────────────────────
+
+// secretsDir returns the directory used by the file-backed pairing secret store.
+func (p *Provider) secretsDir() string {
+	return filepath.Join(p.dataDir, "pairing_secrets")
+}
+
+func (p *Provider) AddSecret(ctx context.Context, ps *repo.PairingSecret) error {
+	store, err := pairingsecret.NewFileSecretStore(p.secretsDir())
+	if err != nil {
+		return fmt.Errorf("file provider: open secret store: %w", err)
+	}
+	return store.AddSecret(ctx, ps)
+}
+
+func (p *Provider) ConsumeSecret(ctx context.Context, plaintext string) (*repo.PairingSecret, error) {
+	store, err := pairingsecret.NewFileSecretStore(p.secretsDir())
+	if err != nil {
+		return nil, fmt.Errorf("file provider: open secret store: %w", err)
+	}
+	return store.ConsumeSecret(ctx, plaintext)
+}
+
+func (p *Provider) PruneExpired(ctx context.Context) error {
+	store, err := pairingsecret.NewFileSecretStore(p.secretsDir())
+	if err != nil {
+		return fmt.Errorf("file provider: open secret store: %w", err)
+	}
+	return store.PruneExpired(ctx)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Server conversion helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+func serverToEntry(s *core.Server) index.ServerEntry {
+	lastSeen := ""
+	if !s.LastSeenAt.IsZero() {
+		lastSeen = s.LastSeenAt.UTC().Format(time.RFC3339)
+	}
+	return index.ServerEntry{
+		URN:          s.URN.String(),
+		Name:         s.Name,
+		Endpoint:     s.Endpoint,
+		CertPEM:      string(s.CertPEM),
+		CertSerial:   s.CertSerial,
+		Revoked:      s.Revoked,
+		RegisteredAt: s.RegisteredAt.UTC().Format(time.RFC3339),
+		ExpiresAt:    s.ExpiresAt.UTC().Format(time.RFC3339),
+		LastSeenAt:   lastSeen,
+	}
+}
+
+func serverEntryToCore(e *index.ServerEntry) (*core.Server, error) {
+	urn, err := core.ParseURN(e.URN)
+	if err != nil {
+		return nil, fmt.Errorf("file provider: parse server URN %q: %w", e.URN, err)
+	}
+	registeredAt, _ := time.Parse(time.RFC3339, e.RegisteredAt)
+	expiresAt, _ := time.Parse(time.RFC3339, e.ExpiresAt)
+	var lastSeen time.Time
+	if e.LastSeenAt != "" {
+		lastSeen, _ = time.Parse(time.RFC3339, e.LastSeenAt)
+	}
+	return &core.Server{
+		URN:          urn,
+		Name:         e.Name,
+		Endpoint:     e.Endpoint,
+		CertPEM:      []byte(e.CertPEM),
+		CertSerial:   e.CertSerial,
+		Revoked:      e.Revoked,
+		RegisteredAt: registeredAt,
+		ExpiresAt:    expiresAt,
+		LastSeenAt:   lastSeen,
+	}, nil
 }

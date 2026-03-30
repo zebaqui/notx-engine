@@ -58,6 +58,23 @@ All notx documents and specifications are available here:
   - Device identity, key management, and browser pairing
   - Phased implementation plan and acceptance criteria
 
+- **[SERVER.md](./docs/SERVER.md)** — notx server operational reference
+  - Configuration, storage layout, and directory structure
+  - HTTP/JSON API routes and gRPC services
+  - TLS, mTLS, and the dual-listener pairing architecture
+  - Running the server, lifecycle, and graceful shutdown
+
+- **[SERVER_PAIRING.md](./docs/SERVER_PAIRING.md)** — Server-to-server pairing design document
+  - How two notx instances establish mutual mTLS trust
+  - Authority CA bootstrap, pairing secret format, and protocol flow
+  - Hard revocation via in-memory deny-set at the TLS handshake layer
+  - Automatic certificate renewal on joining servers
+
+- **[CLI.md](./docs/CLI.md)** — CLI command reference
+  - All `notx` sub-commands and flags
+  - `notx server pairing add-secret` for generating registration tokens
+  - Configuration file seeding and gRPC client credential selection
+
 ## Security Model
 
 notx supports two distinct note types with different security guarantees:

@@ -88,6 +88,12 @@ test-integration: docker-build
 	@echo "  TEST    ./tests/docker/ (integration)"
 	go test -v -tags integration -timeout 120s ./tests/docker/
 
+## test-pairing: build the Docker image then run only the server-pairing smoke tests
+##               requires Docker; exercises Phases S1–S5 of the pairing design doc
+test-pairing: docker-build
+	@echo "  TEST    ./tests/docker/ -run TestServerPairing (integration)"
+	go test -v -tags integration -timeout 180s ./tests/docker/ -run TestServerPairing
+
 # ── Clean ─────────────────────────────────────────────────────────────────────
 
 ## clean: remove all build artifacts (binary, dist, embed staging dir)

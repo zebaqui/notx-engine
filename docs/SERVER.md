@@ -46,44 +46,72 @@ All server configuration is expressed in a single struct defined in `internal/se
 
 ```go
 type Config struct {
-    EnableHTTP      bool
-    EnableGRPC      bool
-    HTTPPort        int
-    GRPCPort        int
-    Host            string
-    DataDir         string
-    TLSCertFile     string
-    TLSKeyFile      string
-    TLSCAFile       string
-    ShutdownTimeout time.Duration
-    MaxPageSize     int
-    DefaultPageSize int
-    LogLevel        string
+    EnableHTTP       bool
+    EnableGRPC       bool
+    HTTPPort         int
+    GRPCPort         int
+    Host             string
+    DataDir          string
+    TLSCertFile      string
+    TLSKeyFile       string
+    TLSCAFile        string
+    ShutdownTimeout  time.Duration
+    MaxPageSize      int
+    DefaultPageSize  int
+    LogLevel         string
     DeviceOnboarding DeviceOnboardingConfig
     Admin            AdminConfig
+    Pairing          ServerPairingConfig
+}
+```
+
+The `ServerPairingConfig` sub-struct controls the server-to-server pairing subsystem:
+
+```go
+type ServerPairingConfig struct {
+    Enabled              bool
+    BootstrapPort        int           // default 50052
+    CertTTL              time.Duration // default 720h (30 days)
+    SecretTTL            time.Duration // default 15m
+    CADir                string        // default "<data-dir>/ca"
+    RenewalCheckInterval time.Duration // default 6h
+    RenewalThreshold     time.Duration // default 168h (7 days)
+    PeerAuthority        string
+    PeerSecret           string
+    PeerCertDir          string
 }
 ```
 
 Defaults are provided by `Config.Default()`:
 
-| Field                          | Default                                            | Notes                                   |
-| ------------------------------ | -------------------------------------------------- | --------------------------------------- |
-| `EnableHTTP`                   | `true`                                             |                                         |
-| `EnableGRPC`                   | `true`                                             |                                         |
-| `HTTPPort`                     | `4060`                                             |                                         |
-| `GRPCPort`                     | `50051`                                            |                                         |
-| `Host`                         | `""` (all interfaces)                              | Empty string binds to `0.0.0.0`         |
-| `DataDir`                      | `~/.notx/data`                                     |                                         |
-| `TLSCertFile`                  | `""`                                               | Empty = plaintext (dev only)            |
-| `TLSKeyFile`                   | `""`                                               |                                         |
-| `TLSCAFile`                    | `""`                                               | Non-empty enables mTLS                  |
-| `ShutdownTimeout`              | `30s`                                              |                                         |
-| `MaxPageSize`                  | `200`                                              |                                         |
-| `DefaultPageSize`              | `50`                                               |                                         |
-| `LogLevel`                     | `"info"`                                           |                                         |
-| `DeviceOnboarding.AutoApprove` | `false`                                            | Set `true` to skip manual approval step |
-| `Admin.DeviceURN`              | `notx:device:00000000-0000-0000-0000-000000000000` | Built-in admin device; always approved  |
-| `Admin.OwnerURN`               | `notx:usr:00000000-0000-0000-0000-000000000000`    | Owner of the admin device               |
+| Field                          | Default                                            | Notes                                                  |
+| ------------------------------ | -------------------------------------------------- | ------------------------------------------------------ |
+| `EnableHTTP`                   | `true`                                             |                                                        |
+| `EnableGRPC`                   | `true`                                             |                                                        |
+| `HTTPPort`                     | `4060`                                             |                                                        |
+| `GRPCPort`                     | `50051`                                            |                                                        |
+| `Host`                         | `""` (all interfaces)                              | Empty string binds to `0.0.0.0`                        |
+| `DataDir`                      | `~/.notx/data`                                     |                                                        |
+| `TLSCertFile`                  | `""`                                               | Empty = plaintext (dev only)                           |
+| `TLSKeyFile`                   | `""`                                               |                                                        |
+| `TLSCAFile`                    | `""`                                               | Non-empty enables mTLS                                 |
+| `ShutdownTimeout`              | `30s`                                              |                                                        |
+| `MaxPageSize`                  | `200`                                              |                                                        |
+| `DefaultPageSize`              | `50`                                               |                                                        |
+| `LogLevel`                     | `"info"`                                           |                                                        |
+| `DeviceOnboarding.AutoApprove` | `false`                                            | Set `true` to skip manual approval step                |
+| `Admin.DeviceURN`              | `notx:device:00000000-0000-0000-0000-000000000000` | Built-in admin device; always approved                 |
+| `Admin.OwnerURN`               | `notx:usr:00000000-0000-0000-0000-000000000000`    | Owner of the admin device                              |
+| `Pairing.Enabled`              | `false`                                            | Opt-in; set `true` or pass `--pairing`                 |
+| `Pairing.BootstrapPort`        | `50052`                                            | Bootstrap listener port                                |
+| `Pairing.CertTTL`              | `720h` (30 days)                                   | Validity of issued server certificates                 |
+| `Pairing.SecretTTL`            | `15m`                                              | Validity of a generated pairing secret                 |
+| `Pairing.CADir`                | `<data-dir>/ca`                                    | Where the authority CA key and cert are stored         |
+| `Pairing.RenewalCheckInterval` | `6h`                                               | How often a joining server checks cert expiry          |
+| `Pairing.RenewalThreshold`     | `168h` (7 days)                                    | TTL remaining at which renewal is triggered            |
+| `Pairing.PeerAuthority`        | `""`                                               | Authority gRPC endpoint for a joining server           |
+| `Pairing.PeerSecret`           | `""`                                               | Pairing secret (used once, then cleared)               |
+| `Pairing.PeerCertDir`          | `""`                                               | Directory for the joining server's client cert and key |
 
 ### Config File Seeding
 
@@ -130,9 +158,22 @@ All artefacts live under `DataDir` (default `~/.notx/data`):
 │   └── <namespace>_note_<uuid>.meta.json    # live header (mutable)
 ├── events/
 │   └── <namespace>_note_<uuid>.jsonl        # append-only event journal
-└── index/
-    └── (Badger v4 database files)
+├── index/
+│   └── (Badger v4 database files)
+├── ca/
+│   ├── ca.key          ← EC P-256 CA private key (mode 0600, authority only)
+│   └── ca.crt          ← Self-signed CA certificate (mode 0644)
+├── servers/
+│   └── notx_srv_<uuid>.json   ← (concept only – stored in Badger via server: prefix)
+└── pairing_secrets/
+    └── <id>.json       ← single-use pairing secret records (bcrypt hash only)
 ```
+
+**`ca/`** — Created automatically on first startup when `--pairing` is enabled. The `ca.key` file (mode `0600`) is never served over the network. The `ca.crt` is the only part distributed — it is embedded in every issued certificate chain and available via the unauthenticated `GetCACertificate` RPC.
+
+**`servers/`** — Server records are stored in the Badger index under the `server:` key prefix, not as individual JSON files. The directory entry in the tree above is conceptual only; the actual storage is inside `index/`.
+
+**`pairing_secrets/`** — Single-use pairing secret records are stored as JSON files here. Only the bcrypt hash of the plaintext secret is ever written; the plaintext is printed once to stdout and then discarded. This directory is shared between the running server and the `notx server pairing add-secret` CLI command.
 
 ### Filename Sanitisation
 
@@ -202,11 +243,16 @@ A Badger v4 embedded key-value store in `<dataDir>/index/`. It is derived from t
 
 **Key schema** (all keys are plain `[]byte`):
 
-| Key pattern            | Value                     | Purpose                             |
-| ---------------------- | ------------------------- | ----------------------------------- |
-| `note:<urn>`           | JSON-encoded `IndexEntry` | Metadata for list operations        |
-| `name:<urn>`           | Note name string          | Name lookup by URN                  |
-| `search:<token>:<urn>` | Empty                     | Inverted index for full-text search |
+| Key pattern        | Value                       | Purpose                         |
+| ------------------ | --------------------------- | ------------------------------- |
+| `note:<urn>`       | JSON-encoded `IndexEntry`   | Note metadata for list/search   |
+| `name:<urn>`       | Note name string            | Name lookup by URN              |
+| `search:<t>:<urn>` | Empty                       | Inverted full-text search index |
+| `proj:<urn>`       | JSON-encoded `ProjectEntry` | Project metadata                |
+| `folder:<urn>`     | JSON-encoded `FolderEntry`  | Folder metadata                 |
+| `usr:<urn>`        | JSON-encoded `UserEntry`    | User metadata                   |
+| `device:<urn>`     | JSON-encoded `DeviceEntry`  | Registered device metadata      |
+| `server:<urn>`     | JSON-encoded `ServerEntry`  | Paired server record + cert     |
 
 **Tokenisation** (applied at write time to note names and content):
 
@@ -222,12 +268,12 @@ Each surviving token produces one `search:<token>:<urn>` key. A search query tok
 
 ### Artefact Roles — Summary
 
-| Artefact         | Mutable | Source of truth for             |
-| ---------------- | ------- | ------------------------------- |
-| `.notx` stub     | No      | Human-readable creation record  |
-| `.meta.json`     | Yes     | Live header (name, flags, seq)  |
-| `.jsonl` journal | Yes     | Complete event history, content |
-| Badger index     | Yes     | List and search queries         |
+| Artefact         | Mutable | Source of truth for              |
+| ---------------- | ------- | -------------------------------- |
+| `.notx` stub     | No      | Human-readable creation record   |
+| `.meta.json`     | Yes     | Live header (name, flags, seq)   |
+| `.jsonl` journal | Yes     | Complete event history, content  |
+| Badger index     | Yes     | List, search, and server records |
 
 None of these are redundant. Removing any one of them breaks a distinct code path.
 
@@ -307,6 +353,16 @@ Proto definition: `internal/server/proto/notx.proto` (package `notx.v1`).
 | `InitiatePairing`    | Unary | Begin the browser pairing handshake      |
 | `CompletePairing`    | Unary | Complete the browser pairing handshake   |
 
+**`ServerPairingService`** (available on both listeners when `--pairing` is enabled):
+
+| RPC                | Listener       | Auth             | Description                                       |
+| ------------------ | -------------- | ---------------- | ------------------------------------------------- |
+| `RegisterServer`   | Bootstrap only | Pairing secret   | Initial registration — issues mTLS client cert    |
+| `RenewCertificate` | Primary only   | mTLS client cert | Renew an expiring cert without a secret           |
+| `GetCACertificate` | Both           | None (public)    | Fetch the authority CA cert (trust anchor)        |
+| `ListServers`      | Primary only   | mTLS client cert | List all registered peer servers                  |
+| `RevokeServer`     | Primary only   | mTLS client cert | Hard-revoke a server (immediate handshake reject) |
+
 ### Server Reflection
 
 Server reflection is enabled unconditionally. Any gRPC client that supports the reflection protocol — including `grpcurl` — can introspect the available services and methods without a pre-compiled proto file:
@@ -330,11 +386,22 @@ mTLS is activated when `TLSCAFile` is non-empty. The CA cert is used to verify c
 
 The same cert/key pair governs the HTTP server when TLS is enabled on that layer.
 
+#### Dual-Listener Architecture (Pairing)
+
+When `--pairing` is enabled, a **second gRPC listener** starts on the bootstrap port (default `:50052`). The two listeners have different TLS requirements:
+
+| Listener  | Port    | TLS mode                                    | Exposes                                    |
+| --------- | ------- | ------------------------------------------- | ------------------------------------------ |
+| Primary   | `50051` | mTLS (client cert required when configured) | All services                               |
+| Bootstrap | `50052` | TLS only (no client cert)                   | `RegisterServer` + `GetCACertificate` only |
+
+The bootstrap port is open only during initial pairing. It can be firewalled once all servers are paired — existing connected servers are unaffected. The port is configurable via `--pairing-port`.
+
 ### Interceptors and Keepalive
 
 Two interceptors are applied to all methods (both unary and streaming):
 
-1. **Logging interceptor** — records method name, status code, and duration.
+1. **Logging interceptor** — records method name, status code, and duration. The `pairing_secret` field is **always redacted** for `RegisterServer` calls and is never written to any log.
 2. **Panic recovery interceptor** — catches panics, logs the stack, and returns a `codes.Internal` status. The server process does not crash.
 
 Keepalive settings:
@@ -356,7 +423,8 @@ On signal receipt:
 2. Both shutdown sequences are run **concurrently**:
    - **HTTP**: `http.Server.Shutdown(ctx)` — stops accepting new connections and waits for in-flight requests to complete within the deadline.
    - **gRPC**: `GracefulStop()` — stops accepting new RPCs and waits for in-flight RPCs to complete. If the shutdown deadline is exceeded before all RPCs drain, `Stop()` is called to force-terminate.
-3. Once both servers have returned, `Run()` returns and the process exits cleanly.
+3. When pairing is enabled, the bootstrap listener is also stopped gracefully in the same pass.
+4. Once all servers have returned, `Run()` returns and the process exits cleanly.
 
 No in-flight request or RPC is dropped as long as it completes within `ShutdownTimeout`.
 
@@ -408,6 +476,32 @@ X-Device-ID: notx:device:00000000-0000-0000-0000-000000000000
 
 This device bypasses the normal approval/revocation checks and is restored to `approved` automatically on each restart, even if it was manually revoked in the database.
 
+### Server Pairing
+
+```bash
+# Start an authority server (generates CA on first run, opens bootstrap port 50052)
+notx server --pairing
+
+# Authority with a custom bootstrap port and 7-day cert TTL
+notx server --pairing --pairing-port 50053 --pairing-cert-ttl 168h
+
+# Generate a pairing secret for a joining server
+notx server pairing add-secret --label "datacenter-b" --data-dir /var/notx/data
+
+# Start a joining server (registers on first startup, then connects via mTLS)
+notx server --peer-authority grpc.authority.example.com:50052 \
+            --peer-secret "NTXP-ABCDE-FGHIJ-KLMNO-PQRST-UVWXY-Z" \
+            --peer-cert-dir /var/notx/certs
+
+# List all paired servers
+notx server pairing list-servers
+
+# Revoke a server
+notx server pairing revoke notx:srv:01932c4f-89ab-7def-8012-3456789abcde
+```
+
+See the [Server Pairing](#server-pairing) section below for a full description of the lifecycle and security model.
+
 ---
 
 ## Disabling a Layer
@@ -426,11 +520,101 @@ Disabling a layer means its listener is never opened. The storage backend is ini
 
 ---
 
+## Server Pairing
+
+Server pairing enables two or more notx server instances to trust each other for data-replication, federation, or gateway scenarios. Trust is established via a lightweight PKI: the **authority server** owns a CA, issues short-lived mTLS client certificates to **joining servers**, and can hard-revoke any peer at any time.
+
+### Authority Mode vs Joining Mode
+
+**Authority mode** is activated by passing `--pairing` at startup. The server:
+
+- Auto-generates an EC P-256 CA key-pair on first startup and stores it under `<data-dir>/ca/` (see [Directory Layout](#directory-layout)).
+- Opens a second gRPC listener on the bootstrap port (default `50052`) that accepts TLS without a client certificate, exposing only `RegisterServer` and `GetCACertificate`.
+- Maintains an in-memory deny-set of revoked certificate serials, checked at every TLS handshake on the primary listener.
+- Exposes all `ServerPairingService` RPCs to admin clients on the primary port (`50051`) over mTLS.
+
+**Joining mode** is activated by passing `--peer-authority` (and `--peer-secret` on first registration). The server:
+
+- On startup, checks `<cert-dir>/server.crt`; if valid and not near expiry it loads the cert and connects to the authority over mTLS on port `50051`.
+- If no cert exists (or it has expired), dials the authority's bootstrap port (`50052`), calls `RegisterServer` with the pairing secret, writes the returned cert and CA cert to disk, then zeros the secret from memory.
+- Runs a background renewal goroutine that checks expiry every `RenewalCheckInterval` (default `6h`) and renews automatically when less than `RenewalThreshold` (default `7 days`) remain.
+
+### Authority CA
+
+The CA is a self-signed EC P-256 key-pair stored in `<data-dir>/ca/`:
+
+| File     | Permissions | Contents                         |
+| -------- | ----------- | -------------------------------- |
+| `ca.key` | `0600`      | EC P-256 private key (PEM)       |
+| `ca.crt` | `0644`      | Self-signed CA certificate (PEM) |
+
+The `ca.key` is **never** transmitted over any network interface. The `ca.crt` is embedded in every issued certificate chain and is available to any caller (including unauthenticated ones) via `GetCACertificate`. Joining servers store a copy at `<cert-dir>/ca.crt` and use it as their only trust anchor when connecting to the authority.
+
+### Pairing Secret
+
+An admin generates a pairing secret on the authority with `notx server pairing add-secret`. The secret:
+
+- Has the format `NTXP-ABCDE-FGHIJ-KLMNO-PQRST-UVWXY` — a `NTXP-` prefix ("notx pairing") followed by 26 base32 characters (130 bits of entropy). The prefix makes secrets visually distinct and enables secret-scanning tools (GitHub, GitLab, etc.) to detect accidental commits.
+- Is **single-use**: once consumed by a successful `RegisterServer` call, any subsequent call with the same secret is rejected with `codes.Unauthenticated`.
+- Has a configurable **TTL** (default `15m`). An expired secret is refused even if unused.
+- Is **stored as a bcrypt hash** in `<data-dir>/pairing_secrets/<id>.json`. The plaintext is printed once to stdout and never written to disk.
+- Can carry an optional **label** (e.g., `"datacenter-b"`) used in audit log entries to make registration events meaningful.
+
+### `RegisterServer` Protocol Flow
+
+1. **Admin** generates a pairing secret on the authority and distributes it out-of-band to the joining server's operator (secure message, secrets manager, CI variable, etc.).
+2. **Joining server** generates an EC P-256 key-pair and PKCS#10 CSR locally. The private key never leaves the joining server.
+3. **Joining server** dials the authority's bootstrap port (`50052`) over TLS (no client cert required) and calls `RegisterServer`, sending its self-assigned `notx:srv:<uuid>` URN, the CSR, the plaintext secret, a human name, and its advertised gRPC endpoint.
+4. **Authority** bcrypt-compares the secret against all stored hashes, checks it is unexpired and unused, then atomically marks it consumed.
+5. **Authority** signs the CSR with its CA, producing an X.509 client certificate (`ExtKeyUsage: ClientAuth`, EC P-256, 30-day TTL by default, `CN = <server_urn>`).
+6. **Authority** stores a server record (URN, name, endpoint, cert PEM, cert serial, expiry) in the Badger index under the `server:` prefix and returns the signed cert and CA cert to the joining server.
+7. **Joining server** writes the cert and CA cert to disk, configures its gRPC client to present the cert on all future calls to the authority, and zeros the secret from memory.
+8. **All subsequent calls** from the joining server to the authority use mTLS on port `50051` — no secret is ever needed again.
+
+### Hard Revocation
+
+Revocation is enforced at the TLS handshake layer, not via an RPC interceptor. When `RevokeServer` is called:
+
+1. The server record is marked `revoked = true` in the Badger index.
+2. The certificate's serial number is added to an **in-memory deny-set**.
+3. A `tls.Config.VerifyPeerCertificate` callback on the primary listener checks every connecting client's certificate serial against the deny-set. A revoked server's connection is torn down during the TLS handshake — before any RPC handler is invoked — and receives a TLS alert.
+
+The deny-set is rebuilt from the repository on every server startup. It is kept in memory (one entry per revoked server) so the lookup is O(1) and adds no measurable latency to the handshake.
+
+### Automatic Certificate Renewal
+
+The joining server runs a background goroutine that fires on `RenewalCheckInterval` (default `6h`). When the remaining cert validity drops below `RenewalThreshold` (default `7 days`), it:
+
+1. Generates a new EC P-256 key-pair and PKCS#10 CSR (key rotation is recommended but optional).
+2. Calls `RenewCertificate` over the existing mTLS channel on port `50051`, presenting its current cert as the authenticator. No pairing secret is required.
+3. Writes the new cert to `server.crt.tmp`, then atomically renames it to `server.crt`.
+4. Signals the gRPC client to reload credentials from disk. The existing connection continues uninterrupted; the new cert takes effect on the next dial.
+
+### Audit Log Events
+
+Every pairing-related event emits a structured `slog` line at `INFO` level. The `pairing_secret` field is **never** included in any log entry.
+
+| Event                                 | Key fields                                                                 |
+| ------------------------------------- | -------------------------------------------------------------------------- |
+| Secret generated                      | `event=pairing_secret_created label= id= expires_at=`                      |
+| Secret consumed (success)             | `event=pairing_secret_consumed server_urn= label= remote_addr=`            |
+| Secret rejected                       | `event=pairing_secret_rejected reason=(wrong\|expired\|used) remote_addr=` |
+| Certificate issued                    | `event=server_cert_issued server_urn= expires_at=`                         |
+| Certificate renewed                   | `event=server_cert_renewed server_urn= expires_at=`                        |
+| Server revoked                        | `event=server_revoked server_urn= revoked_by=`                             |
+| TLS handshake rejected (revoked cert) | `event=server_handshake_rejected server_urn= serial=`                      |
+| Renewal triggered (joining side)      | `event=cert_renewal_triggered server_urn= days_remaining=`                 |
+| Renewal succeeded (joining side)      | `event=cert_renewal_success server_urn= new_expires_at=`                   |
+| Renewal failed (joining side)         | `event=cert_renewal_failed server_urn= error=`                             |
+
+---
+
 ## Port Reference
 
-| Layer | Default Port | Config Field |
-| ----- | ------------ | ------------ |
-| HTTP  | `4060`       | `HTTPPort`   |
-| gRPC  | `50051`      | `GRPCPort`   |
+| Layer            | Default Port | Config Field            |
+| ---------------- | ------------ | ----------------------- |
+| HTTP             | `4060`       | `HTTPPort`              |
+| gRPC (primary)   | `50051`      | `GRPCPort`              |
+| gRPC (bootstrap) | `50052`      | `Pairing.BootstrapPort` |
 
-Both ports are configurable independently. The bind address for both is controlled by `Host` (default: all interfaces).
+All ports are configurable independently. The bind address for all listeners is controlled by `Host` (default: all interfaces). The bootstrap listener is only started when `Pairing.Enabled` is `true`.

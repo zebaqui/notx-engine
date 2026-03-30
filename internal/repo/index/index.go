@@ -20,14 +20,16 @@ import (
 // ─────────────────────────────────────────────────────────────────────────────
 
 const (
-	prefixNote    = "note:"
-	prefixSearch  = "search:"
-	prefixName    = "name:"
-	prefixContent = "content:"
-	prefixProject = "proj:"
-	prefixFolder  = "folder:"
-	prefixUser    = "usr:"
-	prefixDevice  = "device:"
+	prefixNote          = "note:"
+	prefixSearch        = "search:"
+	prefixName          = "name:"
+	prefixContent       = "content:"
+	prefixProject       = "proj:"
+	prefixFolder        = "folder:"
+	prefixUser          = "usr:"
+	prefixDevice        = "device:"
+	prefixServer        = "server:"
+	prefixPairingSecret = "psecret:"
 )
 
 func contentKey(urn string) []byte {
@@ -465,6 +467,14 @@ func deviceKey(urn string) []byte {
 	return []byte(prefixDevice + urn)
 }
 
+func serverKey(urn string) []byte {
+	return []byte(prefixServer + urn)
+}
+
+func pairingSecretKey(id string) []byte {
+	return []byte(prefixPairingSecret + id)
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // ProjectEntry
 // ─────────────────────────────────────────────────────────────────────────────
@@ -884,5 +894,145 @@ func (idx *Index) ListUsers(includeDeleted bool, pageSize int, pageToken string)
 func (idx *Index) DeleteUser(urn string) error {
 	return idx.db.Update(func(txn *badger.Txn) error {
 		return txn.Delete(userKey(urn))
+	})
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ServerEntry
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ServerEntry is the record stored in the index for each paired server.
+type ServerEntry struct {
+	URN          string `json:"urn"`
+	Name         string `json:"name"`
+	Endpoint     string `json:"endpoint"`
+	CertPEM      string `json:"cert_pem"`
+	CertSerial   string `json:"cert_serial"`
+	Revoked      bool   `json:"revoked"`
+	RegisteredAt string `json:"registered_at"` // RFC3339
+	ExpiresAt    string `json:"expires_at"`    // RFC3339
+	LastSeenAt   string `json:"last_seen_at"`  // RFC3339 or empty
+}
+
+// UpsertServer stores or updates a ServerEntry.
+func (idx *Index) UpsertServer(entry ServerEntry) error {
+	data, err := json.Marshal(entry)
+	if err != nil {
+		return fmt.Errorf("index: marshal server %q: %w", entry.URN, err)
+	}
+	return idx.db.Update(func(txn *badger.Txn) error {
+		return txn.Set(serverKey(entry.URN), data)
+	})
+}
+
+// GetServer returns the ServerEntry for the given URN.
+// Returns (nil, nil) if not found.
+func (idx *Index) GetServer(urn string) (*ServerEntry, error) {
+	var entry ServerEntry
+	found := false
+	err := idx.db.View(func(txn *badger.Txn) error {
+		item, err := txn.Get(serverKey(urn))
+		if err == badger.ErrKeyNotFound {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("index: get server key: %w", err)
+		}
+		return item.Value(func(val []byte) error {
+			found = true
+			return json.Unmarshal(val, &entry)
+		})
+	})
+	if err != nil {
+		return nil, err
+	}
+	if !found {
+		return nil, nil
+	}
+	return &entry, nil
+}
+
+// ListServers returns all ServerEntries.
+// Revoked servers are included only when includeRevoked is true.
+func (idx *Index) ListServers(includeRevoked bool) ([]ServerEntry, error) {
+	var results []ServerEntry
+	err := idx.db.View(func(txn *badger.Txn) error {
+		iterOpts := badger.DefaultIteratorOptions
+		iterOpts.Prefix = []byte(prefixServer)
+		it := txn.NewIterator(iterOpts)
+		defer it.Close()
+		for it.Seek([]byte(prefixServer)); it.Valid(); it.Next() {
+			var entry ServerEntry
+			if err := it.Item().Value(func(val []byte) error {
+				return json.Unmarshal(val, &entry)
+			}); err != nil {
+				return fmt.Errorf("index: unmarshal server: %w", err)
+			}
+			if !includeRevoked && entry.Revoked {
+				continue
+			}
+			results = append(results, entry)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return results, nil
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PairingSecretEntry
+// ─────────────────────────────────────────────────────────────────────────────
+
+// PairingSecretEntry is the record stored for a single-use pairing secret.
+type PairingSecretEntry struct {
+	ID         string `json:"id"`
+	Label      string `json:"label"`
+	HashBcrypt string `json:"hash_bcrypt"`
+	ExpiresAt  string `json:"expires_at"` // RFC3339
+	UsedAt     string `json:"used_at"`    // RFC3339 or empty
+}
+
+// UpsertPairingSecret stores or updates a PairingSecretEntry.
+func (idx *Index) UpsertPairingSecret(entry PairingSecretEntry) error {
+	data, err := json.Marshal(entry)
+	if err != nil {
+		return fmt.Errorf("index: marshal pairing secret %q: %w", entry.ID, err)
+	}
+	return idx.db.Update(func(txn *badger.Txn) error {
+		return txn.Set(pairingSecretKey(entry.ID), data)
+	})
+}
+
+// ListPairingSecrets returns all PairingSecretEntry records.
+func (idx *Index) ListPairingSecrets() ([]PairingSecretEntry, error) {
+	var results []PairingSecretEntry
+	err := idx.db.View(func(txn *badger.Txn) error {
+		iterOpts := badger.DefaultIteratorOptions
+		iterOpts.Prefix = []byte(prefixPairingSecret)
+		it := txn.NewIterator(iterOpts)
+		defer it.Close()
+		for it.Seek([]byte(prefixPairingSecret)); it.Valid(); it.Next() {
+			var entry PairingSecretEntry
+			if err := it.Item().Value(func(val []byte) error {
+				return json.Unmarshal(val, &entry)
+			}); err != nil {
+				return fmt.Errorf("index: unmarshal pairing secret: %w", err)
+			}
+			results = append(results, entry)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return results, nil
+}
+
+// DeletePairingSecret removes a pairing secret by ID.
+func (idx *Index) DeletePairingSecret(id string) error {
+	return idx.db.Update(func(txn *badger.Txn) error {
+		return txn.Delete(pairingSecretKey(id))
 	})
 }

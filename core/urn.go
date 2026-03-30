@@ -23,6 +23,12 @@ const (
 	// Format: <namespace>:device:<uuid>
 	// Example: notx:device:4a5b6c7d-8e9f-0a1b-2c3d-4e5f6a7b8c9d
 	ObjectTypeDevice ObjectType = "device"
+	// ObjectTypeServer identifies a trusted peer notx server instance that
+	// has been paired with this authority via the ServerPairingService.
+	//
+	// Format: <namespace>:srv:<uuid>
+	// Example: notx:srv:4a5b6c7d-8e9f-0a1b-2c3d-4e5f6a7b8c9d
+	ObjectTypeServer ObjectType = "srv"
 )
 
 // sentinelAnon is the special UUID value for anonymous/unknown authors.
@@ -45,6 +51,7 @@ var (
 		ObjectTypeProject: {},
 		ObjectTypeFolder:  {},
 		ObjectTypeDevice:  {},
+		ObjectTypeServer:  {},
 	}
 )
 
