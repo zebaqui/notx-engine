@@ -18,6 +18,7 @@ import (
 
 	"github.com/zebaqui/notx-engine/core"
 	"github.com/zebaqui/notx-engine/internal/ca"
+	"github.com/zebaqui/notx-engine/internal/relay"
 	"github.com/zebaqui/notx-engine/internal/repo"
 	"github.com/zebaqui/notx-engine/internal/server/config"
 	grpcsvc "github.com/zebaqui/notx-engine/internal/server/grpc"
@@ -66,8 +67,37 @@ func New(cfg *config.Config, r repo.NoteRepository, projRepo repo.ProjectReposit
 		return nil, fmt.Errorf("server: bootstrap admin device: %w", err)
 	}
 
+	// ── Build relay policy from config ───────────────────────────────────────
+	relayPolicy := relay.Policy{
+		AllowedHosts:         cfg.Relay.AllowedHosts,
+		AllowLocalhost:       cfg.Relay.AllowLocalhost,
+		MaxSteps:             cfg.Relay.MaxSteps,
+		MaxRequestBodyBytes:  cfg.Relay.MaxRequestBodyBytes,
+		MaxResponseBodyBytes: cfg.Relay.MaxResponseBodyBytes,
+		RequestTimeoutSecs:   cfg.Relay.RequestTimeoutSecs,
+		MaxRedirects:         cfg.Relay.MaxRedirects,
+	}
+	// Apply defaults for any zero values (e.g. when Relay section is absent).
+	if relayPolicy.MaxSteps == 0 {
+		relayPolicy.MaxSteps = 20
+	}
+	if relayPolicy.MaxRequestBodyBytes == 0 {
+		relayPolicy.MaxRequestBodyBytes = 1 << 20
+	}
+	if relayPolicy.MaxResponseBodyBytes == 0 {
+		relayPolicy.MaxResponseBodyBytes = 4 << 20
+	}
+	if relayPolicy.RequestTimeoutSecs == 0 {
+		relayPolicy.RequestTimeoutSecs = 10
+	}
+	if relayPolicy.MaxRedirects == 0 {
+		relayPolicy.MaxRedirects = 5
+	}
+
+	relaySvc := grpcsvc.NewRelayServiceServer(devRepo, relayPolicy, log, nil)
+
 	if cfg.EnableHTTP {
-		s.httpHandler = httpsvc.New(cfg, r, projRepo, devRepo, userRepo, log, s.pairingService, secretStore)
+		s.httpHandler = httpsvc.New(cfg, r, projRepo, devRepo, userRepo, log, s.pairingService, secretStore, relaySvc)
 	}
 
 	if cfg.Pairing.Enabled {
@@ -93,7 +123,7 @@ func New(cfg *config.Config, r repo.NoteRepository, projRepo repo.ProjectReposit
 	}
 
 	if cfg.EnableGRPC {
-		grpcSrv, err := buildGRPCServer(cfg, r, projRepo, devRepo, s.pairingService, log)
+		grpcSrv, err := buildGRPCServer(cfg, r, projRepo, devRepo, s.pairingService, relaySvc, log)
 		if err != nil {
 			return nil, fmt.Errorf("server: build gRPC server: %w", err)
 		}
@@ -341,7 +371,7 @@ func (s *Server) initiateShutdown(ctx context.Context) {
 // gRPC server construction
 // ─────────────────────────────────────────────────────────────────────────────
 
-func buildGRPCServer(cfg *config.Config, r repo.NoteRepository, projRepo repo.ProjectRepository, devRepo repo.DeviceRepository, pairingSvc *grpcsvc.PairingService, log *slog.Logger) (*googlegrpc.Server, error) {
+func buildGRPCServer(cfg *config.Config, r repo.NoteRepository, projRepo repo.ProjectRepository, devRepo repo.DeviceRepository, pairingSvc *grpcsvc.PairingService, relaySvc *grpcsvc.RelayServiceServer, log *slog.Logger) (*googlegrpc.Server, error) {
 	opts := []googlegrpc.ServerOption{
 		googlegrpc.UnaryInterceptor(loggingUnaryInterceptor(log)),
 		googlegrpc.StreamInterceptor(loggingStreamInterceptor(log)),
@@ -364,6 +394,7 @@ func buildGRPCServer(cfg *config.Config, r repo.NoteRepository, projRepo repo.Pr
 	pb.RegisterNoteServiceServer(srv, grpcsvc.NewNoteServiceServer(r, cfg.DefaultPageSize, cfg.MaxPageSize))
 	pb.RegisterDeviceServiceServer(srv, grpcsvc.NewDeviceServiceServer(devRepo))
 	pb.RegisterProjectServiceServer(srv, grpcsvc.NewProjectServiceServer(projRepo, cfg.DefaultPageSize, cfg.MaxPageSize))
+	pb.RegisterRelayServiceServer(srv, relaySvc)
 
 	if pairingSvc != nil {
 		pb.RegisterServerPairingServiceServer(srv, pairingSvc)

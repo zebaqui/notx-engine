@@ -1,0 +1,146 @@
+syntax = "proto3";
+
+package notx.v1;
+
+option go_package = "github.com/zebaqui/notx-engine/internal/server/proto;notxpb";
+
+// ─────────────────────────────────────────────────────────────────────────────
+// RelayService — gRPC-first HTTP relay execution engine
+// ─────────────────────────────────────────────────────────────────────────────
+
+service RelayService {
+  // Execute performs a single outbound HTTP request on behalf of a device.
+  rpc Execute(ExecuteRequest) returns (ExecuteResponse);
+
+  // ExecuteFlow runs a multi-step request pipeline with variable interpolation
+  // and JSON extraction between steps.
+  rpc ExecuteFlow(ExecuteFlowRequest) returns (ExecuteFlowResponse);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Core HTTP primitives
+// ─────────────────────────────────────────────────────────────────────────────
+
+// HttpRequest describes an outbound HTTP request to be executed by the engine.
+message HttpRequest {
+  // HTTP method (GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS).
+  string method = 1;
+
+  // Full URL including scheme, host, path, and query string.
+  // {{variable}} placeholders are resolved before execution.
+  string url = 2;
+
+  // Request headers. Values may contain {{variable}} placeholders.
+  map<string, string> headers = 3;
+
+  // Raw request body. May contain {{variable}} placeholders (treated as UTF-8
+  // text before encoding). Empty for methods without a body.
+  bytes body = 4;
+}
+
+// HttpResponse carries the result of an executed HTTP request.
+message HttpResponse {
+  // HTTP status code (e.g. 200, 404, 500).
+  int32 status = 1;
+
+  // Response headers normalised to lowercase keys.
+  map<string, string> headers = 2;
+
+  // Raw response body (capped at max_response_bytes).
+  bytes body = 3;
+
+  // Wall-clock time for the round-trip in milliseconds.
+  int64 duration_ms = 4;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Execute — single request
+// ─────────────────────────────────────────────────────────────────────────────
+
+message ExecuteRequest {
+  // URN of the calling device — validated and checked against the allowlist.
+  string device_urn = 1;
+
+  // The HTTP request to execute.
+  HttpRequest request = 2;
+
+  // Initial variable bindings used for {{variable}} interpolation.
+  map<string, string> variables = 3;
+}
+
+message ExecuteResponse {
+  // The HTTP response returned by the target server.
+  HttpResponse response = 1;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ExecuteFlow — multi-step pipeline
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Step represents one request in a multi-step flow.
+message Step {
+  // Unique identifier for this step within the flow (used in error reporting
+  // and in StepResult).
+  string id = 1;
+
+  // The HTTP request to execute (after variable interpolation).
+  HttpRequest request = 2;
+
+  // extract defines variables to pull from this step's response and make
+  // available to subsequent steps.
+  //
+  // Key:   variable name  (e.g. "token")
+  // Value: dot-notation path into the response (e.g. "response.body.access_token")
+  //
+  // Supported path prefixes:
+  //   response.body.<json_key>  — extract a top-level JSON field from the body
+  //   response.status           — the HTTP status code as a string
+  //   response.headers.<name>   — a response header value
+  map<string, string> extract = 3;
+}
+
+message ExecuteFlowRequest {
+  // URN of the calling device.
+  string device_urn = 1;
+
+  // Ordered list of steps to execute sequentially.
+  repeated Step steps = 2;
+
+  // Initial variable bindings (augmented after each step via extract rules).
+  map<string, string> variables = 3;
+}
+
+// StepResult holds the outcome of a single step execution.
+message StepResult {
+  // Matches Step.id.
+  string id = 1;
+
+  // The HTTP response for this step.
+  HttpResponse response = 2;
+}
+
+message ExecuteFlowResponse {
+  // Results in execution order — one entry per step.
+  repeated StepResult results = 1;
+
+  // Final variable state after all extractions have been applied.
+  map<string, string> variables = 2;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Structured error detail (attached to gRPC status details)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// RelayErrorDetail is embedded in gRPC Status.details for relay failures,
+// providing structured context beyond the status code and message.
+message RelayErrorDetail {
+  // step_id is populated when the error occurred during a specific flow step.
+  string step_id = 1;
+
+  // duration_ms is the elapsed time at the point of failure.
+  int64 duration_ms = 2;
+
+  // blocked_host is set when the error is PERMISSION_DENIED due to a blocked
+  // outbound host.
+  string blocked_host = 3;
+}

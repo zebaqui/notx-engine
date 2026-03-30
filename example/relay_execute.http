@@ -1,0 +1,72 @@
+### Relay Execute — single HTTP request via notx relay engine
+### POST /v1/relay/execute
+###
+### Prerequisites:
+###   1. notx server running on localhost:4060
+###   2. A registered + approved device with URN notx:device:<uuid>
+###      Set the X-Device-ID header to your device URN.
+###
+### The relay engine will:
+###   - Validate your device identity
+###   - Check the target URL against the security policy
+###   - Execute the outbound HTTP request server-side
+###   - Return the upstream response
+
+POST http://localhost:4060/v1/relay/execute
+Content-Type: application/json
+X-Device-ID: notx:device:00000000-0000-0000-0000-000000000000
+
+{
+  "request": {
+    "method": "GET",
+    "url": "https://httpbin.org/get",
+    "headers": {
+      "Accept": "application/json"
+    }
+  }
+}
+
+###
+### Example with variable interpolation
+### Variables in {{double_braces}} are resolved before the request is sent.
+
+POST http://localhost:4060/v1/relay/execute
+Content-Type: application/json
+X-Device-ID: notx:device:00000000-0000-0000-0000-000000000000
+
+{
+  "variables": {
+    "api_host": "httpbin.org",
+    "endpoint": "json"
+  },
+  "request": {
+    "method": "GET",
+    "url": "https://{{api_host}}/{{endpoint}}",
+    "headers": {
+      "Accept": "application/json",
+      "X-Request-Source": "notx-relay"
+    }
+  }
+}
+
+###
+### POST request with a JSON body
+
+POST http://localhost:4060/v1/relay/execute
+Content-Type: application/json
+X-Device-ID: notx:device:00000000-0000-0000-0000-000000000000
+
+{
+  "variables": {
+    "api_url": "https://httpbin.org/post",
+    "content_type": "application/json"
+  },
+  "request": {
+    "method": "POST",
+    "url": "{{api_url}}",
+    "headers": {
+      "Content-Type": "{{content_type}}"
+    },
+    "body": "{\"hello\": \"from notx relay\"}"
+  }
+}

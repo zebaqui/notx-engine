@@ -43,6 +43,7 @@ type Handler struct {
 	users       repo.UserRepository
 	pairing     *grpcsvc.PairingService
 	secretStore repo.PairingSecretStore
+	relaySvc    *grpcsvc.RelayServiceServer
 	log         *slog.Logger
 	mux         *http.ServeMux
 	server      *http.Server
@@ -52,7 +53,9 @@ type Handler struct {
 // The caller must call Serve to start accepting connections.
 // pairingSvc and secretStore may be nil when server pairing is disabled;
 // the relevant endpoints will return 503 in that case.
-func New(cfg *config.Config, r repo.NoteRepository, proj repo.ProjectRepository, dev repo.DeviceRepository, users repo.UserRepository, log *slog.Logger, pairingSvc *grpcsvc.PairingService, secretStore repo.PairingSecretStore) *Handler {
+// relaySvc may be nil when the relay engine is not available; the relay
+// endpoints will return 503 in that case.
+func New(cfg *config.Config, r repo.NoteRepository, proj repo.ProjectRepository, dev repo.DeviceRepository, users repo.UserRepository, log *slog.Logger, pairingSvc *grpcsvc.PairingService, secretStore repo.PairingSecretStore, relaySvc *grpcsvc.RelayServiceServer) *Handler {
 	h := &Handler{
 		cfg:         cfg,
 		repo:        r,
@@ -61,6 +64,7 @@ func New(cfg *config.Config, r repo.NoteRepository, proj repo.ProjectRepository,
 		users:       users,
 		pairing:     pairingSvc,
 		secretStore: secretStore,
+		relaySvc:    relaySvc,
 		log:         log,
 		mux:         http.NewServeMux(),
 	}
@@ -201,6 +205,11 @@ func (h *Handler) routes() {
 	h.mux.HandleFunc("/v1/servers/ca", h.withMiddleware(h.routeServersCA))
 	h.mux.HandleFunc("/v1/servers", h.withMiddleware(h.routeServers))
 	h.mux.HandleFunc("/v1/servers/", h.withMiddleware(h.routeServer))
+
+	// ── Relay execution engine ───────────────────────────────────────────────
+	if h.relaySvc != nil {
+		h.routeRelay(h.relaySvc)
+	}
 }
 
 // withMiddleware wraps a handler with logging and panic recovery.

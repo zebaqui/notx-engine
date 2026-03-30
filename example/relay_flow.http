@@ -1,0 +1,103 @@
+### Relay Execute-Flow — multi-step HTTP pipeline via notx relay engine
+### POST /v1/relay/execute-flow
+###
+### The flow engine:
+###   1. Executes steps sequentially
+###   2. After each step, applies "extract" rules to pull values from the
+###      response into shared variables
+###   3. Variables are available to all subsequent steps via {{varName}}
+###   4. Returns all step results + the final variable state
+###
+### Supported extraction paths:
+###   response.status              → HTTP status code as string
+###   response.headers.<name>      → Response header value
+###   response.body.<json_key>     → Top-level JSON field
+###   response.body.<a>.<b>.<c>   → Nested JSON field (dot-separated)
+
+### ── Example 1: Login + authenticated request ──────────────────────────────
+### Step 1: POST /auth/token   → extract access_token
+### Step 2: GET /profile       → use access_token in Authorization header
+
+POST http://localhost:4060/v1/relay/execute-flow
+Content-Type: application/json
+X-Device-ID: notx:device:00000000-0000-0000-0000-000000000000
+
+{
+  "variables": {
+    "api_base": "https://httpbin.org",
+    "username": "alice",
+    "password": "s3cr3t"
+  },
+  "steps": [
+    {
+      "id": "login",
+      "request": {
+        "method": "POST",
+        "url": "{{api_base}}/post",
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": "{\"username\":\"{{username}}\",\"password\":\"{{password}}\"}"
+      },
+      "extract": {
+        "request_id": "response.body.json.username",
+        "status_code": "response.status"
+      }
+    },
+    {
+      "id": "fetch-data",
+      "request": {
+        "method": "GET",
+        "url": "{{api_base}}/get",
+        "headers": {
+          "Accept": "application/json",
+          "X-Logged-In-As": "{{request_id}}",
+          "X-Prior-Status": "{{status_code}}"
+        }
+      },
+      "extract": {
+        "final_url": "response.body.url"
+      }
+    }
+  ]
+}
+
+### ── Example 2: Sequential API calls with data threading ──────────────────
+### Demonstrates extracting from nested JSON and threading values forward.
+
+POST http://localhost:4060/v1/relay/execute-flow
+Content-Type: application/json
+X-Device-ID: notx:device:00000000-0000-0000-0000-000000000000
+
+{
+  "variables": {
+    "base_url": "https://httpbin.org"
+  },
+  "steps": [
+    {
+      "id": "step-1-get-headers",
+      "request": {
+        "method": "GET",
+        "url": "{{base_url}}/headers",
+        "headers": {
+          "Accept": "application/json"
+        }
+      },
+      "extract": {
+        "host_header": "response.body.headers.Host",
+        "response_status": "response.status"
+      }
+    },
+    {
+      "id": "step-2-echo-back",
+      "request": {
+        "method": "POST",
+        "url": "{{base_url}}/post",
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": "{\"original_host\":\"{{host_header}}\",\"step1_status\":\"{{response_status}}\"}"
+      }
+    }
+  ]
+}

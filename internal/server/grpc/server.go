@@ -15,6 +15,7 @@ import (
 	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/reflection"
 
+	"github.com/zebaqui/notx-engine/internal/relay"
 	"github.com/zebaqui/notx-engine/internal/repo"
 	"github.com/zebaqui/notx-engine/internal/server/config"
 	pb "github.com/zebaqui/notx-engine/internal/server/proto"
@@ -31,6 +32,7 @@ type Server struct {
 	gs      *grpc.Server
 	noteS   *NoteServiceServer
 	deviceS *DeviceServiceServer
+	relayS  *RelayServiceServer
 }
 
 // NewServer creates a fully wired gRPC Server ready to call Serve on.
@@ -64,9 +66,12 @@ func NewServer(cfg *config.Config, r repo.NoteRepository, devRepo repo.DeviceRep
 
 	noteS := NewNoteServiceServer(r, cfg.DefaultPageSize, cfg.MaxPageSize)
 	deviceS := NewDeviceServiceServer(devRepo)
+	relayPolicy := relay.DefaultPolicy()
+	relayS := NewRelayServiceServer(devRepo, relayPolicy, log, nil)
 
 	pb.RegisterNoteServiceServer(gs, noteS)
 	pb.RegisterDeviceServiceServer(gs, deviceS)
+	pb.RegisterRelayServiceServer(gs, relayS)
 
 	// Enable gRPC server reflection so tools like grpcurl work out of the box.
 	reflection.Register(gs)
@@ -77,6 +82,7 @@ func NewServer(cfg *config.Config, r repo.NoteRepository, devRepo repo.DeviceRep
 		gs:      gs,
 		noteS:   noteS,
 		deviceS: deviceS,
+		relayS:  relayS,
 	}, nil
 }
 
@@ -100,6 +106,12 @@ func (s *Server) Serve() error {
 		return fmt.Errorf("grpc: serve: %w", err)
 	}
 	return nil
+}
+
+// RelayService returns the RelayServiceServer so the HTTP adapter layer can
+// call it directly without a network hop.
+func (s *Server) RelayService() *RelayServiceServer {
+	return s.relayS
 }
 
 // Shutdown initiates a graceful shutdown.  In-flight RPCs are allowed to

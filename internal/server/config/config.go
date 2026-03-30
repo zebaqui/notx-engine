@@ -70,6 +70,34 @@ type AdminConfig struct {
 	AdminPassphraseHash string
 }
 
+// RelayPolicyConfig controls the security and resource limits for the relay
+// execution engine.
+type RelayPolicyConfig struct {
+	// AllowedHosts is an explicit allowlist of hostnames the relay may contact.
+	// When empty, all hosts are permitted (subject to the built-in block-list).
+	// In production this should always be set.
+	AllowedHosts []string
+
+	// AllowLocalhost permits connections to loopback / RFC-1918 ranges.
+	// Should only be true in development environments.
+	AllowLocalhost bool
+
+	// MaxSteps is the maximum number of steps in a single flow. Default: 20.
+	MaxSteps int
+
+	// MaxRequestBodyBytes caps the outbound request body. Default: 1 MiB.
+	MaxRequestBodyBytes int64
+
+	// MaxResponseBodyBytes caps the upstream response body read. Default: 4 MiB.
+	MaxResponseBodyBytes int64
+
+	// RequestTimeoutSecs is the per-request deadline in seconds. Default: 10.
+	RequestTimeoutSecs int
+
+	// MaxRedirects is the maximum redirects followed per request. Default: 5.
+	MaxRedirects int
+}
+
 // ServerPairingConfig controls the server-to-server pairing subsystem.
 type ServerPairingConfig struct {
 	// Enabled activates the ServerPairingService on this instance.
@@ -195,6 +223,9 @@ type Config struct {
 
 	// Pairing holds the configuration for the server-to-server pairing subsystem.
 	Pairing ServerPairingConfig
+
+	// Relay holds the security policy for the outbound HTTP relay execution engine.
+	Relay RelayPolicyConfig
 }
 
 // DefaultAdminDeviceURN is the well-known URN reserved for the server's
@@ -234,6 +265,14 @@ func Default() *Config {
 			SecretTTL:            15 * time.Minute,
 			RenewalCheckInterval: 6 * time.Hour,
 			RenewalThreshold:     168 * time.Hour,
+		},
+		Relay: RelayPolicyConfig{
+			AllowLocalhost:       false,
+			MaxSteps:             20,
+			MaxRequestBodyBytes:  1 << 20,
+			MaxResponseBodyBytes: 4 << 20,
+			RequestTimeoutSecs:   10,
+			MaxRedirects:         5,
 		},
 	}
 }
