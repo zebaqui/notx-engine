@@ -4,8 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"crypto/tls"
-	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -16,12 +14,10 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials"
-	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/zebaqui/notx-engine/internal/clientconfig"
+	"github.com/zebaqui/notx-engine/internal/grpcclient"
 	pb "github.com/zebaqui/notx-engine/internal/server/proto"
 )
 
@@ -150,20 +146,25 @@ func runAddNote(cmd *cobra.Command, args []string) error {
 	}
 
 	// ── Dial the gRPC server ──────────────────────────────────────────────────
-	dialCreds, err := buildClientCredentials(cfg)
-	if err != nil {
-		return fmt.Errorf("build credentials: %w", err)
+	dialOpts := grpcclient.Options{
+		Addr:     grpcAddr,
+		Insecure: cfg.Client.Insecure && !cfg.TLSEnabled(),
+	}
+	if cfg.TLSEnabled() {
+		dialOpts.CertFile = cfg.TLS.CertFile
+		dialOpts.KeyFile = cfg.TLS.KeyFile
+	}
+	if cfg.TLS.CAFile != "" {
+		dialOpts.CAFile = cfg.TLS.CAFile
 	}
 
-	conn, err := grpc.NewClient(grpcAddr,
-		grpc.WithTransportCredentials(dialCreds),
-	)
+	conn, err := grpcclient.Dial(dialOpts)
 	if err != nil {
 		return fmt.Errorf("dial gRPC server at %s: %w", grpcAddr, err)
 	}
 	defer conn.Close()
 
-	client := pb.NewNoteServiceClient(conn)
+	client := conn.Notes()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -348,45 +349,6 @@ func splitContentLines(content string) []string {
 		return []string{}
 	}
 	return strings.Split(content, "\n")
-}
-
-// buildClientCredentials returns the appropriate gRPC transport credentials
-// for the client side, based on the loaded config.
-func buildClientCredentials(cfg *clientconfig.Config) (credentials.TransportCredentials, error) {
-	// If the config says insecure (and TLS isn't configured), use plaintext.
-	if cfg.Client.Insecure && !cfg.TLSEnabled() {
-		return insecure.NewCredentials(), nil
-	}
-
-	// TLS cert + key configured — load them.
-	if cfg.TLSEnabled() {
-		cert, err := tls.LoadX509KeyPair(cfg.TLS.CertFile, cfg.TLS.KeyFile)
-		if err != nil {
-			return nil, fmt.Errorf("load client cert/key: %w", err)
-		}
-
-		tlsCfg := &tls.Config{
-			Certificates: []tls.Certificate{cert},
-			MinVersion:   tls.VersionTLS13,
-		}
-
-		if cfg.TLS.CAFile != "" {
-			caPEM, err := os.ReadFile(cfg.TLS.CAFile)
-			if err != nil {
-				return nil, fmt.Errorf("read CA cert %q: %w", cfg.TLS.CAFile, err)
-			}
-			pool := x509.NewCertPool()
-			if !pool.AppendCertsFromPEM(caPEM) {
-				return nil, fmt.Errorf("parse CA cert %q: no valid PEM blocks", cfg.TLS.CAFile)
-			}
-			tlsCfg.RootCAs = pool
-		}
-
-		return credentials.NewTLS(tlsCfg), nil
-	}
-
-	// Fallback: system TLS (server has a cert signed by a known CA).
-	return credentials.NewTLS(&tls.Config{MinVersion: tls.VersionTLS13}), nil
 }
 
 // readLines reads a file and returns its lines with trailing newlines stripped.

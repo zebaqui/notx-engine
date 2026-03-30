@@ -6,6 +6,9 @@ ADMIN_DIR  := ui/admin
 BINARY     := bin/notx
 CMD        := ./cmd/notx
 
+BINARY_CTL := bin/notxctl
+CMD_CTL    := ./cmd/notxctl
+
 PROTO_DIR  := internal/server/proto
 PROTO_FILE := $(PROTO_DIR)/notx.proto
 
@@ -19,7 +22,7 @@ PROTOC         := protoc
 PROTOC_GEN_GO  := $(GOPATH)/bin/protoc-gen-go
 PROTOC_GEN_GRP := $(GOPATH)/bin/protoc-gen-go-grpc
 
-.PHONY: all build build-go generate-proto clean \
+.PHONY: all build build-go build-ctl generate-proto clean \
         admin-install admin-dev admin-build \
         docker-build test-integration
 
@@ -43,6 +46,16 @@ build-go:
 	@echo "  BUILD   $(BINARY)"
 	@mkdir -p bin
 	go build -o $(BINARY) $(CMD)
+
+## build-ctl: compile the notxctl debug/ops CLI binary
+build-ctl:
+	@echo "  BUILD   $(BINARY_CTL)"
+	@mkdir -p bin
+	go build \
+		-ldflags "-X github.com/zebaqui/notx-engine/internal/buildinfo.Version=$(shell git describe --tags --always --dirty 2>/dev/null || echo dev) \
+		          -X github.com/zebaqui/notx-engine/internal/buildinfo.Commit=$(shell git rev-parse --short HEAD 2>/dev/null || echo unknown) \
+		          -X github.com/zebaqui/notx-engine/internal/buildinfo.BuildTime=$(shell date -u +%Y-%m-%dT%H:%M:%SZ)" \
+		-o $(BINARY_CTL) $(CMD_CTL)
 
 # ── Proto ─────────────────────────────────────────────────────────────────────
 
@@ -100,6 +113,7 @@ test-pairing: docker-build
 clean:
 	@echo "  CLEAN"
 	@rm -f  $(BINARY)
+	@rm -f  $(BINARY_CTL)
 	@rm -rf $(ADMIN_DIR)/dist
 	@rm -rf internal/admin/ui
 

@@ -196,6 +196,122 @@ func (x *DeleteFolderResponse) Reset()         {}
 func (x *DeleteFolderResponse) String() string { return "" }
 func (x *DeleteFolderResponse) ProtoMessage()  {}
 
+// ── Client interface ──────────────────────────────────────────────────────────
+
+// ProjectServiceClient is the client-side interface for ProjectService.
+type ProjectServiceClient interface {
+	CreateProject(ctx context.Context, in *CreateProjectRequest, opts ...grpc.CallOption) (*CreateProjectResponse, error)
+	GetProject(ctx context.Context, in *GetProjectRequest, opts ...grpc.CallOption) (*GetProjectResponse, error)
+	ListProjects(ctx context.Context, in *ListProjectsRequest, opts ...grpc.CallOption) (*ListProjectsResponse, error)
+	UpdateProject(ctx context.Context, in *UpdateProjectRequest, opts ...grpc.CallOption) (*UpdateProjectResponse, error)
+	DeleteProject(ctx context.Context, in *DeleteProjectRequest, opts ...grpc.CallOption) (*DeleteProjectResponse, error)
+
+	CreateFolder(ctx context.Context, in *CreateFolderRequest, opts ...grpc.CallOption) (*CreateFolderResponse, error)
+	GetFolder(ctx context.Context, in *GetFolderRequest, opts ...grpc.CallOption) (*GetFolderResponse, error)
+	ListFolders(ctx context.Context, in *ListFoldersRequest, opts ...grpc.CallOption) (*ListFoldersResponse, error)
+	UpdateFolder(ctx context.Context, in *UpdateFolderRequest, opts ...grpc.CallOption) (*UpdateFolderResponse, error)
+	DeleteFolder(ctx context.Context, in *DeleteFolderRequest, opts ...grpc.CallOption) (*DeleteFolderResponse, error)
+}
+
+type projectServiceClient struct {
+	cc grpc.ClientConnInterface
+}
+
+// NewProjectServiceClient returns a ProjectServiceClient backed by cc.
+func NewProjectServiceClient(cc grpc.ClientConnInterface) ProjectServiceClient {
+	return &projectServiceClient{cc}
+}
+
+func (c *projectServiceClient) CreateProject(ctx context.Context, in *CreateProjectRequest, opts ...grpc.CallOption) (*CreateProjectResponse, error) {
+	out := new(CreateProjectResponse)
+	err := c.cc.Invoke(ctx, "/notx.v1.ProjectService/CreateProject", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *projectServiceClient) GetProject(ctx context.Context, in *GetProjectRequest, opts ...grpc.CallOption) (*GetProjectResponse, error) {
+	out := new(GetProjectResponse)
+	err := c.cc.Invoke(ctx, "/notx.v1.ProjectService/GetProject", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *projectServiceClient) ListProjects(ctx context.Context, in *ListProjectsRequest, opts ...grpc.CallOption) (*ListProjectsResponse, error) {
+	out := new(ListProjectsResponse)
+	err := c.cc.Invoke(ctx, "/notx.v1.ProjectService/ListProjects", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *projectServiceClient) UpdateProject(ctx context.Context, in *UpdateProjectRequest, opts ...grpc.CallOption) (*UpdateProjectResponse, error) {
+	out := new(UpdateProjectResponse)
+	err := c.cc.Invoke(ctx, "/notx.v1.ProjectService/UpdateProject", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *projectServiceClient) DeleteProject(ctx context.Context, in *DeleteProjectRequest, opts ...grpc.CallOption) (*DeleteProjectResponse, error) {
+	out := new(DeleteProjectResponse)
+	err := c.cc.Invoke(ctx, "/notx.v1.ProjectService/DeleteProject", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *projectServiceClient) CreateFolder(ctx context.Context, in *CreateFolderRequest, opts ...grpc.CallOption) (*CreateFolderResponse, error) {
+	out := new(CreateFolderResponse)
+	err := c.cc.Invoke(ctx, "/notx.v1.ProjectService/CreateFolder", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *projectServiceClient) GetFolder(ctx context.Context, in *GetFolderRequest, opts ...grpc.CallOption) (*GetFolderResponse, error) {
+	out := new(GetFolderResponse)
+	err := c.cc.Invoke(ctx, "/notx.v1.ProjectService/GetFolder", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *projectServiceClient) ListFolders(ctx context.Context, in *ListFoldersRequest, opts ...grpc.CallOption) (*ListFoldersResponse, error) {
+	out := new(ListFoldersResponse)
+	err := c.cc.Invoke(ctx, "/notx.v1.ProjectService/ListFolders", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *projectServiceClient) UpdateFolder(ctx context.Context, in *UpdateFolderRequest, opts ...grpc.CallOption) (*UpdateFolderResponse, error) {
+	out := new(UpdateFolderResponse)
+	err := c.cc.Invoke(ctx, "/notx.v1.ProjectService/UpdateFolder", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *projectServiceClient) DeleteFolder(ctx context.Context, in *DeleteFolderRequest, opts ...grpc.CallOption) (*DeleteFolderResponse, error) {
+	out := new(DeleteFolderResponse)
+	err := c.cc.Invoke(ctx, "/notx.v1.ProjectService/DeleteFolder", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ── Service interface and registration ───────────────────────────────────────
 
 // ProjectServiceServer is the server-side interface for the ProjectService.

@@ -20,10 +20,7 @@ import (
 	"strings"
 	"time"
 
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials"
-	"google.golang.org/grpc/credentials/insecure"
-
+	"github.com/zebaqui/notx-engine/internal/grpcclient"
 	"github.com/zebaqui/notx-engine/internal/server/config"
 	pb "github.com/zebaqui/notx-engine/internal/server/proto"
 )
@@ -103,33 +100,24 @@ func (c *PairingClient) register(ctx context.Context, certDir string) error {
 		return fmt.Errorf("serverclient: build CSR: %w", err)
 	}
 
-	// Dial the bootstrap port. Use system roots OR a pinned ca.crt.
-	var dialCreds credentials.TransportCredentials
-	tlsCfg := &tls.Config{MinVersion: tls.VersionTLS13}
+	// Dial the bootstrap port. Use the pinned CA if available, otherwise
+	// accept the server cert provisionally on first contact (DialBootstrap
+	// sets InsecureSkipVerify when caPool is nil).
+	var caPool *x509.CertPool
 	if _, err := os.Stat(caPath); err == nil {
-		caPool, err := loadCertPool(caPath)
+		caPool, err = grpcclient.LoadCAPool(caPath)
 		if err != nil {
 			return fmt.Errorf("serverclient: load pinned CA: %w", err)
 		}
-		tlsCfg.RootCAs = caPool
-	} else {
-		// Use system roots for initial connection.
-		tlsCfg.InsecureSkipVerify = false
 	}
-	dialCreds = credentials.NewTLS(tlsCfg)
 
-	cc, err := grpc.NewClient(authority, grpc.WithTransportCredentials(dialCreds))
+	conn, err := grpcclient.DialBootstrap(authority, caPool)
 	if err != nil {
-		// Fall back to insecure for local dev/testing where no TLS cert exists.
-		c.log.Warn("serverclient: TLS dial failed, trying insecure", "err", err)
-		cc, err = grpc.NewClient(authority, grpc.WithTransportCredentials(insecure.NewCredentials()))
-		if err != nil {
-			return fmt.Errorf("serverclient: dial authority: %w", err)
-		}
+		return fmt.Errorf("serverclient: dial authority: %w", err)
 	}
-	defer cc.Close()
+	defer conn.Close()
 
-	client := pb.NewServerPairingServiceClient(cc)
+	client := conn.Pairing()
 
 	endpoint := c.cfg.GRPCAddr()
 	resp, err := client.RegisterServer(ctx, &pb.RegisterServerRequest{
@@ -231,27 +219,23 @@ func (c *PairingClient) renew(ctx context.Context, authorityPrimaryAddr string, 
 		return fmt.Errorf("build renewal CSR: %w", err)
 	}
 
-	// Dial mTLS on primary port.
-	caPool, err := loadCertPool(caPath)
+	// Dial the primary port with mTLS — present our current cert.
+	caPool, err := grpcclient.LoadCAPool(caPath)
 	if err != nil {
 		return fmt.Errorf("load CA pool: %w", err)
 	}
-	clientCert, err := tls.LoadX509KeyPair(certPath, keyPath)
+	clientCert, err := grpcclient.LoadClientCert(certPath, keyPath)
 	if err != nil {
 		return fmt.Errorf("load client cert/key: %w", err)
 	}
-	tlsCfg := &tls.Config{
-		Certificates: []tls.Certificate{clientCert},
-		RootCAs:      caPool,
-		MinVersion:   tls.VersionTLS13,
-	}
-	cc, err := grpc.NewClient(authorityPrimaryAddr, grpc.WithTransportCredentials(credentials.NewTLS(tlsCfg)))
+
+	conn, err := grpcclient.DialMTLS(authorityPrimaryAddr, clientCert, caPool)
 	if err != nil {
 		return fmt.Errorf("dial authority (mTLS): %w", err)
 	}
-	defer cc.Close()
+	defer conn.Close()
 
-	client := pb.NewServerPairingServiceClient(cc)
+	client := conn.Pairing()
 	resp, err := client.RenewCertificate(ctx, &pb.RenewCertificateRequest{
 		ServerUrn: c.serverURN,
 		Csr:       csrDER,
@@ -344,18 +328,6 @@ func loadCert(path string) (*tls.Certificate, error) {
 		}
 	}
 	return &cert, nil
-}
-
-func loadCertPool(path string) (*x509.CertPool, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	pool := x509.NewCertPool()
-	if !pool.AppendCertsFromPEM(data) {
-		return nil, fmt.Errorf("no certs in %s", path)
-	}
-	return pool, nil
 }
 
 func writeFile(path string, data []byte, mode os.FileMode) error {
