@@ -1,0 +1,205 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# .github/workflows/release.yml
+#
+# Triggered on every "v*" tag push (e.g. v1.0.0).
+# Builds the notx binary for macOS (amd64 + arm64),
+# creates a GitHub Release, uploads the archives,
+# and updates the Homebrew tap formula in zebaqui/homebrew-notx.
+# ─────────────────────────────────────────────────────────────────────────────
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write   # needed to create GitHub Releases
+
+# ── Shared env ────────────────────────────────────────────────────────────────
+env:
+  GO_VERSION: "1.22"
+  BINARY_NAME: notx
+  MODULE: github.com/zebaqui/notx-engine
+
+jobs:
+  # ── 1. Build macOS binaries ─────────────────────────────────────────────────
+  build-macos:
+    name: Build macOS (${{ matrix.goarch }})
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        goarch: [amd64, arm64]
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history so git describe works
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Set up Node (for the admin UI build)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: ui/admin/package-lock.json
+
+      - name: Install admin UI dependencies
+        run: npm --prefix ui/admin install --frozen-lockfile
+
+      - name: Resolve version from tag
+        id: version
+        run: echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Build binary
+        env:
+          GOOS: darwin
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          bash scripts/build.sh \
+            --output "dist/${{ env.BINARY_NAME }}-darwin-${{ matrix.goarch }}"
+
+      - name: Package archive
+        id: archive
+        run: |
+          ARCHIVE="${{ env.BINARY_NAME }}-${{ steps.version.outputs.version }}-darwin-${{ matrix.goarch }}.tar.gz"
+          tar -czf "${ARCHIVE}" \
+            -C dist \
+            "${{ env.BINARY_NAME }}-darwin-${{ matrix.goarch }}"
+          echo "archive=${ARCHIVE}" >> "$GITHUB_OUTPUT"
+          echo "sha256=$(shasum -a 256 "${ARCHIVE}" | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+
+      - name: Upload archive artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.archive.outputs.archive }}
+          path: ${{ steps.archive.outputs.archive }}
+          retention-days: 1
+
+      - name: Save SHA256 for tap update
+        run: |
+          echo "${{ steps.archive.outputs.sha256 }}  ${{ steps.archive.outputs.archive }}" \
+            >> sha256sums.txt
+
+      - name: Upload SHA256 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sha256-darwin-${{ matrix.goarch }}
+          path: sha256sums.txt
+          retention-days: 1
+
+  # ── 2. Create GitHub Release & attach assets ────────────────────────────────
+  release:
+    name: Create GitHub Release
+    needs: build-macos
+    runs-on: ubuntu-latest
+
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+
+    steps:
+      - name: Resolve version from tag
+        id: version
+        run: echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -lh artifacts/
+
+      - name: Create release and upload assets
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ steps.version.outputs.version }}
+          tag_name: ${{ github.ref_name }}
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}  # e.g. v1.0.0-beta.1
+          generate_release_notes: true
+          files: |
+            artifacts/*.tar.gz
+
+  # ── 3. Update Homebrew tap formula ──────────────────────────────────────────
+  update-tap:
+    name: Update Homebrew tap
+    needs: release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download SHA256 artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: sha256s
+          merge-multiple: true
+
+      - name: Read SHA256 values
+        id: shas
+        run: |
+          AMD64=$(grep "darwin-amd64" sha256s/sha256sums.txt | awk '{print $1}')
+          ARM64=$(grep "darwin-arm64" sha256s/sha256sums.txt | awk '{print $1}')
+          echo "amd64=${AMD64}" >> "$GITHUB_OUTPUT"
+          echo "arm64=${ARM64}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout Homebrew tap
+        uses: actions/checkout@v4
+        with:
+          repository: zebaqui/homebrew-notx
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: homebrew-tap
+
+      - name: Render formula
+        env:
+          VERSION: ${{ needs.release.outputs.version }}
+          SHA256_AMD64: ${{ steps.shas.outputs.amd64 }}
+          SHA256_ARM64: ${{ steps.shas.outputs.arm64 }}
+        run: |
+          VERSION_BARE="${VERSION#v}"   # strip leading "v"
+          cat > homebrew-tap/Formula/notx.rb << EOF
+          # This file is auto-generated by the notx release workflow.
+          # Do not edit it by hand — changes will be overwritten on the next release.
+          class Notx < Formula
+            desc "notx — lightweight event-streaming / notification engine"
+            homepage "https://github.com/zebaqui/notx-engine"
+            version "${VERSION_BARE}"
+            license "MIT"
+
+            on_macos do
+              if Hardware::CPU.arm?
+                url "https://github.com/zebaqui/notx-engine/releases/download/${VERSION}/notx-${VERSION}-darwin-arm64.tar.gz"
+                sha256 "${SHA256_ARM64}"
+              else
+                url "https://github.com/zebaqui/notx-engine/releases/download/${VERSION}/notx-${VERSION}-darwin-amd64.tar.gz"
+                sha256 "${SHA256_AMD64}"
+              end
+            end
+
+            def install
+              bin.install "notx-darwin-#{Hardware::CPU.arm? ? "arm64" : "amd64"}" => "notx"
+            end
+
+            test do
+              assert_match version.to_s, shell_output("#{bin}/notx version")
+            end
+          end
+          EOF
+
+      - name: Commit & push formula update
+        working-directory: homebrew-tap
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/notx.rb
+          git diff --cached --quiet && echo "No changes to commit" && exit 0
+          git commit -m "notx ${{ needs.release.outputs.version }}"
+          git push
