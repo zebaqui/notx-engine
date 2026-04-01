@@ -2,6 +2,27 @@
 
 A simple, in-memory consumer and parser for the **notx** event-sourced document format.
 
+## Installation
+
+The easiest way to install `notx` on macOS is via [Homebrew](https://brew.sh):
+
+```sh
+brew tap zebaqui/notx
+brew install notx
+```
+
+Or as a one-liner:
+
+```sh
+brew install zebaqui/notx/notx
+```
+
+Once installed, upgrade to the latest release at any time with:
+
+```sh
+brew upgrade notx
+```
+
 ## What is notx?
 
 **notx** is a plain-text format for storing documents with complete history. Instead of saving full copies of a document each time it changes, notx saves only the changes — line-by-line edits that can be replayed to reconstruct any version.

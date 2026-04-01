@@ -1,4 +1,4 @@
-package http
+package httpserver
 
 import (
 	"context"
@@ -7,7 +7,7 @@ import (
 	"net/http"
 
 	"github.com/zebaqui/notx-engine/core"
-	"github.com/zebaqui/notx-engine/internal/repo"
+	"github.com/zebaqui/notx-engine/repo"
 )
 
 // deviceIDHeader is the HTTP request header that clients must set to identify

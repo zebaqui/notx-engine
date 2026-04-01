@@ -14,7 +14,7 @@ import (
 
 	"golang.org/x/crypto/bcrypt"
 
-	"github.com/zebaqui/notx-engine/internal/repo"
+	"github.com/zebaqui/notx-engine/repo"
 )
 
 const secretPrefix = "NTXP-"

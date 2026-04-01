@@ -1,4 +1,4 @@
-package http
+package httpserver
 
 import (
 	"context"
@@ -23,8 +23,9 @@ import (
 
 	"github.com/zebaqui/notx-engine/core"
 	"github.com/zebaqui/notx-engine/internal/pairing"
-	"github.com/zebaqui/notx-engine/internal/repo"
-	"github.com/zebaqui/notx-engine/internal/server/config"
+	"github.com/zebaqui/notx-engine/repo"
+	"github.com/zebaqui/notx-engine/config"
+	notxpairing "github.com/zebaqui/notx-engine/pairing"
 	grpcsvc "github.com/zebaqui/notx-engine/internal/server/grpc"
 	pb "github.com/zebaqui/notx-engine/internal/server/proto"
 )
@@ -41,7 +42,7 @@ type Handler struct {
 	proj        repo.ProjectRepository
 	dev         repo.DeviceRepository
 	users       repo.UserRepository
-	pairing     *grpcsvc.PairingService
+	pairing     *notxpairing.PairingService
 	secretStore repo.PairingSecretStore
 	relaySvc    *grpcsvc.RelayServiceServer
 	log         *slog.Logger
@@ -55,7 +56,7 @@ type Handler struct {
 // the relevant endpoints will return 503 in that case.
 // relaySvc may be nil when the relay engine is not available; the relay
 // endpoints will return 503 in that case.
-func New(cfg *config.Config, r repo.NoteRepository, proj repo.ProjectRepository, dev repo.DeviceRepository, users repo.UserRepository, log *slog.Logger, pairingSvc *grpcsvc.PairingService, secretStore repo.PairingSecretStore, relaySvc *grpcsvc.RelayServiceServer) *Handler {
+func New(cfg *config.Config, r repo.NoteRepository, proj repo.ProjectRepository, dev repo.DeviceRepository, users repo.UserRepository, log *slog.Logger, pairingSvc *notxpairing.PairingService, secretStore repo.PairingSecretStore, relaySvc *grpcsvc.RelayServiceServer) *Handler {
 	h := &Handler{
 		cfg:         cfg,
 		repo:        r,

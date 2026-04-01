@@ -1,4 +1,4 @@
-package grpc
+package pairing
 
 import (
 	"context"
@@ -17,10 +17,10 @@ import (
 	"google.golang.org/grpc/status"
 	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
 
-	"github.com/zebaqui/notx-engine/core"
 	"github.com/zebaqui/notx-engine/ca"
-	"github.com/zebaqui/notx-engine/repo"
+	"github.com/zebaqui/notx-engine/core"
 	pb "github.com/zebaqui/notx-engine/internal/server/proto"
+	"github.com/zebaqui/notx-engine/repo"
 )
 
 // PairingService implements pb.ServerPairingServiceServer.

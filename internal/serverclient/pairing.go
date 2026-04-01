@@ -21,7 +21,7 @@ import (
 	"time"
 
 	"github.com/zebaqui/notx-engine/internal/grpcclient"
-	"github.com/zebaqui/notx-engine/internal/server/config"
+	"github.com/zebaqui/notx-engine/config"
 	pb "github.com/zebaqui/notx-engine/internal/server/proto"
 )
 

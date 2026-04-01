@@ -22,9 +22,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zebaqui/notx-engine/internal/repo/memory"
+	"github.com/zebaqui/notx-engine/repo/memory"
 	"github.com/zebaqui/notx-engine/internal/server"
-	"github.com/zebaqui/notx-engine/internal/server/config"
+	"github.com/zebaqui/notx-engine/config"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────

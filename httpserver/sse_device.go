@@ -1,4 +1,4 @@
-package http
+package httpserver
 
 import (
 	"encoding/json"
@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/zebaqui/notx-engine/core"
-	"github.com/zebaqui/notx-engine/internal/repo"
+	"github.com/zebaqui/notx-engine/repo"
 )
 
 // sseDeviceStatusInterval is how often the stream re-reads the device from the

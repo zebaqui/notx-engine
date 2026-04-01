@@ -11,7 +11,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/zebaqui/notx-engine/core"
-	"github.com/zebaqui/notx-engine/internal/repo"
+	"github.com/zebaqui/notx-engine/repo"
 	pb "github.com/zebaqui/notx-engine/internal/server/proto"
 )
 

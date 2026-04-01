@@ -16,14 +16,15 @@ import (
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/reflection"
 
+	"github.com/zebaqui/notx-engine/ca"
+	"github.com/zebaqui/notx-engine/config"
 	"github.com/zebaqui/notx-engine/core"
-	"github.com/zebaqui/notx-engine/internal/ca"
+	httpsvc "github.com/zebaqui/notx-engine/httpserver"
 	"github.com/zebaqui/notx-engine/internal/relay"
-	"github.com/zebaqui/notx-engine/internal/repo"
-	"github.com/zebaqui/notx-engine/internal/server/config"
 	grpcsvc "github.com/zebaqui/notx-engine/internal/server/grpc"
-	httpsvc "github.com/zebaqui/notx-engine/internal/server/http"
 	pb "github.com/zebaqui/notx-engine/internal/server/proto"
+	notxpairing "github.com/zebaqui/notx-engine/pairing"
+	"github.com/zebaqui/notx-engine/repo"
 )
 
 // Server is the top-level orchestrator. It owns the lifecycle of the HTTP
@@ -40,7 +41,7 @@ type Server struct {
 
 	httpHandler     *httpsvc.Handler
 	grpcServer      *googlegrpc.Server
-	pairingService  *grpcsvc.PairingService
+	pairingService  *notxpairing.PairingService
 	bootstrapServer *googlegrpc.Server
 }
 
@@ -107,7 +108,7 @@ func New(cfg *config.Config, r repo.NoteRepository, projRepo repo.ProjectReposit
 		}
 		log.Info("authority CA ready", "ca_dir", cfg.CADir())
 
-		pairingSvc := grpcsvc.NewPairingService(authority, srvRepo, secretStore, cfg.Pairing.CertTTL, log)
+		pairingSvc := notxpairing.NewPairingService(authority, srvRepo, secretStore, cfg.Pairing.CertTTL, log)
 		if err := pairingSvc.RebuildDenySet(context.Background()); err != nil {
 			return nil, fmt.Errorf("server: rebuild deny set: %w", err)
 		}
@@ -371,7 +372,7 @@ func (s *Server) initiateShutdown(ctx context.Context) {
 // gRPC server construction
 // ─────────────────────────────────────────────────────────────────────────────
 
-func buildGRPCServer(cfg *config.Config, r repo.NoteRepository, projRepo repo.ProjectRepository, devRepo repo.DeviceRepository, pairingSvc *grpcsvc.PairingService, relaySvc *grpcsvc.RelayServiceServer, log *slog.Logger) (*googlegrpc.Server, error) {
+func buildGRPCServer(cfg *config.Config, r repo.NoteRepository, projRepo repo.ProjectRepository, devRepo repo.DeviceRepository, pairingSvc *notxpairing.PairingService, relaySvc *grpcsvc.RelayServiceServer, log *slog.Logger) (*googlegrpc.Server, error) {
 	opts := []googlegrpc.ServerOption{
 		googlegrpc.UnaryInterceptor(loggingUnaryInterceptor(log)),
 		googlegrpc.StreamInterceptor(loggingStreamInterceptor(log)),
@@ -408,7 +409,7 @@ func buildGRPCServer(cfg *config.Config, r repo.NoteRepository, projRepo repo.Pr
 
 // buildBootstrapGRPCServer builds a TLS-only gRPC server for the bootstrap
 // pairing listener (port 50052). Client certificates are not required.
-func buildBootstrapGRPCServer(cfg *config.Config, pairingSvc *grpcsvc.PairingService, log *slog.Logger) (*googlegrpc.Server, error) {
+func buildBootstrapGRPCServer(cfg *config.Config, pairingSvc *notxpairing.PairingService, log *slog.Logger) (*googlegrpc.Server, error) {
 	opts := []googlegrpc.ServerOption{
 		googlegrpc.UnaryInterceptor(loggingUnaryInterceptor(log)),
 	}

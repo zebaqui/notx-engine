@@ -16,8 +16,8 @@ import (
 	"google.golang.org/grpc/reflection"
 
 	"github.com/zebaqui/notx-engine/internal/relay"
-	"github.com/zebaqui/notx-engine/internal/repo"
-	"github.com/zebaqui/notx-engine/internal/server/config"
+	"github.com/zebaqui/notx-engine/repo"
+	"github.com/zebaqui/notx-engine/config"
 	pb "github.com/zebaqui/notx-engine/internal/server/proto"
 
 	"time"

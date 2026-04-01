@@ -16,9 +16,9 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 
 	"github.com/zebaqui/notx-engine/core"
-	"github.com/zebaqui/notx-engine/internal/repo"
-	"github.com/zebaqui/notx-engine/internal/repo/file"
-	"github.com/zebaqui/notx-engine/internal/repo/memory"
+	"github.com/zebaqui/notx-engine/repo"
+	"github.com/zebaqui/notx-engine/repo/file"
+	"github.com/zebaqui/notx-engine/repo/memory"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────

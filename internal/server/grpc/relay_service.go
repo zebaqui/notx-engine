@@ -12,7 +12,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/zebaqui/notx-engine/internal/relay"
-	"github.com/zebaqui/notx-engine/internal/repo"
+	"github.com/zebaqui/notx-engine/repo"
 	pb "github.com/zebaqui/notx-engine/internal/server/proto"
 )
 

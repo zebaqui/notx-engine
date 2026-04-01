@@ -20,9 +20,9 @@ import (
 
 	"github.com/zebaqui/notx-engine/internal/clientconfig"
 	pairingsecret "github.com/zebaqui/notx-engine/internal/pairing"
-	"github.com/zebaqui/notx-engine/internal/repo/file"
+	"github.com/zebaqui/notx-engine/repo/file"
 	"github.com/zebaqui/notx-engine/internal/server"
-	"github.com/zebaqui/notx-engine/internal/server/config"
+	"github.com/zebaqui/notx-engine/config"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
