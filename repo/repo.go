@@ -188,6 +188,28 @@ type NoteRepository interface {
 	// Returns ErrNotFound if the note does not exist.
 	Events(ctx context.Context, noteURN string, fromSequence int) ([]*core.Event, error)
 
+	// UpdateEventWrappedKeys merges the provided wrappedKeys map into the
+	// WrappedKeys field of every event belonging to the given secure note.
+	// Keys present in wrappedKeys overwrite existing values; keys absent from
+	// wrappedKeys are left unchanged.
+	//
+	// This is the server-side half of the share-secure-note protocol: the
+	// client re-wraps the Content Encryption Key (CEK) for each recipient
+	// device and uploads the wrapped keys; the server stores them against the
+	// encrypted event blobs without ever seeing the plaintext CEK.
+	//
+	// Returns ErrNotFound if the note does not exist.
+	UpdateEventWrappedKeys(ctx context.Context, noteURN string, wrappedKeys map[string][]byte) (int, error)
+
+	// ReceiveSharedNote stores a note header and its full event stream that
+	// have been forwarded from a paired server. It is idempotent: if the note
+	// already exists the header is updated and any events with sequences higher
+	// than the current head are appended.
+	//
+	// This is used by the cross-server note-sharing flow: Server A pushes a
+	// note to Server B so that Client B (registered on Server B) can read it.
+	ReceiveSharedNote(ctx context.Context, note *core.Note, events []*core.Event) error
+
 	// ── Search ──────────────────────────────────────────────────────────────
 
 	// Search performs a full-text search over normal note content only.

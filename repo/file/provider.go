@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io/fs"
 	"os"
@@ -1750,6 +1752,204 @@ func (p *Provider) PruneExpired(ctx context.Context) error {
 		return fmt.Errorf("file provider: open secret store: %w", err)
 	}
 	return store.PruneExpired(ctx)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// NoteRepository — share / receive extensions
+// ─────────────────────────────────────────────────────────────────────────────
+
+// UpdateEventWrappedKeys merges the provided wrappedKeys map into the
+// WrappedKeys field of every event belonging to the given secure note.
+//
+// The file provider stores notes as .notx files; WrappedKeys is an in-memory
+// field on core.Event that is NOT persisted to the .notx format (which is a
+// plaintext line-delta format with no binary blob support). For the file
+// provider we therefore keep the wrapped keys in a sidecar JSON file at
+// <notesDir>/<sanitised-urn>.wrapped_keys.json so that they survive process
+// restarts without requiring changes to the .notx parser.
+//
+// The sidecar format is: map[deviceURN]map[string]base64EncodedKey where the
+// outer key is the device URN and the inner map is a single-entry map with
+// key "key" for forward-compatibility.
+func (p *Provider) UpdateEventWrappedKeys(ctx context.Context, noteURN string, wrappedKeys map[string][]byte) (int, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	// Verify the note exists.
+	existing, err := p.idx.Get(noteURN)
+	if err != nil {
+		return 0, fmt.Errorf("file provider: index get for wrapped keys: %w", err)
+	}
+	if existing == nil {
+		return 0, fmt.Errorf("%w: %s", repo.ErrNotFound, noteURN)
+	}
+
+	// Load the current sidecar (if any) and merge.
+	sidecarPath := p.wrappedKeysSidecarPath(noteURN)
+	current, err := loadWrappedKeysSidecar(sidecarPath)
+	if err != nil {
+		// Treat a missing sidecar as empty — first share for this note.
+		current = make(map[string][]byte)
+	}
+
+	for deviceURN, blob := range wrappedKeys {
+		current[deviceURN] = blob
+	}
+
+	if err := saveWrappedKeysSidecar(sidecarPath, current); err != nil {
+		return 0, fmt.Errorf("file provider: save wrapped keys sidecar: %w", err)
+	}
+
+	// Return the number of events in the note as the "events updated" count
+	// (the sidecar applies to all events, matching the memory provider behaviour).
+	notePath := p.noteFilePath(noteURN)
+	note, err := core.NewNoteFromFile(notePath)
+	if err != nil {
+		return 0, fmt.Errorf("file provider: parse note for wrapped keys count: %w", err)
+	}
+	return note.EventCount(), nil
+}
+
+// ReceiveSharedNote stores a note header and its full event stream forwarded
+// from a paired server. Idempotent: if the note already exists the header is
+// updated and only events with sequences beyond the current head are appended.
+func (p *Provider) ReceiveSharedNote(ctx context.Context, note *core.Note, events []*core.Event) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	noteURN := note.URN.String()
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	existing, err := p.idx.Get(noteURN)
+	if err != nil {
+		return fmt.Errorf("file provider: index get for receive shared note: %w", err)
+	}
+
+	notePath := p.noteFilePath(noteURN)
+
+	if existing == nil {
+		// Brand-new note on this server — write the stub, append all events,
+		// then re-parse and index the fully materialised note.
+		if err := p.writeNotxStub(note); err != nil {
+			return fmt.Errorf("file provider: write notx stub for received note: %w", err)
+		}
+
+		for _, ev := range events {
+			if err := p.writeEventToNotx(notePath, ev); err != nil {
+				return fmt.Errorf("file provider: write received event seq %d: %w", ev.Sequence, err)
+			}
+		}
+
+		// Parse the file we just wrote so indexNote can materialise content.
+		indexed, err := core.NewNoteFromFile(notePath)
+		if err != nil {
+			return fmt.Errorf("file provider: parse received note for indexing: %w", err)
+		}
+		if err := p.indexNote(indexed); err != nil {
+			return fmt.Errorf("file provider: index received note: %w", err)
+		}
+	} else {
+		// Note already exists — determine current head and append only new events.
+		currentNote, err := core.NewNoteFromFile(notePath)
+		if err != nil {
+			return fmt.Errorf("file provider: parse existing note for receive: %w", err)
+		}
+		currentHead := currentNote.HeadSequence()
+
+		for _, ev := range events {
+			if ev.Sequence <= currentHead {
+				continue
+			}
+			if err := p.writeEventToNotx(notePath, ev); err != nil {
+				return fmt.Errorf("file provider: append received event seq %d: %w", ev.Sequence, err)
+			}
+		}
+
+		// Re-parse and re-index to capture the updated head sequence and content.
+		updated, err := core.NewNoteFromFile(notePath)
+		if err != nil {
+			return fmt.Errorf("file provider: parse updated note for indexing: %w", err)
+		}
+		// Preserve mutable header fields forwarded from the sending server.
+		updated.Name = note.Name
+		updated.Deleted = note.Deleted
+		if err := p.indexNote(updated); err != nil {
+			return fmt.Errorf("file provider: re-index received note: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// wrappedKeysSidecarPath returns the path to the sidecar JSON file that stores
+// per-device wrapped CEKs for the given note URN.
+func (p *Provider) wrappedKeysSidecarPath(noteURN string) string {
+	return filepath.Join(p.notesDir, sanitiseURN(noteURN)+".wk.json")
+}
+
+// loadWrappedKeysSidecar reads and unmarshals the sidecar file. Returns an
+// empty map (not an error) when the file does not exist.
+func loadWrappedKeysSidecar(path string) (map[string][]byte, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return make(map[string][]byte), nil
+		}
+		return nil, fmt.Errorf("read wrapped keys sidecar: %w", err)
+	}
+
+	// Sidecar format: a flat JSON object mapping device URN → hex/base64 blob.
+	// We store raw bytes as base64 strings inside JSON.
+	var raw map[string]string
+	if err := unmarshalJSON(data, &raw); err != nil {
+		return nil, fmt.Errorf("parse wrapped keys sidecar: %w", err)
+	}
+
+	out := make(map[string][]byte, len(raw))
+	for k, v := range raw {
+		blob, err := base64.StdEncoding.DecodeString(v)
+		if err != nil {
+			// Store the raw string bytes as a fallback.
+			blob = []byte(v)
+		}
+		out[k] = blob
+	}
+	return out, nil
+}
+
+// saveWrappedKeysSidecar encodes the wrapped-keys map as JSON and writes it to
+// the sidecar file atomically (write to temp, rename).
+func saveWrappedKeysSidecar(path string, keys map[string][]byte) error {
+	raw := make(map[string]string, len(keys))
+	for k, v := range keys {
+		raw[k] = base64.StdEncoding.EncodeToString(v)
+	}
+	data, err := marshalJSON(raw)
+	if err != nil {
+		return fmt.Errorf("marshal wrapped keys: %w", err)
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return fmt.Errorf("write wrapped keys tmp: %w", err)
+	}
+	return os.Rename(tmp, path)
+}
+
+// unmarshalJSON and marshalJSON are thin wrappers so the sidecar helpers stay
+// readable without repeating the json package name at every call site.
+func unmarshalJSON(data []byte, v any) error {
+	return json.Unmarshal(data, v)
+}
+
+func marshalJSON(v any) ([]byte, error) {
+	return json.Marshal(v)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

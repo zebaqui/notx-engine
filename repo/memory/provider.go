@@ -8,7 +8,10 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/crypto/bcrypt"
+
 	"github.com/zebaqui/notx-engine/core"
+	pairing "github.com/zebaqui/notx-engine/internal/pairing"
 	"github.com/zebaqui/notx-engine/repo"
 )
 
@@ -254,6 +257,86 @@ func (p *Provider) AppendEvent(ctx context.Context, event *core.Event, opts repo
 	}
 
 	p.events[noteURN] = append(p.events[noteURN], event)
+	return nil
+}
+
+// UpdateEventWrappedKeys merges wrappedKeys into every event's WrappedKeys map
+// for the given secure note without decrypting anything.
+func (p *Provider) UpdateEventWrappedKeys(ctx context.Context, noteURN string, wrappedKeys map[string][]byte) (int, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if _, ok := p.notes[noteURN]; !ok {
+		return 0, fmt.Errorf("%w: %s", repo.ErrNotFound, noteURN)
+	}
+
+	count := 0
+	for _, ev := range p.events[noteURN] {
+		if ev.WrappedKeys == nil {
+			ev.WrappedKeys = make(map[string][]byte, len(wrappedKeys))
+		}
+		for deviceURN, key := range wrappedKeys {
+			ev.WrappedKeys[deviceURN] = key
+		}
+		count++
+	}
+	return count, nil
+}
+
+// ReceiveSharedNote stores a note header and its full event stream forwarded
+// from a paired server. Idempotent: if the note already exists the header is
+// updated and only new events (sequence > current head) are appended.
+func (p *Provider) ReceiveSharedNote(ctx context.Context, note *core.Note, events []*core.Event) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	noteURN := note.URN.String()
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if existing, ok := p.notes[noteURN]; ok {
+		// Update mutable header fields.
+		existing.Name = note.Name
+		existing.Deleted = note.Deleted
+		existing.UpdatedAt = note.UpdatedAt
+		if note.ProjectURN != nil {
+			urn := *note.ProjectURN
+			existing.ProjectURN = &urn
+		}
+		if note.FolderURN != nil {
+			urn := *note.FolderURN
+			existing.FolderURN = &urn
+		}
+		// Append only events that come after the current head.
+		currentHead := len(p.events[noteURN])
+		for _, ev := range events {
+			if ev.Sequence > currentHead {
+				if err := existing.ApplyEvent(ev); err != nil {
+					return fmt.Errorf("memory provider: receive shared note apply event seq %d: %w", ev.Sequence, err)
+				}
+				p.events[noteURN] = append(p.events[noteURN], ev)
+				currentHead = ev.Sequence
+			}
+		}
+		return nil
+	}
+
+	// Brand-new note on this server.
+	clone := cloneHeader(note)
+	p.notes[noteURN] = clone
+	p.events[noteURN] = make([]*core.Event, 0, len(events))
+	for _, ev := range events {
+		if err := clone.ApplyEvent(ev); err != nil {
+			return fmt.Errorf("memory provider: receive shared note replay seq %d: %w", ev.Sequence, err)
+		}
+		p.events[noteURN] = append(p.events[noteURN], ev)
+	}
 	return nil
 }
 
@@ -903,22 +986,35 @@ func (p *Provider) AddSecret(_ context.Context, s *repo.PairingSecret) error {
 }
 
 func (p *Provider) ConsumeSecret(_ context.Context, plaintext string) (*repo.PairingSecret, error) {
+	// Extract the ID from the token — O(1) map lookup instead of iterating all secrets.
+	id, ok := pairing.ExtractSecretID(plaintext)
+	if !ok {
+		return nil, fmt.Errorf("%w: malformed pairing secret token", repo.ErrNotFound)
+	}
+
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	_ = plaintext // memory store: accept any non-empty secret for test convenience
-	for _, s := range p.secrets {
-		if s.UsedAt != nil {
-			continue
-		}
-		now := timeNow()
-		if now.After(s.ExpiresAt) {
-			continue
-		}
-		s.UsedAt = &now
-		cp := *s
-		return &cp, nil
+
+	s, found := p.secrets[id]
+	if !found {
+		return nil, fmt.Errorf("%w: pairing secret not found", repo.ErrNotFound)
 	}
-	return nil, fmt.Errorf("%w: no valid pairing secret", repo.ErrNotFound)
+
+	now := timeNow()
+
+	if s.UsedAt != nil {
+		return nil, fmt.Errorf("%w: pairing secret already used", repo.ErrNotFound)
+	}
+	if now.After(s.ExpiresAt) {
+		return nil, fmt.Errorf("%w: pairing secret expired", repo.ErrNotFound)
+	}
+	if err := bcrypt.CompareHashAndPassword([]byte(s.HashBcrypt), []byte(plaintext)); err != nil {
+		return nil, fmt.Errorf("%w: pairing secret invalid", repo.ErrNotFound)
+	}
+
+	s.UsedAt = &now
+	cp := *s
+	return &cp, nil
 }
 
 func (p *Provider) PruneExpired(_ context.Context) error {
