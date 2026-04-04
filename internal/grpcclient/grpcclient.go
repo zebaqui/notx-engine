@@ -27,10 +27,12 @@
 package grpcclient
 
 import (
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"google.golang.org/grpc"
@@ -39,7 +41,7 @@ import (
 	"google.golang.org/grpc/keepalive"
 
 	"github.com/zebaqui/notx-engine/internal/clientconfig"
-	pb "github.com/zebaqui/notx-engine/internal/server/proto"
+	pb "github.com/zebaqui/notx-engine/proto"
 )
 
 // defaultDialTimeout is the maximum time allowed to establish a connection
@@ -142,6 +144,11 @@ func (c *Conn) Devices() pb.DeviceServiceClient {
 // Projects returns a client for ProjectService.
 func (c *Conn) Projects() pb.ProjectServiceClient {
 	return pb.NewProjectServiceClient(c.cc)
+}
+
+// Folders returns a client for FolderService.
+func (c *Conn) Folders() pb.FolderServiceClient {
+	return pb.NewFolderServiceClient(c.cc)
 }
 
 // Pairing returns a client for ServerPairingService.
@@ -289,10 +296,12 @@ func DialWithCA(addr string, caPool *x509.CertPool) (*Conn, error) {
 	return &Conn{cc: cc}, nil
 }
 
-// DialBootstrap creates a TLS-only (no client certificate) connection to the
-// pairing bootstrap listener (default port 50052). The server is verified
-// against caPool. Pass nil to use the system roots (or when the authority has
-// not been pinned yet — in that case callers should pin on the first response).
+// DialBootstrap creates a verified TLS connection to the pairing bootstrap
+// listener (default port 50052). The server certificate is verified against
+// caPool when provided, or against the system root CA pool when caPool is nil.
+//
+// InsecureSkipVerify is never set. Use DialBootstrapWithFingerprint when only
+// a SHA-256 fingerprint of the authority CA is known.
 //
 // This is the correct dial function for the RegisterServer RPC.
 func DialBootstrap(addr string, caPool *x509.CertPool) (*Conn, error) {
@@ -302,11 +311,65 @@ func DialBootstrap(addr string, caPool *x509.CertPool) (*Conn, error) {
 	if caPool != nil {
 		tlsCfg.RootCAs = caPool
 	}
-	// On first contact the CA cert is unknown; accept the server cert
-	// provisionally and pin it after receiving the ca_certificate field in
-	// the RegisterServerResponse. For subsequent connections caPool is set.
-	if caPool == nil {
-		tlsCfg.InsecureSkipVerify = true //nolint:gosec // intentional for bootstrap-only first contact
+	// When caPool is nil, system roots are used (tlsCfg.RootCAs == nil means system roots in Go).
+	cc, err := grpc.NewClient(addr,
+		grpc.WithTransportCredentials(credentials.NewTLS(tlsCfg)),
+		grpc.WithKeepaliveParams(keepaliveParams),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("grpcclient: dial bootstrap %s: %w", addr, err)
+	}
+	return &Conn{cc: cc}, nil
+}
+
+// DialBootstrapWithFingerprint dials addr with TLS and verifies that the SHA-256
+// fingerprint of the root CA in the server's verified certificate chain matches
+// expectedFingerprint (uppercase colon-separated hex, e.g. "AA:BB:CC:...").
+//
+// Use this when only the authority's CA fingerprint is known (via
+// PeerCAFingerprint in config), not the full CA PEM.
+func DialBootstrapWithFingerprint(addr, expectedFingerprint string) (*Conn, error) {
+	if expectedFingerprint == "" {
+		return nil, fmt.Errorf("grpcclient: expectedFingerprint must not be empty")
+	}
+	// Normalise: uppercase, trim spaces.
+	expectedFingerprint = strings.TrimSpace(strings.ToUpper(expectedFingerprint))
+
+	tlsCfg := &tls.Config{
+		MinVersion: tls.VersionTLS13,
+		// We use InsecureSkipVerify=true here ONLY to allow our custom
+		// VerifyConnection callback to do the full chain verification +
+		// fingerprint check. Standard chain verification is performed manually
+		// inside VerifyConnection.
+		InsecureSkipVerify: true, //nolint:gosec // see VerifyConnection below
+		VerifyConnection: func(cs tls.ConnectionState) error {
+			// Verify the chain against system roots first.
+			opts := x509.VerifyOptions{
+				DNSName:       cs.ServerName,
+				Intermediates: x509.NewCertPool(),
+			}
+			for _, cert := range cs.PeerCertificates[1:] {
+				opts.Intermediates.AddCert(cert)
+			}
+			chains, err := cs.PeerCertificates[0].Verify(opts)
+			if err != nil {
+				return fmt.Errorf("grpcclient: TLS chain verification failed: %w", err)
+			}
+			// Walk the verified chains looking for a root whose fingerprint matches.
+			for _, chain := range chains {
+				root := chain[len(chain)-1]
+				sum := sha256.Sum256(root.Raw)
+				pairs := make([]string, len(sum))
+				for i, b := range sum {
+					pairs[i] = fmt.Sprintf("%02X", b)
+				}
+				fp := strings.Join(pairs, ":")
+				if fp == expectedFingerprint {
+					return nil
+				}
+			}
+			return fmt.Errorf("grpcclient: CA fingerprint mismatch: expected %s", expectedFingerprint)
+		},
 	}
 
 	cc, err := grpc.NewClient(addr,
@@ -314,7 +377,7 @@ func DialBootstrap(addr string, caPool *x509.CertPool) (*Conn, error) {
 		grpc.WithKeepaliveParams(keepaliveParams),
 	)
 	if err != nil {
-		return nil, fmt.Errorf("grpcclient: dial bootstrap %s: %w", addr, err)
+		return nil, fmt.Errorf("grpcclient: dial bootstrap (fingerprint) %s: %w", addr, err)
 	}
 	return &Conn{cc: cc}, nil
 }

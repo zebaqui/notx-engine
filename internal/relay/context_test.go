@@ -5,7 +5,7 @@ import (
 )
 
 func TestExecutionContext_GetSet(t *testing.T) {
-	ec := NewExecutionContext("notx:device:test", map[string]string{"a": "1"})
+	ec := NewExecutionContext("urn:notx:device:test", map[string]string{"a": "1"})
 
 	v, ok := ec.Get("a")
 	if !ok || v != "1" {
@@ -20,7 +20,7 @@ func TestExecutionContext_GetSet(t *testing.T) {
 }
 
 func TestExecutionContext_UnknownKey(t *testing.T) {
-	ec := NewExecutionContext("notx:device:test", nil)
+	ec := NewExecutionContext("urn:notx:device:test", nil)
 	_, ok := ec.Get("missing")
 	if ok {
 		t.Error("expected ok=false for missing key")
@@ -28,7 +28,7 @@ func TestExecutionContext_UnknownKey(t *testing.T) {
 }
 
 func TestExecutionContext_SetAll(t *testing.T) {
-	ec := NewExecutionContext("notx:device:test", nil)
+	ec := NewExecutionContext("urn:notx:device:test", nil)
 	ec.SetAll(map[string]string{"x": "10", "y": "20"})
 
 	if v, _ := ec.Get("x"); v != "10" {
@@ -40,7 +40,7 @@ func TestExecutionContext_SetAll(t *testing.T) {
 }
 
 func TestExecutionContext_Snapshot_IsCopy(t *testing.T) {
-	ec := NewExecutionContext("notx:device:test", map[string]string{"a": "orig"})
+	ec := NewExecutionContext("urn:notx:device:test", map[string]string{"a": "orig"})
 	snap := ec.Snapshot()
 	snap["a"] = "mutated"
 
@@ -51,8 +51,8 @@ func TestExecutionContext_Snapshot_IsCopy(t *testing.T) {
 }
 
 func TestExecutionContext_DeviceURN(t *testing.T) {
-	ec := NewExecutionContext("notx:device:abc-123", nil)
-	if ec.DeviceURN != "notx:device:abc-123" {
+	ec := NewExecutionContext("urn:notx:device:abc-123", nil)
+	if ec.DeviceURN != "urn:notx:device:abc-123" {
 		t.Errorf("expected device URN to be set, got %q", ec.DeviceURN)
 	}
 }

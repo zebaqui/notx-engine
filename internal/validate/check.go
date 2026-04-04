@@ -79,7 +79,7 @@ func checkURNFormat(note *core.Note) CheckResult {
 	check := CheckResult{Name: "URN Format Valid"}
 
 	urnStr := note.URN.String()
-	if !strings.HasPrefix(urnStr, "notx:note:") {
+	if !strings.HasPrefix(urnStr, "urn:notx:note:") {
 		check.Error = fmt.Sprintf("invalid note URN format: %s", urnStr)
 		return check
 	}
@@ -163,7 +163,7 @@ func checkEventConsistency(note *core.Note) CheckResult {
 	history := note.History()
 	for _, entry := range history {
 		authorStr := entry.AuthorURN.String()
-		if !strings.HasPrefix(authorStr, "notx:usr:") {
+		if !strings.HasPrefix(authorStr, "urn:notx:usr:") {
 			check.Error = fmt.Sprintf("event %d has invalid author URN: %s", entry.Sequence, authorStr)
 			return check
 		}

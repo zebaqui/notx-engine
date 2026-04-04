@@ -19,11 +19,10 @@ import (
 	"github.com/zebaqui/notx-engine/ca"
 	"github.com/zebaqui/notx-engine/config"
 	"github.com/zebaqui/notx-engine/core"
-	httpsvc "github.com/zebaqui/notx-engine/httpserver"
+	httpsvc "github.com/zebaqui/notx-engine/http"
 	"github.com/zebaqui/notx-engine/internal/relay"
 	grpcsvc "github.com/zebaqui/notx-engine/internal/server/grpc"
-	pb "github.com/zebaqui/notx-engine/internal/server/proto"
-	notxpairing "github.com/zebaqui/notx-engine/pairing"
+	pb "github.com/zebaqui/notx-engine/proto"
 	"github.com/zebaqui/notx-engine/repo"
 )
 
@@ -41,7 +40,7 @@ type Server struct {
 
 	httpHandler     *httpsvc.Handler
 	grpcServer      *googlegrpc.Server
-	pairingService  *notxpairing.PairingService
+	pairingService  *grpcsvc.PairingServer
 	bootstrapServer *googlegrpc.Server
 }
 
@@ -95,12 +94,17 @@ func New(cfg *config.Config, r repo.NoteRepository, projRepo repo.ProjectReposit
 		relayPolicy.MaxRedirects = 5
 	}
 
-	relaySvc := grpcsvc.NewRelayServiceServer(devRepo, relayPolicy, log, nil)
+	relaySvc := grpcsvc.NewRelayServer(devRepo, relayPolicy, log, nil)
 
-	if cfg.EnableHTTP {
-		s.httpHandler = httpsvc.New(cfg, r, projRepo, devRepo, userRepo, log, s.pairingService, secretStore, relaySvc)
-	}
+	// ── Build gRPC service instances (shared by both HTTP and gRPC layers) ───
+	noteSvc := grpcsvc.NewNoteServer(r, cfg.DefaultPageSize, cfg.MaxPageSize)
+	projSvc := grpcsvc.NewProjectServer(projRepo, cfg.DefaultPageSize, cfg.MaxPageSize)
+	folderSvc := grpcsvc.NewFolderServer(projRepo, cfg.DefaultPageSize, cfg.MaxPageSize)
+	deviceSvc := grpcsvc.NewDeviceServer(devRepo)
+	deviceAdminSvc := grpcsvc.NewDeviceAdminServer(devRepo)
+	userSvc := grpcsvc.NewUserServer(userRepo, cfg.DefaultPageSize, cfg.MaxPageSize)
 
+	// ── Build pairing service before HTTP handler (HTTP handler needs it) ────
 	if cfg.Pairing.Enabled {
 		authority, err := ca.LoadOrGenerate(cfg.CADir())
 		if err != nil {
@@ -108,9 +112,24 @@ func New(cfg *config.Config, r repo.NoteRepository, projRepo repo.ProjectReposit
 		}
 		log.Info("authority CA ready", "ca_dir", cfg.CADir())
 
-		pairingSvc := notxpairing.NewPairingService(authority, srvRepo, secretStore, cfg.Pairing.CertTTL, log)
+		pairingSvc := grpcsvc.NewPairingServer(authority, cfg, srvRepo, secretStore, cfg.Pairing.CertTTL, cfg.Pairing.SecretTTL, log)
 		if err := pairingSvc.RebuildDenySet(context.Background()); err != nil {
 			return nil, fmt.Errorf("server: rebuild deny set: %w", err)
+		}
+
+		// Start background deny-set refresh to bound revocation propagation window.
+		if cfg.Pairing.DenySetRefreshInterval > 0 {
+			go func() {
+				ticker := time.NewTicker(cfg.Pairing.DenySetRefreshInterval)
+				defer ticker.Stop()
+				for range ticker.C {
+					if err := pairingSvc.RebuildDenySet(context.Background()); err != nil {
+						log.Warn("deny_set_refresh_failed", "error", err)
+					} else {
+						log.Debug("deny_set_refreshed", "event", "deny_set_refreshed")
+					}
+				}
+			}()
 		}
 
 		s.pairingService = pairingSvc
@@ -123,8 +142,24 @@ func New(cfg *config.Config, r repo.NoteRepository, projRepo repo.ProjectReposit
 		s.bootstrapServer = bootstrapSrv
 	}
 
+	if cfg.EnableHTTP {
+		s.httpHandler = httpsvc.New(
+			cfg,
+			noteSvc,
+			projSvc,
+			folderSvc,
+			deviceSvc,
+			deviceAdminSvc,
+			userSvc,
+			log,
+			s.pairingService,
+			secretStore,
+			relaySvc,
+		)
+	}
+
 	if cfg.EnableGRPC {
-		grpcSrv, err := buildGRPCServer(cfg, r, projRepo, devRepo, s.pairingService, relaySvc, log)
+		grpcSrv, err := buildGRPCServer(cfg, noteSvc, projSvc, folderSvc, deviceSvc, deviceAdminSvc, userSvc, s.pairingService, relaySvc, log)
 		if err != nil {
 			return nil, fmt.Errorf("server: build gRPC server: %w", err)
 		}
@@ -232,6 +267,13 @@ func (s *Server) RunWithContext(ctx context.Context) error {
 func (s *Server) run(ctx context.Context) error {
 	errCh := make(chan error, 3) // at most three servers (http, grpc, bootstrap)
 	var wg sync.WaitGroup
+
+	// ── Startup summary ──────────────────────────────────────────────────────
+	logAttrs := []any{"device_urn", s.cfg.Admin.DeviceURN}
+	if s.pairingService != nil {
+		logAttrs = append(logAttrs, "server_urn", s.pairingService.URN())
+	}
+	s.log.Info("notx engine ready", logAttrs...)
 
 	// ── Start HTTP ───────────────────────────────────────────────────────────
 	if s.httpHandler != nil {
@@ -372,7 +414,18 @@ func (s *Server) initiateShutdown(ctx context.Context) {
 // gRPC server construction
 // ─────────────────────────────────────────────────────────────────────────────
 
-func buildGRPCServer(cfg *config.Config, r repo.NoteRepository, projRepo repo.ProjectRepository, devRepo repo.DeviceRepository, pairingSvc *notxpairing.PairingService, relaySvc *grpcsvc.RelayServiceServer, log *slog.Logger) (*googlegrpc.Server, error) {
+func buildGRPCServer(
+	cfg *config.Config,
+	noteSvc *grpcsvc.NoteServer,
+	projSvc *grpcsvc.ProjectServer,
+	folderSvc *grpcsvc.FolderServer,
+	deviceSvc *grpcsvc.DeviceServer,
+	deviceAdminSvc *grpcsvc.DeviceAdminServer,
+	userSvc *grpcsvc.UserServer,
+	pairingSvc *grpcsvc.PairingServer,
+	relaySvc *grpcsvc.RelayServer,
+	log *slog.Logger,
+) (*googlegrpc.Server, error) {
 	opts := []googlegrpc.ServerOption{
 		googlegrpc.UnaryInterceptor(loggingUnaryInterceptor(log)),
 		googlegrpc.StreamInterceptor(loggingStreamInterceptor(log)),
@@ -391,14 +444,18 @@ func buildGRPCServer(cfg *config.Config, r repo.NoteRepository, projRepo repo.Pr
 
 	srv := googlegrpc.NewServer(opts...)
 
-	// Register services.
-	pb.RegisterNoteServiceServer(srv, grpcsvc.NewNoteServiceServer(r, cfg.DefaultPageSize, cfg.MaxPageSize))
-	pb.RegisterDeviceServiceServer(srv, grpcsvc.NewDeviceServiceServer(devRepo))
-	pb.RegisterProjectServiceServer(srv, grpcsvc.NewProjectServiceServer(projRepo, cfg.DefaultPageSize, cfg.MaxPageSize))
+	// Register the shared service instances.
+	pb.RegisterNoteServiceServer(srv, noteSvc)
+	pb.RegisterDeviceServiceServer(srv, deviceSvc)
+	pb.RegisterDeviceAdminServiceServer(srv, deviceAdminSvc)
+	pb.RegisterProjectServiceServer(srv, projSvc)
+	pb.RegisterFolderServiceServer(srv, folderSvc)
+
+	pb.RegisterUserServiceServer(srv, userSvc)
 	pb.RegisterRelayServiceServer(srv, relaySvc)
 
 	if pairingSvc != nil {
-		pb.RegisterServerPairingServiceServer(srv, pairingSvc)
+		pb.RegisterServerPairingServiceServer(srv, pairingSvc.PrimaryService())
 	}
 
 	// Enable server reflection so grpcurl and other tools work out of the box.
@@ -409,7 +466,7 @@ func buildGRPCServer(cfg *config.Config, r repo.NoteRepository, projRepo repo.Pr
 
 // buildBootstrapGRPCServer builds a TLS-only gRPC server for the bootstrap
 // pairing listener (port 50052). Client certificates are not required.
-func buildBootstrapGRPCServer(cfg *config.Config, pairingSvc *notxpairing.PairingService, log *slog.Logger) (*googlegrpc.Server, error) {
+func buildBootstrapGRPCServer(cfg *config.Config, pairingSvc *grpcsvc.PairingServer, log *slog.Logger) (*googlegrpc.Server, error) {
 	opts := []googlegrpc.ServerOption{
 		googlegrpc.UnaryInterceptor(loggingUnaryInterceptor(log)),
 	}
@@ -423,7 +480,7 @@ func buildBootstrapGRPCServer(cfg *config.Config, pairingSvc *notxpairing.Pairin
 	}
 
 	srv := googlegrpc.NewServer(opts...)
-	pb.RegisterServerPairingServiceServer(srv, pairingSvc)
+	pb.RegisterServerPairingServiceServer(srv, pairingSvc.BootstrapService())
 	reflection.Register(srv)
 	return srv, nil
 }

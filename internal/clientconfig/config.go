@@ -7,7 +7,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/google/uuid"
+	"github.com/zebaqui/notx-engine/core"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -207,8 +207,8 @@ func Default() *Config {
 //	notx:device:<uuidv4>
 //	notx:usr:<uuidv4>
 func generateAdminURNs() (deviceURN, ownerURN string) {
-	deviceURN = "notx:device:" + uuid.New().String()
-	ownerURN = "notx:usr:" + uuid.New().String()
+	deviceURN = core.NewURN(core.ObjectTypeDevice).String()
+	ownerURN = core.NewURN(core.ObjectTypeUser).String()
 	return deviceURN, ownerURN
 }
 
