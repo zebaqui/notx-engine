@@ -10,12 +10,14 @@ import {
   Shield,
   CheckCircle2,
   Clock,
+  Link2,
 } from "lucide-react";
 import {
   fetchServers,
   revokeServer,
   fetchCACertificate,
   createPairingSecret,
+  pairWithServer,
 } from "../api/client";
 import type { ServerInfo, PairingSecret } from "../api/types";
 import axios from "axios";
@@ -506,6 +508,271 @@ function GenerateSecretModal({ onClose }: { onClose: () => void }) {
 
 // ─── CA Certificate panel ─────────────────────────────────────────────────────
 
+// ─── PairWithServerModal ──────────────────────────────────────────────────────
+
+function PairWithServerModal({ onClose }: { onClose: () => void }) {
+  const [url, setUrl] = useState("");
+  const [secret, setSecret] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [success, setSuccess] = useState<{
+    server_urn: string;
+    expires_at: string;
+  } | null>(null);
+  const qc = useQueryClient();
+
+  const pairMut = useMutation({
+    mutationFn: () =>
+      pairWithServer({ url: url.trim(), secret: secret.trim() }),
+    onSuccess: (data) => {
+      setSuccess({ server_urn: data.server_urn, expires_at: data.expires_at });
+      setError(null);
+      qc.invalidateQueries({ queryKey: ["servers"] });
+    },
+    onError: (err: unknown) => {
+      if (axios.isAxiosError(err)) {
+        setError(err.response?.data?.error ?? err.message);
+      } else {
+        setError(String(err));
+      }
+    },
+  });
+
+  const overlayStyle: React.CSSProperties = {
+    position: "fixed",
+    inset: 0,
+    background: "rgba(0,0,0,0.55)",
+    zIndex: 50,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+  };
+
+  const boxStyle: React.CSSProperties = {
+    background: "var(--bg-surface)",
+    border: "1px solid var(--border)",
+    borderRadius: "var(--radius-lg)",
+    padding: "28px 28px 24px",
+    width: 440,
+    display: "flex",
+    flexDirection: "column",
+    gap: 18,
+  };
+
+  const fieldStyle: React.CSSProperties = {
+    display: "flex",
+    flexDirection: "column",
+    gap: 6,
+  };
+
+  const labelStyle: React.CSSProperties = {
+    fontSize: 11,
+    fontWeight: 600,
+    textTransform: "uppercase",
+    letterSpacing: "0.06em",
+    color: "var(--text-muted)",
+  };
+
+  return (
+    <div style={overlayStyle} onClick={onClose}>
+      <div style={boxStyle} onClick={(e) => e.stopPropagation()}>
+        {/* Header */}
+        <div>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <Link2
+              size={16}
+              style={{ color: "var(--accent)", flexShrink: 0 }}
+            />
+            <span
+              style={{
+                fontWeight: 600,
+                fontSize: 15,
+                color: "var(--text-primary)",
+              }}
+            >
+              Pair with a Server
+            </span>
+          </div>
+          <div
+            style={{
+              fontSize: 13,
+              color: "var(--text-muted)",
+              marginTop: 6,
+              lineHeight: 1.5,
+            }}
+          >
+            Enter the remote authority's bootstrap address and the pairing
+            secret it generated. This server will register itself with the
+            remote authority.
+          </div>
+        </div>
+
+        {/* Success state */}
+        {success ? (
+          <div>
+            <div
+              style={{
+                background: "rgba(34,197,94,0.08)",
+                border: "1px solid rgba(34,197,94,0.3)",
+                borderRadius: "var(--radius)",
+                padding: "14px 16px",
+                display: "flex",
+                alignItems: "flex-start",
+                gap: 10,
+              }}
+            >
+              <CheckCircle2
+                size={16}
+                style={{ color: "#22c55e", flexShrink: 0, marginTop: 1 }}
+              />
+              <div>
+                <div
+                  style={{
+                    fontWeight: 600,
+                    fontSize: 13,
+                    color: "var(--text-primary)",
+                    marginBottom: 4,
+                  }}
+                >
+                  Successfully paired!
+                </div>
+                <div
+                  style={{
+                    fontSize: 12,
+                    color: "var(--text-secondary)",
+                    lineHeight: 1.5,
+                  }}
+                >
+                  <span style={{ color: "var(--text-muted)" }}>URN: </span>
+                  <span style={{ fontFamily: "var(--font-mono)" }}>
+                    {success.server_urn}
+                  </span>
+                </div>
+                <div
+                  style={{
+                    fontSize: 12,
+                    color: "var(--text-secondary)",
+                    marginTop: 2,
+                  }}
+                >
+                  <span style={{ color: "var(--text-muted)" }}>
+                    Cert expires:{" "}
+                  </span>
+                  {new Date(success.expires_at).toLocaleDateString()}
+                </div>
+              </div>
+            </div>
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "flex-end",
+                marginTop: 16,
+              }}
+            >
+              <button className="btn btn-primary" onClick={onClose}>
+                Done
+              </button>
+            </div>
+          </div>
+        ) : (
+          <>
+            {/* URL field */}
+            <div style={fieldStyle}>
+              <label style={labelStyle}>Authority URL</label>
+              <input
+                className="input"
+                type="text"
+                placeholder="remote-host:50052"
+                value={url}
+                onChange={(e) => setUrl(e.target.value)}
+                disabled={pairMut.isPending}
+                style={{ fontFamily: "var(--font-mono)", fontSize: 13 }}
+              />
+              <div style={{ fontSize: 11, color: "var(--text-muted)" }}>
+                The bootstrap gRPC address of the remote authority (default port
+                50052).
+              </div>
+            </div>
+
+            {/* Secret field */}
+            <div style={fieldStyle}>
+              <label style={labelStyle}>Pairing Secret</label>
+              <input
+                className="input"
+                type="password"
+                placeholder="NTXP-..."
+                value={secret}
+                onChange={(e) => setSecret(e.target.value)}
+                disabled={pairMut.isPending}
+                style={{ fontFamily: "var(--font-mono)", fontSize: 13 }}
+              />
+              <div style={{ fontSize: 11, color: "var(--text-muted)" }}>
+                The one-time pairing secret generated on the remote authority's
+                admin panel.
+              </div>
+            </div>
+
+            {/* Error banner */}
+            {error && (
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "flex-start",
+                  gap: 8,
+                  background: "rgba(239,68,68,0.08)",
+                  border: "1px solid rgba(239,68,68,0.3)",
+                  borderRadius: "var(--radius)",
+                  padding: "10px 14px",
+                  fontSize: 13,
+                  color: "var(--red)",
+                }}
+              >
+                <AlertCircle
+                  size={14}
+                  style={{ flexShrink: 0, marginTop: 1 }}
+                />
+                {error}
+              </div>
+            )}
+
+            {/* Actions */}
+            <div
+              style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}
+            >
+              <button
+                className="btn btn-ghost"
+                onClick={onClose}
+                disabled={pairMut.isPending}
+              >
+                Cancel
+              </button>
+              <button
+                className="btn btn-primary"
+                onClick={() => pairMut.mutate()}
+                disabled={pairMut.isPending || !url.trim() || !secret.trim()}
+              >
+                {pairMut.isPending ? (
+                  <>
+                    <div
+                      className="spinner"
+                      style={{ width: 13, height: 13 }}
+                    />
+                    Pairing…
+                  </>
+                ) : (
+                  <>
+                    <Link2 size={13} />
+                    Pair
+                  </>
+                )}
+              </button>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function CACertPanel() {
   const [copied, setCopied] = useState(false);
 
@@ -631,6 +898,7 @@ export default function ServersPage() {
   const [includeRevoked, setIncludeRevoked] = useState(false);
   const [revoking, setRevoking] = useState<ServerInfo | null>(null);
   const [showGenerateSecret, setShowGenerateSecret] = useState(false);
+  const [showPairWithServer, setShowPairWithServer] = useState(false);
   const [hoveredRow, setHoveredRow] = useState<string | null>(null);
 
   // ── Queries ───────────────────────────────────────────────────────────────
@@ -678,6 +946,14 @@ export default function ServersPage() {
           </div>
         </div>
         <div style={{ display: "flex", gap: 8 }}>
+          <button
+            className="btn btn-ghost"
+            onClick={() => setShowPairWithServer(true)}
+            disabled={isPairingOff}
+          >
+            <Link2 size={14} />
+            Pair with Server
+          </button>
           <button
             className="btn btn-primary"
             onClick={() => setShowGenerateSecret(true)}
@@ -1084,6 +1360,11 @@ export default function ServersPage() {
       {/* ── Generate secret modal ─────────────────────────────────────────── */}
       {showGenerateSecret && (
         <GenerateSecretModal onClose={() => setShowGenerateSecret(false)} />
+      )}
+
+      {/* ── Pair with server modal ────────────────────────────────────────── */}
+      {showPairWithServer && (
+        <PairWithServerModal onClose={() => setShowPairWithServer(false)} />
       )}
     </div>
   );

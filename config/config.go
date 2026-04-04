@@ -44,13 +44,13 @@ type AdminConfig struct {
 	// When AdminPassphraseHash is set this field is ignored — admin devices
 	// must register themselves via POST /v1/devices with a matching passphrase.
 	//
-	// Default: "notx:device:00000000-0000-0000-0000-000000000000"
+	// Default: "urn:notx:device:00000000-0000-0000-0000-000000000000"
 	DeviceURN string
 
 	// OwnerURN is the user URN associated with the bootstrapped admin device
 	// (local-mode only).
 	//
-	// Default: "notx:usr:00000000-0000-0000-0000-000000000000"
+	// Default: "urn:notx:usr:00000000-0000-0000-0000-000000000000"
 	OwnerURN string
 
 	// AdminPassphraseHash is a bcrypt hash of the admin registration
@@ -138,6 +138,25 @@ type ServerPairingConfig struct {
 
 	// PeerCertDir is the directory where this server's client cert and key are stored.
 	PeerCertDir string
+
+	// PeerCAFile is the path to the PEM-encoded CA certificate of the authority
+	// this server is pairing with. When set, the bootstrap dial verifies the
+	// authority's TLS certificate against this CA instead of using
+	// InsecureSkipVerify. Either PeerCAFile or PeerCAFingerprint must be set
+	// when PeerAuthority is configured.
+	PeerCAFile string
+
+	// PeerCAFingerprint is the SHA-256 fingerprint (hex, colon-separated,
+	// uppercase) of the authority CA certificate. Used when only the fingerprint
+	// is known, not the full PEM. Either field may be set; both are checked.
+	// Format: "AA:BB:CC:DD:..." (64 hex chars separated by 63 colons = 191 chars).
+	PeerCAFingerprint string
+
+	// DenySetRefreshInterval is how often the in-memory revocation deny-set is
+	// rebuilt from the repository. This bounds the revocation propagation window
+	// in multi-instance deployments.
+	// Default: 5m.
+	DenySetRefreshInterval time.Duration
 }
 
 // Config holds all runtime configuration for the notx server.
@@ -231,11 +250,11 @@ type Config struct {
 // DefaultAdminDeviceURN is the well-known URN reserved for the server's
 // built-in admin device. All-zero UUID makes it visually distinct and
 // impossible to collide with any client-generated UUIDv4/v7.
-const DefaultAdminDeviceURN = "notx:device:00000000-0000-0000-0000-000000000000"
+const DefaultAdminDeviceURN = "urn:notx:device:00000000-0000-0000-0000-000000000000"
 
 // DefaultAdminOwnerURN is the well-known URN reserved for the admin user
 // that owns the built-in admin device.
-const DefaultAdminOwnerURN = "notx:usr:00000000-0000-0000-0000-000000000000"
+const DefaultAdminOwnerURN = "urn:notx:usr:00000000-0000-0000-0000-000000000000"
 
 // Default returns a Config populated with all production-safe defaults.
 // Callers should start from Default() and override only what they need.
@@ -259,12 +278,13 @@ func Default() *Config {
 			OwnerURN:  DefaultAdminOwnerURN,
 		},
 		Pairing: ServerPairingConfig{
-			Enabled:              false,
-			BootstrapPort:        50052,
-			CertTTL:              720 * time.Hour,
-			SecretTTL:            15 * time.Minute,
-			RenewalCheckInterval: 6 * time.Hour,
-			RenewalThreshold:     168 * time.Hour,
+			Enabled:                false,
+			BootstrapPort:          50052,
+			CertTTL:                8760 * time.Hour, // 1 year
+			SecretTTL:              24 * time.Hour,   // 24h
+			RenewalCheckInterval:   6 * time.Hour,
+			RenewalThreshold:       720 * time.Hour, // 30 days
+			DenySetRefreshInterval: 5 * time.Minute,
 		},
 		Relay: RelayPolicyConfig{
 			AllowLocalhost:       false,
@@ -356,6 +376,18 @@ func (c *Config) Validate() error {
 	}
 	if c.TLSCAFile != "" && !c.TLSEnabled() {
 		return newConfigError("tls-ca-file requires tls-cert-file and tls-key-file to be set")
+	}
+	// Pairing config validation.
+	if c.Pairing.Enabled {
+		if c.Pairing.SecretTTL > 7*24*time.Hour {
+			return newConfigError("pairing secret-ttl must not exceed 7 days")
+		}
+		if c.Pairing.PeerAuthority != "" &&
+			c.Pairing.PeerCAFile == "" &&
+			c.Pairing.PeerCAFingerprint == "" {
+			return newConfigError(
+				"pairing peer-ca-file or peer-ca-fingerprint is required when peer-authority is set")
+		}
 	}
 	return nil
 }

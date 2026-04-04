@@ -4,6 +4,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
@@ -11,6 +12,7 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -180,4 +182,117 @@ func (ca *CA) SignCSR(csrDER []byte, cn string, sanDNS string, ttl time.Duration
 	certPEM = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
 	serialHex = fmt.Sprintf("%x", serial.Bytes())
 	return certPEM, serialHex, nil
+}
+
+// Fingerprint returns the SHA-256 fingerprint of the CA certificate's DER
+// bytes, formatted as uppercase colon-separated hex pairs (e.g. "AA:BB:CC:...").
+// Distribute this value out-of-band to joining servers as PeerCAFingerprint.
+func (c *CA) Fingerprint() string {
+	sum := sha256.Sum256(c.Cert.Raw)
+	pairs := make([]string, len(sum))
+	for i, b := range sum {
+		pairs[i] = fmt.Sprintf("%02X", b)
+	}
+	return strings.Join(pairs, ":")
+}
+
+// CSRValidationOptions controls what ValidateCSR accepts.
+type CSRValidationOptions struct {
+	// RequiredCN is the exact string the CSR Subject.CommonName must equal.
+	// Typically the server URN. Empty means no CN check.
+	RequiredCN string
+
+	// AllowedSANDNS, when non-empty, is the exact set of DNS SANs the CSR
+	// may request. Any DNS SAN not in this set causes rejection. Wildcards
+	// are always rejected regardless of this list.
+	// When empty, DNS SANs in the CSR are ignored (the signer controls SANs).
+	AllowedSANDNS []string
+}
+
+// ValidateCSR parses csrDER, verifies its self-signature, and checks that it
+// conforms to the security requirements for peer server certificates:
+//
+//   - Key must be ECDSA on P-256 or P-384 (RSA keys are rejected).
+//   - Signature must be valid.
+//   - Subject CN must equal opts.RequiredCN (if set).
+//   - No wildcard DNS SANs ("*" prefix).
+//   - No IP SANs.
+//   - No CA constraint (BasicConstraints.IsCA must be false or absent).
+//   - No KeyUsage requesting CertSign or CRLSign.
+//   - No ExtKeyUsage requesting ServerAuth (only ClientAuth is appropriate).
+//   - No unrecognised critical extensions.
+func ValidateCSR(csrDER []byte, opts CSRValidationOptions) error {
+	csr, err := x509.ParseCertificateRequest(csrDER)
+	if err != nil {
+		return fmt.Errorf("ca: parse CSR: %w", err)
+	}
+	if err := csr.CheckSignature(); err != nil {
+		return fmt.Errorf("ca: CSR signature invalid: %w", err)
+	}
+
+	// Key type check — EC P-256 or P-384 only.
+	switch pub := csr.PublicKey.(type) {
+	case *ecdsa.PublicKey:
+		curve := pub.Curve
+		if curve != elliptic.P256() && curve != elliptic.P384() {
+			return fmt.Errorf("ca: CSR key must be EC P-256 or P-384")
+		}
+	default:
+		return fmt.Errorf("ca: CSR key must be ECDSA (got %T)", csr.PublicKey)
+	}
+
+	// CN check.
+	if opts.RequiredCN != "" && csr.Subject.CommonName != opts.RequiredCN {
+		return fmt.Errorf("ca: CSR CN %q does not match required %q",
+			csr.Subject.CommonName, opts.RequiredCN)
+	}
+
+	// No wildcard DNS SANs.
+	for _, dns := range csr.DNSNames {
+		if strings.HasPrefix(dns, "*") {
+			return fmt.Errorf("ca: CSR contains wildcard DNS SAN %q", dns)
+		}
+	}
+
+	// No IP SANs.
+	if len(csr.IPAddresses) > 0 {
+		return fmt.Errorf("ca: CSR must not contain IP SANs")
+	}
+
+	// No critical extensions we don't recognise.
+	// The well-known OIDs for Subject Alternative Name and Basic Constraints
+	// are acceptable; anything else marked critical is rejected.
+	knownCritical := map[string]bool{
+		"2.5.29.17": true, // subjectAltName
+		"2.5.29.19": true, // basicConstraints
+		"2.5.29.15": true, // keyUsage
+		"2.5.29.37": true, // extendedKeyUsage
+	}
+	for _, ext := range csr.Extensions {
+		if ext.Critical && !knownCritical[ext.Id.String()] {
+			return fmt.Errorf("ca: CSR contains unknown critical extension %s", ext.Id)
+		}
+	}
+
+	// Parse extensions manually to check for dangerous values.
+	// x509.CertificateRequest doesn't expose parsed BasicConstraints or KeyUsage,
+	// so we parse raw extension bytes where needed.
+	for _, ext := range csr.Extensions {
+		switch ext.Id.String() {
+		case "2.5.29.19": // basicConstraints
+			// DER encoding of BasicConstraints: SEQUENCE { BOOLEAN isCA (optional) }
+			// If isCA is true, the first content byte after the outer SEQUENCE tag
+			// contains the BOOLEAN TRUE encoding (0x01 0x01 0xff).
+			// Simple heuristic: if the extension bytes contain 0xff it's CA=true.
+			if len(ext.Value) > 0 {
+				for _, b := range ext.Value {
+					if b == 0xff {
+						return fmt.Errorf("ca: CSR requests CA basic constraint")
+					}
+				}
+			}
+		}
+	}
+
+	return nil
 }

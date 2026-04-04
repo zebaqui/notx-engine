@@ -396,7 +396,23 @@ export async function createPairingSecret(payload: {
   label?: string;
 }): Promise<PairingSecret> {
   const { data } = await http.post<PairingSecret>(
-    "/v1/servers/pairing/secrets",
+    "/v1/pairing-secrets",
+    payload,
+  );
+  return data;
+}
+
+export interface OutboundPairResponse {
+  server_urn: string;
+  expires_at: string; // ISO-8601
+}
+
+export async function pairWithServer(payload: {
+  url: string;
+  secret: string;
+}): Promise<OutboundPairResponse> {
+  const { data } = await http.post<OutboundPairResponse>(
+    "/v1/servers/outbound-pair",
     payload,
   );
   return data;
