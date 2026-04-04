@@ -2,7 +2,7 @@
 // versions:
 // - protoc-gen-go-grpc v1.3.0
 // - protoc             v3.20.3
-// source: notx.proto
+// source: note.proto
 
 package notxpb
 
@@ -19,14 +19,17 @@ import (
 const _ = grpc.SupportPackageIsVersion7
 
 const (
-	NoteService_GetNote_FullMethodName         = "/notx.v1.NoteService/GetNote"
-	NoteService_ListNotes_FullMethodName       = "/notx.v1.NoteService/ListNotes"
-	NoteService_CreateNote_FullMethodName      = "/notx.v1.NoteService/CreateNote"
-	NoteService_DeleteNote_FullMethodName      = "/notx.v1.NoteService/DeleteNote"
-	NoteService_AppendEvent_FullMethodName     = "/notx.v1.NoteService/AppendEvent"
-	NoteService_StreamEvents_FullMethodName    = "/notx.v1.NoteService/StreamEvents"
-	NoteService_SearchNotes_FullMethodName     = "/notx.v1.NoteService/SearchNotes"
-	NoteService_ShareSecureNote_FullMethodName = "/notx.v1.NoteService/ShareSecureNote"
+	NoteService_GetNote_FullMethodName           = "/notx.v1.NoteService/GetNote"
+	NoteService_ListNotes_FullMethodName         = "/notx.v1.NoteService/ListNotes"
+	NoteService_CreateNote_FullMethodName        = "/notx.v1.NoteService/CreateNote"
+	NoteService_UpdateNote_FullMethodName        = "/notx.v1.NoteService/UpdateNote"
+	NoteService_DeleteNote_FullMethodName        = "/notx.v1.NoteService/DeleteNote"
+	NoteService_AppendEvent_FullMethodName       = "/notx.v1.NoteService/AppendEvent"
+	NoteService_StreamEvents_FullMethodName      = "/notx.v1.NoteService/StreamEvents"
+	NoteService_SearchNotes_FullMethodName       = "/notx.v1.NoteService/SearchNotes"
+	NoteService_ReplaceContent_FullMethodName    = "/notx.v1.NoteService/ReplaceContent"
+	NoteService_ShareSecureNote_FullMethodName   = "/notx.v1.NoteService/ShareSecureNote"
+	NoteService_ReceiveSharedNote_FullMethodName = "/notx.v1.NoteService/ReceiveSharedNote"
 )
 
 // NoteServiceClient is the client API for NoteService service.
@@ -39,6 +42,9 @@ type NoteServiceClient interface {
 	ListNotes(ctx context.Context, in *ListNotesRequest, opts ...grpc.CallOption) (*ListNotesResponse, error)
 	// CreateNote registers a new note (header only; events follow via AppendEvent).
 	CreateNote(ctx context.Context, in *CreateNoteRequest, opts ...grpc.CallOption) (*CreateNoteResponse, error)
+	// UpdateNote mutates mutable metadata fields on a note using a FieldMask
+	// for partial update semantics.
+	UpdateNote(ctx context.Context, in *UpdateNoteRequest, opts ...grpc.CallOption) (*UpdateNoteResponse, error)
 	// DeleteNote soft-deletes a note by URN.
 	DeleteNote(ctx context.Context, in *DeleteNoteRequest, opts ...grpc.CallOption) (*DeleteNoteResponse, error)
 	// AppendEvent appends a single event to an existing note.
@@ -53,11 +59,16 @@ type NoteServiceClient interface {
 	// SearchNotes performs a server-side full-text search over normal note
 	// content. Secure notes are never included in results.
 	SearchNotes(ctx context.Context, in *SearchNotesRequest, opts ...grpc.CallOption) (*SearchNotesResponse, error)
-	// ShareSecureNote re-wraps the CEK for one or more additional target
-	// devices. The server updates the per_device_keys map in the stored
-	// encrypted blobs and returns the updated event list. Only secure notes
-	// can be shared via this RPC.
+	// ReplaceContent atomically diffs the supplied plain-text content against the
+	// note's current state and appends a single event capturing the delta.
+	// Not permitted on secure notes.
+	ReplaceContent(ctx context.Context, in *ReplaceContentRequest, opts ...grpc.CallOption) (*ReplaceContentResponse, error)
+	// ShareSecureNote merges per-device wrapped Content Encryption Keys into
+	// every stored Event for the note without ever seeing the plaintext CEK.
 	ShareSecureNote(ctx context.Context, in *ShareSecureNoteRequest, opts ...grpc.CallOption) (*ShareSecureNoteResponse, error)
+	// ReceiveSharedNote stores a note header and event stream forwarded from a
+	// paired server. Idempotent: only events beyond the local head are written.
+	ReceiveSharedNote(ctx context.Context, in *ReceiveSharedNoteRequest, opts ...grpc.CallOption) (*ReceiveSharedNoteResponse, error)
 }
 
 type noteServiceClient struct {
@@ -89,6 +100,15 @@ func (c *noteServiceClient) ListNotes(ctx context.Context, in *ListNotesRequest,
 func (c *noteServiceClient) CreateNote(ctx context.Context, in *CreateNoteRequest, opts ...grpc.CallOption) (*CreateNoteResponse, error) {
 	out := new(CreateNoteResponse)
 	err := c.cc.Invoke(ctx, NoteService_CreateNote_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *noteServiceClient) UpdateNote(ctx context.Context, in *UpdateNoteRequest, opts ...grpc.CallOption) (*UpdateNoteResponse, error) {
+	out := new(UpdateNoteResponse)
+	err := c.cc.Invoke(ctx, NoteService_UpdateNote_FullMethodName, in, out, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -129,7 +149,7 @@ func (c *noteServiceClient) StreamEvents(ctx context.Context, in *StreamEventsRe
 }
 
 type NoteService_StreamEventsClient interface {
-	Recv() (*EventProto, error)
+	Recv() (*StreamEventsResponse, error)
 	grpc.ClientStream
 }
 
@@ -137,8 +157,8 @@ type noteServiceStreamEventsClient struct {
 	grpc.ClientStream
 }
 
-func (x *noteServiceStreamEventsClient) Recv() (*EventProto, error) {
-	m := new(EventProto)
+func (x *noteServiceStreamEventsClient) Recv() (*StreamEventsResponse, error) {
+	m := new(StreamEventsResponse)
 	if err := x.ClientStream.RecvMsg(m); err != nil {
 		return nil, err
 	}
@@ -154,9 +174,27 @@ func (c *noteServiceClient) SearchNotes(ctx context.Context, in *SearchNotesRequ
 	return out, nil
 }
 
+func (c *noteServiceClient) ReplaceContent(ctx context.Context, in *ReplaceContentRequest, opts ...grpc.CallOption) (*ReplaceContentResponse, error) {
+	out := new(ReplaceContentResponse)
+	err := c.cc.Invoke(ctx, NoteService_ReplaceContent_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *noteServiceClient) ShareSecureNote(ctx context.Context, in *ShareSecureNoteRequest, opts ...grpc.CallOption) (*ShareSecureNoteResponse, error) {
 	out := new(ShareSecureNoteResponse)
 	err := c.cc.Invoke(ctx, NoteService_ShareSecureNote_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *noteServiceClient) ReceiveSharedNote(ctx context.Context, in *ReceiveSharedNoteRequest, opts ...grpc.CallOption) (*ReceiveSharedNoteResponse, error) {
+	out := new(ReceiveSharedNoteResponse)
+	err := c.cc.Invoke(ctx, NoteService_ReceiveSharedNote_FullMethodName, in, out, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -173,6 +211,9 @@ type NoteServiceServer interface {
 	ListNotes(context.Context, *ListNotesRequest) (*ListNotesResponse, error)
 	// CreateNote registers a new note (header only; events follow via AppendEvent).
 	CreateNote(context.Context, *CreateNoteRequest) (*CreateNoteResponse, error)
+	// UpdateNote mutates mutable metadata fields on a note using a FieldMask
+	// for partial update semantics.
+	UpdateNote(context.Context, *UpdateNoteRequest) (*UpdateNoteResponse, error)
 	// DeleteNote soft-deletes a note by URN.
 	DeleteNote(context.Context, *DeleteNoteRequest) (*DeleteNoteResponse, error)
 	// AppendEvent appends a single event to an existing note.
@@ -187,11 +228,16 @@ type NoteServiceServer interface {
 	// SearchNotes performs a server-side full-text search over normal note
 	// content. Secure notes are never included in results.
 	SearchNotes(context.Context, *SearchNotesRequest) (*SearchNotesResponse, error)
-	// ShareSecureNote re-wraps the CEK for one or more additional target
-	// devices. The server updates the per_device_keys map in the stored
-	// encrypted blobs and returns the updated event list. Only secure notes
-	// can be shared via this RPC.
+	// ReplaceContent atomically diffs the supplied plain-text content against the
+	// note's current state and appends a single event capturing the delta.
+	// Not permitted on secure notes.
+	ReplaceContent(context.Context, *ReplaceContentRequest) (*ReplaceContentResponse, error)
+	// ShareSecureNote merges per-device wrapped Content Encryption Keys into
+	// every stored Event for the note without ever seeing the plaintext CEK.
 	ShareSecureNote(context.Context, *ShareSecureNoteRequest) (*ShareSecureNoteResponse, error)
+	// ReceiveSharedNote stores a note header and event stream forwarded from a
+	// paired server. Idempotent: only events beyond the local head are written.
+	ReceiveSharedNote(context.Context, *ReceiveSharedNoteRequest) (*ReceiveSharedNoteResponse, error)
 	mustEmbedUnimplementedNoteServiceServer()
 }
 
@@ -208,6 +254,9 @@ func (UnimplementedNoteServiceServer) ListNotes(context.Context, *ListNotesReque
 func (UnimplementedNoteServiceServer) CreateNote(context.Context, *CreateNoteRequest) (*CreateNoteResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method CreateNote not implemented")
 }
+func (UnimplementedNoteServiceServer) UpdateNote(context.Context, *UpdateNoteRequest) (*UpdateNoteResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method UpdateNote not implemented")
+}
 func (UnimplementedNoteServiceServer) DeleteNote(context.Context, *DeleteNoteRequest) (*DeleteNoteResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method DeleteNote not implemented")
 }
@@ -220,8 +269,14 @@ func (UnimplementedNoteServiceServer) StreamEvents(*StreamEventsRequest, NoteSer
 func (UnimplementedNoteServiceServer) SearchNotes(context.Context, *SearchNotesRequest) (*SearchNotesResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method SearchNotes not implemented")
 }
+func (UnimplementedNoteServiceServer) ReplaceContent(context.Context, *ReplaceContentRequest) (*ReplaceContentResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ReplaceContent not implemented")
+}
 func (UnimplementedNoteServiceServer) ShareSecureNote(context.Context, *ShareSecureNoteRequest) (*ShareSecureNoteResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ShareSecureNote not implemented")
+}
+func (UnimplementedNoteServiceServer) ReceiveSharedNote(context.Context, *ReceiveSharedNoteRequest) (*ReceiveSharedNoteResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ReceiveSharedNote not implemented")
 }
 func (UnimplementedNoteServiceServer) mustEmbedUnimplementedNoteServiceServer() {}
 
@@ -290,6 +345,24 @@ func _NoteService_CreateNote_Handler(srv interface{}, ctx context.Context, dec f
 	return interceptor(ctx, in, info, handler)
 }
 
+func _NoteService_UpdateNote_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UpdateNoteRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(NoteServiceServer).UpdateNote(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: NoteService_UpdateNote_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(NoteServiceServer).UpdateNote(ctx, req.(*UpdateNoteRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _NoteService_DeleteNote_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(DeleteNoteRequest)
 	if err := dec(in); err != nil {
@@ -335,7 +408,7 @@ func _NoteService_StreamEvents_Handler(srv interface{}, stream grpc.ServerStream
 }
 
 type NoteService_StreamEventsServer interface {
-	Send(*EventProto) error
+	Send(*StreamEventsResponse) error
 	grpc.ServerStream
 }
 
@@ -343,7 +416,7 @@ type noteServiceStreamEventsServer struct {
 	grpc.ServerStream
 }
 
-func (x *noteServiceStreamEventsServer) Send(m *EventProto) error {
+func (x *noteServiceStreamEventsServer) Send(m *StreamEventsResponse) error {
 	return x.ServerStream.SendMsg(m)
 }
 
@@ -365,6 +438,24 @@ func _NoteService_SearchNotes_Handler(srv interface{}, ctx context.Context, dec 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _NoteService_ReplaceContent_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReplaceContentRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(NoteServiceServer).ReplaceContent(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: NoteService_ReplaceContent_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(NoteServiceServer).ReplaceContent(ctx, req.(*ReplaceContentRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _NoteService_ShareSecureNote_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(ShareSecureNoteRequest)
 	if err := dec(in); err != nil {
@@ -379,6 +470,24 @@ func _NoteService_ShareSecureNote_Handler(srv interface{}, ctx context.Context, 
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(NoteServiceServer).ShareSecureNote(ctx, req.(*ShareSecureNoteRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _NoteService_ReceiveSharedNote_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReceiveSharedNoteRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(NoteServiceServer).ReceiveSharedNote(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: NoteService_ReceiveSharedNote_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(NoteServiceServer).ReceiveSharedNote(ctx, req.(*ReceiveSharedNoteRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -403,6 +512,10 @@ var NoteService_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _NoteService_CreateNote_Handler,
 		},
 		{
+			MethodName: "UpdateNote",
+			Handler:    _NoteService_UpdateNote_Handler,
+		},
+		{
 			MethodName: "DeleteNote",
 			Handler:    _NoteService_DeleteNote_Handler,
 		},
@@ -415,8 +528,16 @@ var NoteService_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _NoteService_SearchNotes_Handler,
 		},
 		{
+			MethodName: "ReplaceContent",
+			Handler:    _NoteService_ReplaceContent_Handler,
+		},
+		{
 			MethodName: "ShareSecureNote",
 			Handler:    _NoteService_ShareSecureNote_Handler,
+		},
+		{
+			MethodName: "ReceiveSharedNote",
+			Handler:    _NoteService_ReceiveSharedNote_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{
@@ -426,302 +547,5 @@ var NoteService_ServiceDesc = grpc.ServiceDesc{
 			ServerStreams: true,
 		},
 	},
-	Metadata: "notx.proto",
-}
-
-const (
-	DeviceService_RegisterDevice_FullMethodName     = "/notx.v1.DeviceService/RegisterDevice"
-	DeviceService_GetDevicePublicKey_FullMethodName = "/notx.v1.DeviceService/GetDevicePublicKey"
-	DeviceService_ListDevices_FullMethodName        = "/notx.v1.DeviceService/ListDevices"
-	DeviceService_RevokeDevice_FullMethodName       = "/notx.v1.DeviceService/RevokeDevice"
-	DeviceService_InitiatePairing_FullMethodName    = "/notx.v1.DeviceService/InitiatePairing"
-	DeviceService_CompletePairing_FullMethodName    = "/notx.v1.DeviceService/CompletePairing"
-)
-
-// DeviceServiceClient is the client API for DeviceService service.
-//
-// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
-type DeviceServiceClient interface {
-	// RegisterDevice registers a new device by storing its public key.
-	// The private key must never appear in this request.
-	RegisterDevice(ctx context.Context, in *RegisterDeviceRequest, opts ...grpc.CallOption) (*RegisterDeviceResponse, error)
-	// GetDevicePublicKey retrieves the public key for a registered device.
-	// Used by other devices when wrapping a CEK for that device.
-	GetDevicePublicKey(ctx context.Context, in *GetDevicePublicKeyRequest, opts ...grpc.CallOption) (*GetDevicePublicKeyResponse, error)
-	// ListDevices returns all devices registered to the authenticated user.
-	ListDevices(ctx context.Context, in *ListDevicesRequest, opts ...grpc.CallOption) (*ListDevicesResponse, error)
-	// RevokeDevice removes a device from the registry. Future secure note
-	// shares will not include the revoked device.
-	RevokeDevice(ctx context.Context, in *RevokeDeviceRequest, opts ...grpc.CallOption) (*RevokeDeviceResponse, error)
-	// InitiatePairing starts the browser-pairing flow and returns a short-lived
-	// session token that the browser embeds in its QR code.
-	InitiatePairing(ctx context.Context, in *InitiatePairingRequest, opts ...grpc.CallOption) (*InitiatePairingResponse, error)
-	// CompletePairing is called by an already-trusted device after scanning the
-	// browser QR code. It registers the browser device and closes the session.
-	CompletePairing(ctx context.Context, in *CompletePairingRequest, opts ...grpc.CallOption) (*CompletePairingResponse, error)
-}
-
-type deviceServiceClient struct {
-	cc grpc.ClientConnInterface
-}
-
-func NewDeviceServiceClient(cc grpc.ClientConnInterface) DeviceServiceClient {
-	return &deviceServiceClient{cc}
-}
-
-func (c *deviceServiceClient) RegisterDevice(ctx context.Context, in *RegisterDeviceRequest, opts ...grpc.CallOption) (*RegisterDeviceResponse, error) {
-	out := new(RegisterDeviceResponse)
-	err := c.cc.Invoke(ctx, DeviceService_RegisterDevice_FullMethodName, in, out, opts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-func (c *deviceServiceClient) GetDevicePublicKey(ctx context.Context, in *GetDevicePublicKeyRequest, opts ...grpc.CallOption) (*GetDevicePublicKeyResponse, error) {
-	out := new(GetDevicePublicKeyResponse)
-	err := c.cc.Invoke(ctx, DeviceService_GetDevicePublicKey_FullMethodName, in, out, opts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-func (c *deviceServiceClient) ListDevices(ctx context.Context, in *ListDevicesRequest, opts ...grpc.CallOption) (*ListDevicesResponse, error) {
-	out := new(ListDevicesResponse)
-	err := c.cc.Invoke(ctx, DeviceService_ListDevices_FullMethodName, in, out, opts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-func (c *deviceServiceClient) RevokeDevice(ctx context.Context, in *RevokeDeviceRequest, opts ...grpc.CallOption) (*RevokeDeviceResponse, error) {
-	out := new(RevokeDeviceResponse)
-	err := c.cc.Invoke(ctx, DeviceService_RevokeDevice_FullMethodName, in, out, opts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-func (c *deviceServiceClient) InitiatePairing(ctx context.Context, in *InitiatePairingRequest, opts ...grpc.CallOption) (*InitiatePairingResponse, error) {
-	out := new(InitiatePairingResponse)
-	err := c.cc.Invoke(ctx, DeviceService_InitiatePairing_FullMethodName, in, out, opts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-func (c *deviceServiceClient) CompletePairing(ctx context.Context, in *CompletePairingRequest, opts ...grpc.CallOption) (*CompletePairingResponse, error) {
-	out := new(CompletePairingResponse)
-	err := c.cc.Invoke(ctx, DeviceService_CompletePairing_FullMethodName, in, out, opts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-// DeviceServiceServer is the server API for DeviceService service.
-// All implementations must embed UnimplementedDeviceServiceServer
-// for forward compatibility
-type DeviceServiceServer interface {
-	// RegisterDevice registers a new device by storing its public key.
-	// The private key must never appear in this request.
-	RegisterDevice(context.Context, *RegisterDeviceRequest) (*RegisterDeviceResponse, error)
-	// GetDevicePublicKey retrieves the public key for a registered device.
-	// Used by other devices when wrapping a CEK for that device.
-	GetDevicePublicKey(context.Context, *GetDevicePublicKeyRequest) (*GetDevicePublicKeyResponse, error)
-	// ListDevices returns all devices registered to the authenticated user.
-	ListDevices(context.Context, *ListDevicesRequest) (*ListDevicesResponse, error)
-	// RevokeDevice removes a device from the registry. Future secure note
-	// shares will not include the revoked device.
-	RevokeDevice(context.Context, *RevokeDeviceRequest) (*RevokeDeviceResponse, error)
-	// InitiatePairing starts the browser-pairing flow and returns a short-lived
-	// session token that the browser embeds in its QR code.
-	InitiatePairing(context.Context, *InitiatePairingRequest) (*InitiatePairingResponse, error)
-	// CompletePairing is called by an already-trusted device after scanning the
-	// browser QR code. It registers the browser device and closes the session.
-	CompletePairing(context.Context, *CompletePairingRequest) (*CompletePairingResponse, error)
-	mustEmbedUnimplementedDeviceServiceServer()
-}
-
-// UnimplementedDeviceServiceServer must be embedded to have forward compatible implementations.
-type UnimplementedDeviceServiceServer struct {
-}
-
-func (UnimplementedDeviceServiceServer) RegisterDevice(context.Context, *RegisterDeviceRequest) (*RegisterDeviceResponse, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method RegisterDevice not implemented")
-}
-func (UnimplementedDeviceServiceServer) GetDevicePublicKey(context.Context, *GetDevicePublicKeyRequest) (*GetDevicePublicKeyResponse, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method GetDevicePublicKey not implemented")
-}
-func (UnimplementedDeviceServiceServer) ListDevices(context.Context, *ListDevicesRequest) (*ListDevicesResponse, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method ListDevices not implemented")
-}
-func (UnimplementedDeviceServiceServer) RevokeDevice(context.Context, *RevokeDeviceRequest) (*RevokeDeviceResponse, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method RevokeDevice not implemented")
-}
-func (UnimplementedDeviceServiceServer) InitiatePairing(context.Context, *InitiatePairingRequest) (*InitiatePairingResponse, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method InitiatePairing not implemented")
-}
-func (UnimplementedDeviceServiceServer) CompletePairing(context.Context, *CompletePairingRequest) (*CompletePairingResponse, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method CompletePairing not implemented")
-}
-func (UnimplementedDeviceServiceServer) mustEmbedUnimplementedDeviceServiceServer() {}
-
-// UnsafeDeviceServiceServer may be embedded to opt out of forward compatibility for this service.
-// Use of this interface is not recommended, as added methods to DeviceServiceServer will
-// result in compilation errors.
-type UnsafeDeviceServiceServer interface {
-	mustEmbedUnimplementedDeviceServiceServer()
-}
-
-func RegisterDeviceServiceServer(s grpc.ServiceRegistrar, srv DeviceServiceServer) {
-	s.RegisterService(&DeviceService_ServiceDesc, srv)
-}
-
-func _DeviceService_RegisterDevice_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(RegisterDeviceRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(DeviceServiceServer).RegisterDevice(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: DeviceService_RegisterDevice_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(DeviceServiceServer).RegisterDevice(ctx, req.(*RegisterDeviceRequest))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
-func _DeviceService_GetDevicePublicKey_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(GetDevicePublicKeyRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(DeviceServiceServer).GetDevicePublicKey(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: DeviceService_GetDevicePublicKey_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(DeviceServiceServer).GetDevicePublicKey(ctx, req.(*GetDevicePublicKeyRequest))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
-func _DeviceService_ListDevices_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(ListDevicesRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(DeviceServiceServer).ListDevices(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: DeviceService_ListDevices_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(DeviceServiceServer).ListDevices(ctx, req.(*ListDevicesRequest))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
-func _DeviceService_RevokeDevice_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(RevokeDeviceRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(DeviceServiceServer).RevokeDevice(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: DeviceService_RevokeDevice_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(DeviceServiceServer).RevokeDevice(ctx, req.(*RevokeDeviceRequest))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
-func _DeviceService_InitiatePairing_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(InitiatePairingRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(DeviceServiceServer).InitiatePairing(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: DeviceService_InitiatePairing_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(DeviceServiceServer).InitiatePairing(ctx, req.(*InitiatePairingRequest))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
-func _DeviceService_CompletePairing_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(CompletePairingRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(DeviceServiceServer).CompletePairing(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: DeviceService_CompletePairing_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(DeviceServiceServer).CompletePairing(ctx, req.(*CompletePairingRequest))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
-// DeviceService_ServiceDesc is the grpc.ServiceDesc for DeviceService service.
-// It's only intended for direct use with grpc.RegisterService,
-// and not to be introspected or modified (even as a copy)
-var DeviceService_ServiceDesc = grpc.ServiceDesc{
-	ServiceName: "notx.v1.DeviceService",
-	HandlerType: (*DeviceServiceServer)(nil),
-	Methods: []grpc.MethodDesc{
-		{
-			MethodName: "RegisterDevice",
-			Handler:    _DeviceService_RegisterDevice_Handler,
-		},
-		{
-			MethodName: "GetDevicePublicKey",
-			Handler:    _DeviceService_GetDevicePublicKey_Handler,
-		},
-		{
-			MethodName: "ListDevices",
-			Handler:    _DeviceService_ListDevices_Handler,
-		},
-		{
-			MethodName: "RevokeDevice",
-			Handler:    _DeviceService_RevokeDevice_Handler,
-		},
-		{
-			MethodName: "InitiatePairing",
-			Handler:    _DeviceService_InitiatePairing_Handler,
-		},
-		{
-			MethodName: "CompletePairing",
-			Handler:    _DeviceService_CompletePairing_Handler,
-		},
-	},
-	Streams:  []grpc.StreamDesc{},
-	Metadata: "notx.proto",
+	Metadata: "note.proto",
 }

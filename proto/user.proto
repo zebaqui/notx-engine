@@ -1,0 +1,101 @@
+syntax = "proto3";
+
+package notx.v1;
+
+import "google/protobuf/field_mask.proto";
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/zebaqui/notx-engine/proto;notxpb";
+
+// ─────────────────────────────────────────────────────────────────────────────
+// UserService — CRUD for user accounts
+// ─────────────────────────────────────────────────────────────────────────────
+
+service UserService {
+  rpc CreateUser(CreateUserRequest) returns (CreateUserResponse);
+  rpc GetUser(GetUserRequest) returns (GetUserResponse);
+  rpc ListUsers(ListUsersRequest) returns (ListUsersResponse);
+  rpc UpdateUser(UpdateUserRequest) returns (UpdateUserResponse);
+  rpc DeleteUser(DeleteUserRequest) returns (DeleteUserResponse);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Shared message types
+// ─────────────────────────────────────────────────────────────────────────────
+
+message User {
+  string urn = 1; // notx:usr:<uuid>
+  string display_name = 2;
+  string email = 3;
+  bool deleted = 4;
+  google.protobuf.Timestamp created_at = 5;
+  google.protobuf.Timestamp updated_at = 6;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CreateUser
+// ─────────────────────────────────────────────────────────────────────────────
+
+message CreateUserRequest {
+  string urn = 1; // notx:usr:<uuid> — caller-supplied
+  string display_name = 2;
+  string email = 3;
+}
+
+message CreateUserResponse {
+  User user = 1;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GetUser
+// ─────────────────────────────────────────────────────────────────────────────
+
+message GetUserRequest {
+  string urn = 1;
+}
+
+message GetUserResponse {
+  User user = 1;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ListUsers
+// ─────────────────────────────────────────────────────────────────────────────
+
+message ListUsersRequest {
+  bool include_deleted = 1;
+  int32 page_size = 2; // 0 = server default
+  string page_token = 3;
+}
+
+message ListUsersResponse {
+  repeated User users = 1;
+  string next_page_token = 2;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// UpdateUser
+// ─────────────────────────────────────────────────────────────────────────────
+
+message UpdateUserRequest {
+  string urn = 1;
+  User user = 2;
+  google.protobuf.FieldMask update_mask = 3;
+}
+
+message UpdateUserResponse {
+  User user = 1;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DeleteUser
+// ─────────────────────────────────────────────────────────────────────────────
+
+message DeleteUserRequest {
+  string urn = 1;
+}
+
+message DeleteUserResponse {
+  string urn = 1;
+  bool deleted = 2;
+}

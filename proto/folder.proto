@@ -1,0 +1,136 @@
+// folder.proto — Folder domain
+//
+// Folders are organisational containers that live inside a Project.
+// FolderService provides CRUD operations for folders.
+
+syntax = "proto3";
+
+package notx.v1;
+
+import "google/protobuf/field_mask.proto";
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/zebaqui/notx-engine/proto;notxpb";
+
+service FolderService {
+  rpc CreateFolder(CreateFolderRequest) returns (CreateFolderResponse);
+  rpc GetFolder(GetFolderRequest) returns (GetFolderResponse);
+  rpc ListFolders(ListFoldersRequest) returns (ListFoldersResponse);
+  rpc UpdateFolder(UpdateFolderRequest) returns (UpdateFolderResponse);
+  rpc DeleteFolder(DeleteFolderRequest) returns (DeleteFolderResponse);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Folder message
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Folder carries the identifying metadata for a folder within a project.
+// (Previously named FolderProto.)
+message Folder {
+  // Globally unique folder URN (notx:folder:<uuid>).
+  string urn = 1;
+
+  // URN of the project this folder belongs to.
+  string project_urn = 2;
+
+  string name = 3;
+  string description = 4;
+
+  // True when the folder has been soft-deleted.
+  bool deleted = 5;
+
+  google.protobuf.Timestamp created_at = 6;
+  google.protobuf.Timestamp updated_at = 7;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CreateFolder
+// ─────────────────────────────────────────────────────────────────────────────
+
+message CreateFolderRequest {
+  // Caller-supplied URN (notx:folder:<uuid>). Must be globally unique.
+  string urn = 1;
+
+  // URN of the project this folder should be created under.
+  string project_urn = 2;
+
+  string name = 3;
+  string description = 4;
+}
+
+message CreateFolderResponse {
+  Folder folder = 1;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GetFolder
+// ─────────────────────────────────────────────────────────────────────────────
+
+message GetFolderRequest {
+  string urn = 1;
+}
+
+message GetFolderResponse {
+  Folder folder = 1;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ListFolders
+// ─────────────────────────────────────────────────────────────────────────────
+
+message ListFoldersRequest {
+  // Filter to folders belonging to this project URN.
+  string project_urn = 1;
+
+  // When true, soft-deleted folders are included in the response.
+  bool include_deleted = 2;
+
+  // Maximum number of folders to return. 0 = server default.
+  int32 page_size = 3;
+
+  // Opaque continuation token from the previous response. Empty = first page.
+  string page_token = 4;
+}
+
+message ListFoldersResponse {
+  repeated Folder folders = 1;
+
+  // Empty when this is the last page.
+  string next_page_token = 2;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// UpdateFolder
+// ─────────────────────────────────────────────────────────────────────────────
+
+message UpdateFolderRequest {
+  // URN of the folder to update.
+  string urn = 1;
+
+  // Updated folder fields. Only paths listed in update_mask are applied.
+  Folder folder = 2;
+
+  // FieldMask controlling which fields of folder are written.
+  // Supports: name, description, deleted.
+  google.protobuf.FieldMask update_mask = 3;
+}
+
+message UpdateFolderResponse {
+  Folder folder = 1;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DeleteFolder
+// ─────────────────────────────────────────────────────────────────────────────
+
+message DeleteFolderRequest {
+  string urn = 1;
+}
+
+message DeleteFolderResponse {
+  // URN of the folder that was deleted.
+  string urn = 1;
+
+  // True when the folder record was found and marked as deleted.
+  bool deleted = 2;
+}

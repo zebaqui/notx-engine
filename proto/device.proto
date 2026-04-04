@@ -1,0 +1,319 @@
+syntax = "proto3";
+
+package notx.v1;
+
+import "google/protobuf/field_mask.proto";
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/zebaqui/notx-engine/proto;notxpb";
+
+// device.proto — Device domain
+//
+// DeviceService   — client-facing RPCs (register, key lookup, pairing, revoke).
+//                   Used by client devices interacting with the server.
+// DeviceAdminService — admin-plane write path (approval, role assignment,
+//                   extended listing, status queries).
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Enums
+// ─────────────────────────────────────────────────────────────────────────────
+
+enum DeviceRole {
+  DEVICE_ROLE_UNSPECIFIED = 0;
+  DEVICE_ROLE_USER = 1;
+  DEVICE_ROLE_ADMIN = 2;
+  DEVICE_ROLE_RELAY = 3;
+}
+
+enum ApprovalStatus {
+  APPROVAL_STATUS_UNSPECIFIED = 0;
+  APPROVAL_STATUS_PENDING = 1;
+  APPROVAL_STATUS_APPROVED = 2;
+  APPROVAL_STATUS_REJECTED = 3;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Device — client-facing view
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Device carries the identity and metadata for a registered device.
+// (Previously named DeviceInfo.)
+message Device {
+  string device_urn = 1;
+  string device_name = 2;
+  bytes public_key = 3;
+  google.protobuf.Timestamp registered_at = 4;
+  google.protobuf.Timestamp last_seen_at = 5;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DeviceAdmin — extended admin view
+// ─────────────────────────────────────────────────────────────────────────────
+
+// DeviceAdmin — extended device descriptor used by all admin RPCs.
+//
+// Supersedes the basic Device message for admin-level views; carries owner,
+// role, approval status, and revocation state not present in Device.
+message DeviceAdmin {
+  string device_urn = 1;
+  string device_name = 2;
+  bytes public_key = 3;
+  string owner_urn = 4;
+  DeviceRole role = 5;
+  ApprovalStatus approval_status = 6;
+  bool revoked = 7;
+  google.protobuf.Timestamp registered_at = 8;
+  google.protobuf.Timestamp last_seen_at = 9;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DeviceService — client-facing RPCs (register, key lookup, pairing, revoke)
+// ─────────────────────────────────────────────────────────────────────────────
+
+service DeviceService {
+  // RegisterDevice registers a new device by storing its public key.
+  // The private key must never appear in this request.
+  rpc RegisterDevice(RegisterDeviceRequest) returns (RegisterDeviceResponse);
+
+  // GetDevicePublicKey retrieves the public key for a registered device.
+  // Used by other devices when wrapping a CEK for that device.
+  rpc GetDevicePublicKey(GetDevicePublicKeyRequest) returns (GetDevicePublicKeyResponse);
+
+  // ListDevices returns all devices registered to the authenticated user.
+  rpc ListDevices(ListDevicesRequest) returns (ListDevicesResponse);
+
+  // RevokeDevice removes a device from the registry. Future secure note
+  // shares will not include the revoked device.
+  rpc RevokeDevice(RevokeDeviceRequest) returns (RevokeDeviceResponse);
+
+  // InitiatePairing starts the browser-pairing flow and returns a short-lived
+  // session token that the browser embeds in its QR code.
+  rpc InitiatePairing(InitiatePairingRequest) returns (InitiatePairingResponse);
+
+  // CompletePairing is called by an already-trusted device after scanning the
+  // browser QR code. It registers the browser device and closes the session.
+  rpc CompletePairing(CompletePairingRequest) returns (CompletePairingResponse);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Request / Response messages — DeviceService
+// ─────────────────────────────────────────────────────────────────────────────
+
+// --- RegisterDevice ---
+
+message RegisterDeviceRequest {
+  string device_urn = 1; // notx:device:<uuid>
+  bytes public_key = 2; // Ed25519 public key (32 bytes)
+  string device_name = 3; // human-readable label (e.g. "iPhone 15 Pro")
+  string owner_urn = 4; // notx:usr:<uuid>
+}
+
+message RegisterDeviceResponse {
+  string device_urn = 1;
+  google.protobuf.Timestamp registered_at = 2;
+}
+
+// --- GetDevicePublicKey ---
+
+message GetDevicePublicKeyRequest {
+  string device_urn = 1;
+}
+
+message GetDevicePublicKeyResponse {
+  string device_urn = 1;
+  bytes public_key = 2; // Ed25519 public key (32 bytes)
+}
+
+// --- ListDevices ---
+
+message ListDevicesRequest {
+  string owner_urn = 1;
+}
+
+message ListDevicesResponse {
+  repeated Device devices = 1;
+}
+
+// --- RevokeDevice ---
+
+message RevokeDeviceRequest {
+  string device_urn = 1;
+}
+
+message RevokeDeviceResponse {
+  // URN of the device that was revoked.
+  string device_urn = 1;
+  bool revoked = 2;
+}
+
+// --- InitiatePairing ---
+
+message InitiatePairingRequest {
+  // The trusted device that is initiating the pairing flow.
+  string initiator_device_urn = 1;
+}
+
+message InitiatePairingResponse {
+  // Short-lived opaque session token. The browser encodes this in the QR code.
+  string session_token = 1;
+  // UTC expiry of the session token (5 minutes from issuance).
+  google.protobuf.Timestamp expires_at = 2;
+}
+
+// --- CompletePairing ---
+
+message CompletePairingRequest {
+  // The session token from the browser QR code.
+  string session_token = 1;
+
+  // The new browser device's identity.
+  string device_urn = 2;
+  bytes public_key = 3;
+  string device_name = 4;
+}
+
+message CompletePairingResponse {
+  string device_urn = 1;
+  google.protobuf.Timestamp registered_at = 2;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DeviceAdminService — admin-plane write path
+// ─────────────────────────────────────────────────────────────────────────────
+
+service DeviceAdminService {
+  // AdminRegisterDevice is the single registration path used by the admin
+  // layer. It accepts role and approval_status overrides supplied after the
+  // HTTP layer has validated any admin passphrase.
+  rpc AdminRegisterDevice(AdminRegisterDeviceRequest) returns (AdminRegisterDeviceResponse);
+
+  // GetDevice returns the extended descriptor for a single device.
+  rpc GetDevice(GetDeviceRequest) returns (GetDeviceResponse);
+
+  // UpdateDevice mutates mutable fields on a device record.
+  // Only the paths listed in update_mask are applied.
+  rpc UpdateDevice(UpdateDeviceRequest) returns (UpdateDeviceResponse);
+
+  // GetDeviceStatus returns the approval/revocation status of a device.
+  // Callers should check approval_status == APPROVAL_STATUS_APPROVED rather
+  // than relying on a separate boolean field.
+  rpc GetDeviceStatus(GetDeviceStatusRequest) returns (GetDeviceStatusResponse);
+
+  // ApproveDevice grants approved status to a pending device.
+  rpc ApproveDevice(ApproveDeviceRequest) returns (ApproveDeviceResponse);
+
+  // RejectDevice denies a pending device registration.
+  rpc RejectDevice(RejectDeviceRequest) returns (RejectDeviceResponse);
+
+  // AdminListDevices returns the full list of devices, optionally filtered by
+  // owner and including revoked devices, with cursor-based pagination.
+  rpc AdminListDevices(AdminListDevicesRequest) returns (AdminListDevicesResponse);
+
+  // AdminRevokeDevice revokes a device and returns its URN plus confirmation.
+  rpc AdminRevokeDevice(AdminRevokeDeviceRequest) returns (AdminRevokeDeviceResponse);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Request / Response messages — DeviceAdminService
+// ─────────────────────────────────────────────────────────────────────────────
+
+// --- AdminRegisterDevice ---
+
+message AdminRegisterDeviceRequest {
+  string device_urn = 1;
+  string device_name = 2;
+  string owner_urn = 3;
+  bytes public_key = 4;
+  DeviceRole role = 5;
+  ApprovalStatus approval_status = 6;
+}
+
+message AdminRegisterDeviceResponse {
+  DeviceAdmin device = 1;
+}
+
+// --- GetDevice ---
+
+message GetDeviceRequest {
+  string device_urn = 1;
+}
+
+message GetDeviceResponse {
+  DeviceAdmin device = 1;
+}
+
+// --- UpdateDevice ---
+
+message UpdateDeviceRequest {
+  string device_urn = 1;
+  DeviceAdmin device = 2;
+  google.protobuf.FieldMask update_mask = 3;
+}
+
+message UpdateDeviceResponse {
+  DeviceAdmin device = 1;
+}
+
+// --- GetDeviceStatus ---
+
+message GetDeviceStatusRequest {
+  string device_urn = 1;
+}
+
+message GetDeviceStatusResponse {
+  string device_urn = 1;
+  ApprovalStatus approval_status = 2;
+  bool revoked = 3;
+}
+
+// --- ApproveDevice ---
+
+message ApproveDeviceRequest {
+  string device_urn = 1;
+}
+
+message ApproveDeviceResponse {
+  DeviceAdmin device = 1;
+}
+
+// --- RejectDevice ---
+
+message RejectDeviceRequest {
+  string device_urn = 1;
+}
+
+message RejectDeviceResponse {
+  DeviceAdmin device = 1;
+}
+
+// --- AdminListDevices ---
+
+message AdminListDevicesRequest {
+  // Filter by owner URN; empty string returns devices for all owners.
+  string owner_urn = 1;
+  // When true, revoked devices are included in the response.
+  bool include_revoked = 2;
+  // Maximum number of devices to return. 0 uses the server default.
+  int32 page_size = 3;
+  // Opaque pagination cursor returned by a previous AdminListDevices call.
+  string page_token = 4;
+}
+
+message AdminListDevicesResponse {
+  repeated DeviceAdmin devices = 1;
+  // Opaque cursor for the next page; empty when there are no further pages.
+  string next_page_token = 2;
+}
+
+// --- AdminRevokeDevice ---
+
+message AdminRevokeDeviceRequest {
+  string device_urn = 1;
+}
+
+message AdminRevokeDeviceResponse {
+  // URN of the device that was revoked.
+  string device_urn = 1;
+  // True when the device record was found and successfully marked as revoked.
+  bool revoked = 2;
+}

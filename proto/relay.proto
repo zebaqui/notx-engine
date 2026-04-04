@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package notx.v1;
 
-option go_package = "github.com/zebaqui/notx-engine/internal/server/proto;notxpb";
+option go_package = "github.com/zebaqui/notx-engine/proto;notxpb";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // RelayService — gRPC-first HTTP relay execution engine
@@ -33,8 +33,8 @@ message HttpRequest {
   // Request headers. Values may contain {{variable}} placeholders.
   map<string, string> headers = 3;
 
-  // Raw request body. May contain {{variable}} placeholders (treated as UTF-8
-  // text before encoding). Empty for methods without a body.
+  // Raw request body. {{variable}} placeholders are interpolated as UTF-8 text
+  // before the bytes are sent. Empty for bodyless methods.
   bytes body = 4;
 }
 

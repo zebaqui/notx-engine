@@ -1,0 +1,131 @@
+syntax = "proto3";
+
+package notx.v1;
+
+import "google/protobuf/field_mask.proto";
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/zebaqui/notx-engine/proto;notxpb";
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ProjectService — CRUD for projects (index-only entities)
+//
+// This file is the single authoritative definition of ProjectService.
+// The duplicate declaration that previously lived in notx.proto has been
+// removed; project.go is replaced by the output of protoc.
+// ─────────────────────────────────────────────────────────────────────────────
+
+service ProjectService {
+  rpc CreateProject(CreateProjectRequest) returns (CreateProjectResponse);
+  rpc GetProject(GetProjectRequest) returns (GetProjectResponse);
+  rpc ListProjects(ListProjectsRequest) returns (ListProjectsResponse);
+  rpc UpdateProject(UpdateProjectRequest) returns (UpdateProjectResponse);
+  rpc DeleteProject(DeleteProjectRequest) returns (DeleteProjectResponse);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Project message
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Project carries the identifying metadata for a project.
+// (Previously named ProjectProto.)
+message Project {
+  // Globally unique project URN (notx:proj:<uuid>).
+  string urn = 1;
+
+  string name = 2;
+  string description = 3;
+
+  // True when the project has been soft-deleted.
+  bool deleted = 4;
+
+  google.protobuf.Timestamp created_at = 5;
+  google.protobuf.Timestamp updated_at = 6;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CreateProject
+// ─────────────────────────────────────────────────────────────────────────────
+
+message CreateProjectRequest {
+  // Caller-supplied URN (notx:proj:<uuid>). Must be globally unique.
+  string urn = 1;
+  string name = 2;
+  string description = 3;
+}
+
+message CreateProjectResponse {
+  Project project = 1;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GetProject
+// ─────────────────────────────────────────────────────────────────────────────
+
+message GetProjectRequest {
+  string urn = 1;
+}
+
+message GetProjectResponse {
+  Project project = 1;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ListProjects
+// ─────────────────────────────────────────────────────────────────────────────
+
+message ListProjectsRequest {
+  // When true, soft-deleted projects are included in the response.
+  bool include_deleted = 1;
+
+  // Maximum number of projects to return. 0 = server default.
+  int32 page_size = 2;
+
+  // Opaque continuation token from the previous response. Empty = first page.
+  string page_token = 3;
+}
+
+message ListProjectsResponse {
+  repeated Project projects = 1;
+
+  // Empty when this is the last page.
+  string next_page_token = 2;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// UpdateProject
+// ─────────────────────────────────────────────────────────────────────────────
+
+message UpdateProjectRequest {
+  // URN of the project to update.
+  string urn = 1;
+
+  // Updated project fields. Only paths listed in update_mask are applied.
+  Project project = 2;
+
+  // FieldMask controlling which fields of project are written.
+  // Supports: name, description, deleted.
+  google.protobuf.FieldMask update_mask = 3;
+}
+
+message UpdateProjectResponse {
+  Project project = 1;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DeleteProject
+// ─────────────────────────────────────────────────────────────────────────────
+
+message DeleteProjectRequest {
+  string urn = 1;
+}
+
+message DeleteProjectResponse {
+  // URN of the project that was deleted.
+  string urn = 1;
+
+  // True when the project record was found and marked as deleted.
+  bool deleted = 2;
+}
+
+// Folder messages and FolderService are defined in folder.proto.
