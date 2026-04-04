@@ -26,26 +26,27 @@ var secretEncoding = base32.StdEncoding.WithPadding(base32.NoPadding)
 // secret. Returns the plaintext (to be shown once to the admin) and a
 // repo.PairingSecret record with only the bcrypt hash persisted.
 func GenerateSecret(label string, ttl time.Duration) (plaintext string, record *repo.PairingSecret, err error) {
-	// 16 bytes = 128 bits of entropy, base32-encoded → 26 characters.
-	raw := make([]byte, 16)
-	if _, err := rand.Read(raw); err != nil {
-		return "", nil, fmt.Errorf("pairing: generate entropy: %w", err)
-	}
-	encoded := secretEncoding.EncodeToString(raw)
-	// Format: NTXP-AAAAA-BBBBB-CCCCC-DDDDD-EEEEE (groups of 5)
-	plaintext = secretPrefix + chunkString(encoded, 5, "-")
-
-	hash, err := bcrypt.GenerateFromPassword([]byte(plaintext), bcrypt.DefaultCost)
-	if err != nil {
-		return "", nil, fmt.Errorf("pairing: hash secret: %w", err)
-	}
-
-	// ID is a random 12-char hex string used as the storage key.
+	// ID: 6 random bytes → 12-char hex string (lookup key, not secret).
 	idBytes := make([]byte, 6)
 	if _, err := rand.Read(idBytes); err != nil {
 		return "", nil, fmt.Errorf("pairing: generate id: %w", err)
 	}
-	id := fmt.Sprintf("sec_%x", idBytes)
+	id := fmt.Sprintf("%x", idBytes)
+
+	// Entropy: 13 random bytes → base32 (no padding) → first 20 chars → 4 groups of 5.
+	// 13 bytes = 104 bits; base32 gives ceil(104/5)=21 chars, so we take first 20.
+	raw := make([]byte, 13)
+	if _, err := rand.Read(raw); err != nil {
+		return "", nil, fmt.Errorf("pairing: generate entropy: %w", err)
+	}
+	encoded := secretEncoding.EncodeToString(raw)[:20]
+	// Format: NTXP-{id12}-AAAAA-BBBBB-CCCCC-DDDDD
+	plaintext = secretPrefix + id + "-" + chunkString(encoded, 5, "-")
+
+	hash, err := bcrypt.GenerateFromPassword([]byte(plaintext), 8)
+	if err != nil {
+		return "", nil, fmt.Errorf("pairing: hash secret: %w", err)
+	}
 
 	record = &repo.PairingSecret{
 		ID:         id,
@@ -54,6 +55,23 @@ func GenerateSecret(label string, ttl time.Duration) (plaintext string, record *
 		ExpiresAt:  time.Now().UTC().Add(ttl),
 	}
 	return plaintext, record, nil
+}
+
+// ExtractSecretID parses a token of the form "NTXP-{id12}-..." and returns
+// the 12-char hex ID segment and true. Returns "", false if the token does
+// not match the expected format.
+func ExtractSecretID(plaintext string) (string, bool) {
+	if !strings.HasPrefix(plaintext, secretPrefix) {
+		return "", false
+	}
+	rest := strings.TrimPrefix(plaintext, secretPrefix)
+	// rest is "{id12}-{g1}-{g2}-{g3}-{g4}"
+	// id is the first segment before the first "-"
+	parts := strings.SplitN(rest, "-", 2)
+	if len(parts) != 2 || len(parts[0]) != 12 {
+		return "", false
+	}
+	return parts[0], true
 }
 
 // chunkString splits s into chunks of size n, joined by sep.
@@ -120,66 +138,70 @@ func (s *FileSecretStore) AddSecret(ctx context.Context, ps *repo.PairingSecret)
 	return os.WriteFile(s.path(ps.ID), data, 0o600)
 }
 
-// ConsumeSecret iterates all unexpired, unused secrets and bcrypt-compares
-// the plaintext against each hash. On a match it marks the record used and
-// returns it. Returns repo.ErrNotFound if no valid secret matches.
+// ConsumeSecret performs an O(1) file lookup by extracting the ID from the
+// token, reading exactly one JSON file, validating it, and marking it used.
+// Returns repo.ErrNotFound if the token is malformed, the file does not exist,
+// the secret is already used, expired, or the bcrypt comparison fails.
 func (s *FileSecretStore) ConsumeSecret(ctx context.Context, plaintext string) (*repo.PairingSecret, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+
+	// Extract the ID from the token — O(1) file lookup instead of directory scan.
+	id, ok := ExtractSecretID(plaintext)
+	if !ok {
+		return nil, fmt.Errorf("%w: malformed pairing secret token", repo.ErrNotFound)
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	entries, err := os.ReadDir(s.dir)
+	path := s.path(id)
+	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("secret store: read dir: %w", err)
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("%w: secret not found", repo.ErrNotFound)
+		}
+		return nil, fmt.Errorf("secret store: read secret: %w", err)
+	}
+
+	var rec secretRecord
+	if err := json.Unmarshal(data, &rec); err != nil {
+		return nil, fmt.Errorf("secret store: unmarshal secret: %w", err)
 	}
 
 	now := time.Now().UTC()
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
-			continue
-		}
-		data, err := os.ReadFile(filepath.Join(s.dir, e.Name()))
-		if err != nil {
-			continue
-		}
-		var rec secretRecord
-		if err := json.Unmarshal(data, &rec); err != nil {
-			continue
-		}
-		// Skip expired.
-		if now.After(rec.ExpiresAt) {
-			continue
-		}
-		// Skip already-used.
-		if rec.UsedAt != nil {
-			continue
-		}
-		// Bcrypt compare (timing-safe).
-		if err := bcrypt.CompareHashAndPassword([]byte(rec.HashBcrypt), []byte(plaintext)); err != nil {
-			continue
-		}
-		// Match — mark used.
-		t := now
-		rec.UsedAt = &t
-		updated, err := json.MarshalIndent(rec, "", "  ")
-		if err != nil {
-			return nil, fmt.Errorf("secret store: marshal used: %w", err)
-		}
-		if err := os.WriteFile(filepath.Join(s.dir, e.Name()), updated, 0o600); err != nil {
-			return nil, fmt.Errorf("secret store: write used: %w", err)
-		}
-		ps := &repo.PairingSecret{
-			ID:         rec.ID,
-			LabelHint:  rec.Label,
-			HashBcrypt: rec.HashBcrypt,
-			ExpiresAt:  rec.ExpiresAt,
-			UsedAt:     rec.UsedAt,
-		}
-		return ps, nil
+
+	// Already used.
+	if rec.UsedAt != nil {
+		return nil, fmt.Errorf("%w: pairing secret already used", repo.ErrNotFound)
 	}
-	return nil, fmt.Errorf("%w: no valid pairing secret matched", repo.ErrNotFound)
+	// Expired.
+	if now.After(rec.ExpiresAt) {
+		return nil, fmt.Errorf("%w: pairing secret expired", repo.ErrNotFound)
+	}
+	// Bcrypt compare (one call, not N).
+	if err := bcrypt.CompareHashAndPassword([]byte(rec.HashBcrypt), []byte(plaintext)); err != nil {
+		return nil, fmt.Errorf("%w: pairing secret invalid", repo.ErrNotFound)
+	}
+
+	// Mark used atomically.
+	rec.UsedAt = &now
+	updated, err := json.MarshalIndent(rec, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("secret store: marshal used: %w", err)
+	}
+	if err := os.WriteFile(path, updated, 0o600); err != nil {
+		return nil, fmt.Errorf("secret store: write used: %w", err)
+	}
+
+	return &repo.PairingSecret{
+		ID:         rec.ID,
+		LabelHint:  rec.Label,
+		HashBcrypt: rec.HashBcrypt,
+		ExpiresAt:  rec.ExpiresAt,
+		UsedAt:     &now,
+	}, nil
 }
 
 // PruneExpired removes all expired secret records from storage.
