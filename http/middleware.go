@@ -1,13 +1,15 @@
-package httpserver
+package http
 
 import (
 	"context"
-	"errors"
 	"log/slog"
 	"net/http"
 
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
 	"github.com/zebaqui/notx-engine/core"
-	"github.com/zebaqui/notx-engine/repo"
+	pb "github.com/zebaqui/notx-engine/proto"
 )
 
 // deviceIDHeader is the HTTP request header that clients must set to identify
@@ -55,31 +57,32 @@ func (h *Handler) withDeviceAuth(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 
-		// ── 2. Device lookup ─────────────────────────────────────────────────
-		d, err := h.dev.GetDevice(r.Context(), deviceID)
+		// ── 2. Device lookup via gRPC service ────────────────────────────────
+		resp, err := h.deviceAdminSvc.GetDevice(r.Context(), &pb.GetDeviceRequest{DeviceUrn: deviceID})
 		if err != nil {
-			if errors.Is(err, repo.ErrNotFound) {
+			st, ok := status.FromError(err)
+			if ok && st.Code() == codes.NotFound {
 				log.Warn("device auth: unknown device", "device_id", deviceID)
 				writeError(w, http.StatusUnauthorized,
 					"device not registered: register this device before making data requests")
 				return
 			}
-			h.log.Error("device auth: repo error", "device_id", deviceID, "err", err)
+			h.log.Error("device auth: service error", "device_id", deviceID, "err", err)
 			writeError(w, http.StatusInternalServerError, "internal server error")
 			return
 		}
 
+		d := resp.Device
+
 		// ── 3. Admin role fast-path ──────────────────────────────────────────
 		// Any device with role=admin is always permitted regardless of its
 		// stored approval status or revocation flag — it bypasses steps 4 & 5.
-		// This covers both the local-mode sentinel device and remote admin
-		// devices registered via the passphrase flow.
-		if d.Role == core.DeviceRoleAdmin {
+		if d.Role == pb.DeviceRole_DEVICE_ROLE_ADMIN {
 			log.Debug("device auth: admin role, skipping approval check",
 				"device_id", deviceID,
-				"device_name", d.Name,
+				"device_name", d.DeviceName,
 			)
-			ctx := context.WithValue(r.Context(), ctxKeyDevice{}, d)
+			ctx := context.WithValue(r.Context(), ctxKeyDevice{}, deviceInfoExtToCore(d))
 			next(w, r.WithContext(ctx))
 			return
 		}
@@ -93,26 +96,25 @@ func (h *Handler) withDeviceAuth(next http.HandlerFunc) http.HandlerFunc {
 
 		// ── 5. Approval status check ─────────────────────────────────────────
 		switch d.ApprovalStatus {
-		case core.DeviceApprovalApproved:
+		case pb.ApprovalStatus_APPROVAL_STATUS_APPROVED:
 			// All good — fall through.
 
-		case core.DeviceApprovalPending:
+		case pb.ApprovalStatus_APPROVAL_STATUS_PENDING:
 			log.Warn("device auth: pending approval", "device_id", deviceID)
 			writeError(w, http.StatusForbidden,
 				"device is awaiting administrator approval before it can access data")
 			return
 
-		case core.DeviceApprovalRejected:
+		case pb.ApprovalStatus_APPROVAL_STATUS_REJECTED:
 			log.Warn("device auth: rejected device", "device_id", deviceID)
 			writeError(w, http.StatusForbidden,
 				"device registration has been rejected")
 			return
 
 		default:
-			// Treat any unknown status conservatively as denied.
 			log.Warn("device auth: unknown approval status",
 				"device_id", deviceID,
-				"status", string(d.ApprovalStatus),
+				"status", d.ApprovalStatus,
 			)
 			writeError(w, http.StatusForbidden, "device access not permitted")
 			return
@@ -120,7 +122,7 @@ func (h *Handler) withDeviceAuth(next http.HandlerFunc) http.HandlerFunc {
 
 		// ── Store device in context and continue ─────────────────────────────
 		log.Debug("device auth: ok", "device_id", deviceID)
-		ctx := context.WithValue(r.Context(), ctxKeyDevice{}, d)
+		ctx := context.WithValue(r.Context(), ctxKeyDevice{}, deviceInfoExtToCore(d))
 		next(w, r.WithContext(ctx))
 	}
 }
@@ -142,4 +144,49 @@ func logDeviceAuth(log *slog.Logger, d *core.Device, method, path string) {
 		"method", method,
 		"path", path,
 	)
+}
+
+// deviceInfoExtToCore converts a *pb.DeviceAdmin to a minimal *core.Device
+// for callers that need a core.Device in context (e.g. DeviceFromCtx).
+// Only the fields needed for auth decisions are populated.
+func deviceInfoExtToCore(d *pb.DeviceAdmin) *core.Device {
+	if d == nil {
+		return nil
+	}
+	urn, _ := core.ParseURN(d.DeviceUrn)
+	ownerURN, _ := core.ParseURN(d.OwnerUrn)
+
+	var role core.DeviceRole
+	switch d.Role {
+	case pb.DeviceRole_DEVICE_ROLE_ADMIN:
+		role = core.DeviceRoleAdmin
+	default:
+		role = core.DeviceRoleClient
+	}
+
+	var approvalStatus core.DeviceApprovalStatus
+	switch d.ApprovalStatus {
+	case pb.ApprovalStatus_APPROVAL_STATUS_APPROVED:
+		approvalStatus = core.DeviceApprovalApproved
+	case pb.ApprovalStatus_APPROVAL_STATUS_REJECTED:
+		approvalStatus = core.DeviceApprovalRejected
+	default:
+		approvalStatus = core.DeviceApprovalPending
+	}
+
+	dev := &core.Device{
+		URN:            urn,
+		Name:           d.DeviceName,
+		OwnerURN:       ownerURN,
+		Role:           role,
+		ApprovalStatus: approvalStatus,
+		Revoked:        d.Revoked,
+	}
+	if d.RegisteredAt != nil {
+		dev.RegisteredAt = d.RegisteredAt.AsTime()
+	}
+	if d.LastSeenAt != nil {
+		dev.LastSeenAt = d.LastSeenAt.AsTime()
+	}
+	return dev
 }

@@ -1,4 +1,4 @@
-package httpserver
+package http
 
 import (
 	"net/http"
@@ -7,7 +7,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	grpcsvc "github.com/zebaqui/notx-engine/internal/server/grpc"
-	pb "github.com/zebaqui/notx-engine/internal/server/proto"
+	pb "github.com/zebaqui/notx-engine/proto"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -83,7 +83,7 @@ type relayStepResultJSON struct {
 
 // routeRelay registers the relay adapter endpoints onto the mux.
 // It is called from Handler.routes() and requires a non-nil relay service.
-func (h *Handler) routeRelay(relaySvc *grpcsvc.RelayServiceServer) {
+func (h *Handler) routeRelay(relaySvc *grpcsvc.RelayServer) {
 	h.mux.HandleFunc("/v1/relay/execute",
 		h.withDeviceAuthMiddleware(func(w http.ResponseWriter, r *http.Request) {
 			h.handleRelayExecute(w, r, relaySvc)
@@ -99,7 +99,7 @@ func (h *Handler) routeRelay(relaySvc *grpcsvc.RelayServiceServer) {
 // POST /v1/relay/execute
 // ─────────────────────────────────────────────────────────────────────────────
 
-func (h *Handler) handleRelayExecute(w http.ResponseWriter, r *http.Request, svc *grpcsvc.RelayServiceServer) {
+func (h *Handler) handleRelayExecute(w http.ResponseWriter, r *http.Request, svc *grpcsvc.RelayServer) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
@@ -143,7 +143,7 @@ func (h *Handler) handleRelayExecute(w http.ResponseWriter, r *http.Request, svc
 // POST /v1/relay/execute-flow
 // ─────────────────────────────────────────────────────────────────────────────
 
-func (h *Handler) handleRelayExecuteFlow(w http.ResponseWriter, r *http.Request, svc *grpcsvc.RelayServiceServer) {
+func (h *Handler) handleRelayExecuteFlow(w http.ResponseWriter, r *http.Request, svc *grpcsvc.RelayServer) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
@@ -202,7 +202,7 @@ func (h *Handler) handleRelayExecuteFlow(w http.ResponseWriter, r *http.Request,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Proto ↔ JSON conversion helpers
+// Proto <-> JSON conversion helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
 func jsonToProtoHTTPRequest(j relayHTTPRequestJSON) *pb.HttpRequest {
@@ -227,7 +227,7 @@ func protoToJSONHTTPResponse(r *pb.HttpResponse) relayHTTPResponseJSON {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// gRPC error → HTTP status helpers
+// gRPC error -> HTTP status helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
 // grpcStatusToHTTP maps a gRPC error's status code to the appropriate HTTP
