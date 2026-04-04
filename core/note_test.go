@@ -10,9 +10,9 @@ import (
 // ──────────────────────────────────────────────────────────────────────────────
 
 var (
-	testNoteURN   = MustParseURN("notx:note:018e4f2a-9b1c-7d3e-8f2a-1b3c4d5e6f7a")
-	testAuthorURN = MustParseURN("notx:usr:7f3e9c1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b")
-	testAuthor2   = MustParseURN("notx:usr:3c4d5e6f-7a8b-9c0d-1e2f-3a4b5c6d7e8f")
+	testNoteURN   = MustParseURN("urn:notx:note:018e4f2a-9b1c-7d3e-8f2a-1b3c4d5e6f7a")
+	testAuthorURN = MustParseURN("urn:notx:usr:7f3e9c1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b")
+	testAuthor2   = MustParseURN("urn:notx:usr:3c4d5e6f-7a8b-9c0d-1e2f-3a4b5c6d7e8f")
 	testT0        = time.Date(2025, 1, 15, 9, 0, 0, 0, time.UTC)
 )
 
@@ -794,7 +794,7 @@ func TestAuthorURNs_EmptyNote(t *testing.T) {
 
 func TestAuthorURNs_AnonIncluded(t *testing.T) {
 	n := newNote()
-	anon := AnonURN("notx")
+	anon := AnonURN()
 	mustApply(t, n, makeEvent(1, anon, testT0, set(1, "anonymous edit")))
 
 	authors := n.AuthorURNs()
@@ -880,9 +880,9 @@ func TestSnapshotContent_Empty(t *testing.T) {
 func TestNote_OptionalURNFields(t *testing.T) {
 	n := newNote()
 
-	projURN := MustParseURN("notx:proj:3a1b2c3d-4e5f-6a7b-8c9d-0e1f2a3b4c5d")
-	folderURN := MustParseURN("notx:folder:1c2d3e4f-5a6b-7c8d-9e0f-1a2b3c4d5e6f")
-	parentURN := MustParseURN("notx:note:9e8d7c6b-5a4f-3e2d-1c0b-9a8f7e6d5c4b")
+	projURN := MustParseURN("urn:notx:proj:3a1b2c3d-4e5f-6a7b-8c9d-0e1f2a3b4c5d")
+	folderURN := MustParseURN("urn:notx:folder:1c2d3e4f-5a6b-7c8d-9e0f-1a2b3c4d5e6f")
+	parentURN := MustParseURN("urn:notx:note:9e8d7c6b-5a4f-3e2d-1c0b-9a8f7e6d5c4b")
 
 	n.ProjectURN = &projURN
 	n.FolderURN = &folderURN
@@ -901,7 +901,7 @@ func TestNote_OptionalURNFields(t *testing.T) {
 
 func TestNote_NodeLinks(t *testing.T) {
 	n := newNote()
-	reqURN := MustParseURN("mycompany:note:7c3e9f1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b")
+	reqURN := MustParseURN("urn:notx:note:7c3e9f1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b")
 	n.NodeLinks["requirements"] = reqURN
 
 	got, ok := n.NodeLinks["requirements"]

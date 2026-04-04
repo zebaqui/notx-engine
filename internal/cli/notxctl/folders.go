@@ -4,10 +4,10 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 
-	pb "github.com/zebaqui/notx-engine/internal/server/proto"
+	"github.com/zebaqui/notx-engine/core"
+	pb "github.com/zebaqui/notx-engine/proto"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -60,7 +60,7 @@ Examples:
 		ctx, cancel := rpcCtx(cmd)
 		defer cancel()
 
-		resp, err := conn.Projects().ListFolders(ctx, &pb.ListFoldersRequest{
+		resp, err := conn.Folders().ListFolders(ctx, &pb.ListFoldersRequest{
 			ProjectUrn:     foldersListFlags.projectURN,
 			IncludeDeleted: foldersListFlags.includeDeleted,
 			PageSize:       foldersListFlags.pageSize,
@@ -155,7 +155,7 @@ Example:
 		ctx, cancel := rpcCtx(cmd)
 		defer cancel()
 
-		resp, err := conn.Projects().GetFolder(ctx, &pb.GetFolderRequest{
+		resp, err := conn.Folders().GetFolder(ctx, &pb.GetFolderRequest{
 			Urn: args[0],
 		})
 		if err != nil {
@@ -226,10 +226,10 @@ Examples:
 
 		urn := foldersCreateFlags.urn
 		if urn == "" {
-			urn = "notx:folder:" + uuid.New().String()
+			urn = core.NewURN(core.ObjectTypeFolder).String()
 		}
 
-		resp, err := conn.Projects().CreateFolder(ctx, &pb.CreateFolderRequest{
+		resp, err := conn.Folders().CreateFolder(ctx, &pb.CreateFolderRequest{
 			Urn:         urn,
 			ProjectUrn:  foldersCreateFlags.projectURN,
 			Name:        foldersCreateFlags.name,
@@ -303,7 +303,7 @@ Examples:
 		defer cancel()
 
 		// Pre-fetch current state so unchanged fields are carried forward.
-		getResp, err := conn.Projects().GetFolder(ctx, &pb.GetFolderRequest{
+		getResp, err := conn.Folders().GetFolder(ctx, &pb.GetFolderRequest{
 			Urn: args[0],
 		})
 		if err != nil {
@@ -326,11 +326,15 @@ Examples:
 			deleted = foldersUpdateFlags.deleted
 		}
 
-		resp, err := conn.Projects().UpdateFolder(ctx, &pb.UpdateFolderRequest{
-			Urn:         args[0],
-			Name:        name,
-			Description: description,
-			Deleted:     deleted,
+		resp, err := conn.Folders().UpdateFolder(ctx, &pb.UpdateFolderRequest{
+			Urn: args[0],
+			Folder: &pb.Folder{
+				Urn:         args[0],
+				ProjectUrn:  current.ProjectUrn,
+				Name:        name,
+				Description: description,
+				Deleted:     deleted,
+			},
 		})
 		if err != nil {
 			return fmt.Errorf("UpdateFolder: %w", err)
@@ -384,7 +388,7 @@ Example:
 		ctx, cancel := rpcCtx(cmd)
 		defer cancel()
 
-		resp, err := conn.Projects().DeleteFolder(ctx, &pb.DeleteFolderRequest{
+		resp, err := conn.Folders().DeleteFolder(ctx, &pb.DeleteFolderRequest{
 			Urn: args[0],
 		})
 		if err != nil {

@@ -18,11 +18,11 @@ import (
 	"github.com/spf13/pflag"
 	"golang.org/x/crypto/bcrypt"
 
+	"github.com/zebaqui/notx-engine/config"
 	"github.com/zebaqui/notx-engine/internal/clientconfig"
 	pairingsecret "github.com/zebaqui/notx-engine/internal/pairing"
-	"github.com/zebaqui/notx-engine/repo/file"
 	"github.com/zebaqui/notx-engine/internal/server"
-	"github.com/zebaqui/notx-engine/config"
+	"github.com/zebaqui/notx-engine/repo/file"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -119,6 +119,10 @@ var serverFlags struct {
 
 	// internal — set when this process is the background worker itself
 	daemon bool
+
+	// foreground skips the daemon fork and runs the server in the foreground.
+	// Set automatically when running as PID 1 (e.g. inside a Docker container).
+	foreground bool
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -220,6 +224,9 @@ func init() {
 	f.BoolVar(&serverFlags.daemon, "daemon", false, "run as background worker (internal use)")
 	f.MarkHidden("daemon") //nolint:errcheck
 
+	f.BoolVar(&serverFlags.foreground, "foreground", false,
+		"Run the server in the foreground instead of spawning a background daemon (useful in containers)")
+
 	serverCmd.AddCommand(serverStatusCmd)
 	serverCmd.AddCommand(serverStopCmd)
 	serverCmd.AddCommand(serverRestartCmd)
@@ -230,8 +237,13 @@ func init() {
 
 // runServerStart is called when the user runs `notx server` (no sub-command).
 // If --daemon is set this process IS the worker; otherwise it forks a daemon.
+// When --foreground is set, or when we detect we are running as PID 1 (i.e.
+// inside a container), we skip the fork and run in the foreground directly.
 func runServerStart(cmd *cobra.Command, args []string) error {
 	if serverFlags.daemon {
+		return runDaemonWorker(cmd, args)
+	}
+	if serverFlags.foreground || os.Getpid() == 1 {
 		return runDaemonWorker(cmd, args)
 	}
 	return spawnDaemon(cmd)
@@ -314,8 +326,12 @@ func runDaemonWorker(cmd *cobra.Command, args []string) error {
 	}
 
 	cfg := config.Default()
-	cfg.EnableHTTP = serverFlags.httpEnabled
-	cfg.EnableGRPC = serverFlags.grpcEnabled
+	if cmd.Flags().Changed("http") {
+		cfg.EnableHTTP = serverFlags.httpEnabled
+	}
+	if cmd.Flags().Changed("grpc") {
+		cfg.EnableGRPC = serverFlags.grpcEnabled
+	}
 	cfg.HTTPPort = serverFlags.httpPort
 	cfg.GRPCPort = serverFlags.grpcPort
 	cfg.Host = serverFlags.host

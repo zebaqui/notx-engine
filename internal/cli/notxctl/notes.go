@@ -6,11 +6,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
 
-	pb "github.com/zebaqui/notx-engine/internal/server/proto"
+	"github.com/zebaqui/notx-engine/core"
+	pb "github.com/zebaqui/notx-engine/proto"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -286,7 +286,7 @@ Examples:
 
 		urn := notesCreateFlags.urn
 		if urn == "" {
-			urn = "notx:note:" + uuid.New().String()
+			urn = core.NewURN(core.ObjectTypeNote).String()
 		}
 
 		nt := pb.NoteType_NOTE_TYPE_NORMAL
@@ -485,9 +485,9 @@ Examples:
 			return fmt.Errorf("StreamEvents: %w", err)
 		}
 
-		var events []*pb.EventProto
+		var events []*pb.Event
 		for {
-			evt, err := stream.Recv()
+			resp, err := stream.Recv()
 			if err != nil {
 				// io.EOF is the normal end-of-stream signal.
 				if isEOF(err) {
@@ -495,6 +495,7 @@ Examples:
 				}
 				return fmt.Errorf("StreamEvents recv: %w", err)
 			}
+			evt := resp.Event
 			events = append(events, evt)
 		}
 

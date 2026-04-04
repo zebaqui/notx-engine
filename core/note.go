@@ -20,7 +20,7 @@ type Note struct {
 	// --- Identity & Metadata ------------------------------------------------
 
 	// URN is the globally unique identifier for this note.
-	// Format: <namespace>:note:<uuid>
+	// Format: urn:notx:note:<uuidv7>
 	URN URN
 
 	// Name is the human-readable title / display name of the note.
@@ -124,7 +124,7 @@ func NewNoteAtSequence(urn URN, name string, createdAt, updatedAt time.Time, hea
 		n.events[i] = &Event{
 			NoteURN:   urn,
 			Sequence:  i + 1,
-			AuthorURN: AnonURN(urn.Namespace),
+			AuthorURN: AnonURN(),
 			CreatedAt: createdAt,
 			Entries:   []LineEntry{{Op: LineOpSetEmpty, LineNumber: 1}},
 		}

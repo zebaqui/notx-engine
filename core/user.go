@@ -6,7 +6,7 @@ import "time"
 // device owner, and share recipient is identified by a User URN.
 type User struct {
 	// URN is the globally unique user identifier.
-	// Format: <namespace>:usr:<uuid>
+	// Format: urn:notx:usr:<uuidv7>
 	URN URN
 
 	// DisplayName is the human-readable name shown in the UI.

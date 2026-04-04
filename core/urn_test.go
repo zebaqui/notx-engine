@@ -10,33 +10,16 @@ import (
 // ──────────────────────────────────────────────────────────────────────────────
 
 func TestParseURN_ValidOfficialPlatform(t *testing.T) {
-	raw := "notx:note:018e4f2a-9b1c-7d3e-8f2a-1b3c4d5e6f7a"
+	raw := "urn:notx:note:018e4f2a-9b1c-7d3e-8f2a-1b3c4d5e6f7a"
 	u, err := ParseURN(raw)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
-	}
-	if u.Namespace != "notx" {
-		t.Errorf("Namespace: got %q, want %q", u.Namespace, "notx")
 	}
 	if u.ObjectType != ObjectTypeNote {
 		t.Errorf("ObjectType: got %q, want %q", u.ObjectType, ObjectTypeNote)
 	}
-	if u.UUID != "018e4f2a-9b1c-7d3e-8f2a-1b3c4d5e6f7a" {
-		t.Errorf("UUID: got %q", u.UUID)
-	}
-}
-
-func TestParseURN_ValidSelfHosted(t *testing.T) {
-	raw := "acme:usr:7f3e9c1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b"
-	u, err := ParseURN(raw)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if u.Namespace != "acme" {
-		t.Errorf("Namespace: got %q, want %q", u.Namespace, "acme")
-	}
-	if u.ObjectType != ObjectTypeUser {
-		t.Errorf("ObjectType: got %q, want %q", u.ObjectType, ObjectTypeUser)
+	if u.ID != "018e4f2a-9b1c-7d3e-8f2a-1b3c4d5e6f7a" {
+		t.Errorf("ID: got %q", u.ID)
 	}
 }
 
@@ -46,12 +29,12 @@ func TestParseURN_ValidAllObjectTypes(t *testing.T) {
 		raw        string
 		objectType ObjectType
 	}{
-		{"notx:note:" + uuid, ObjectTypeNote},
-		{"notx:event:" + uuid, ObjectTypeEvent},
-		{"notx:usr:" + uuid, ObjectTypeUser},
-		{"notx:org:" + uuid, ObjectTypeOrg},
-		{"notx:proj:" + uuid, ObjectTypeProject},
-		{"notx:folder:" + uuid, ObjectTypeFolder},
+		{"urn:notx:note:" + uuid, ObjectTypeNote},
+		{"urn:notx:event:" + uuid, ObjectTypeEvent},
+		{"urn:notx:usr:" + uuid, ObjectTypeUser},
+		{"urn:notx:org:" + uuid, ObjectTypeOrg},
+		{"urn:notx:proj:" + uuid, ObjectTypeProject},
+		{"urn:notx:folder:" + uuid, ObjectTypeFolder},
 	}
 
 	for _, tc := range cases {
@@ -68,44 +51,19 @@ func TestParseURN_ValidAllObjectTypes(t *testing.T) {
 }
 
 func TestParseURN_AnonSentinel(t *testing.T) {
-	cases := []string{
-		"notx:usr:anon",
-		"acme:usr:anon",
-		"mycompany:usr:anon",
+	raw := "urn:notx:usr:anon"
+	u, err := ParseURN(raw)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
-	for _, raw := range cases {
-		t.Run(raw, func(t *testing.T) {
-			u, err := ParseURN(raw)
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if !u.IsAnon() {
-				t.Errorf("expected IsAnon() == true for %q", raw)
-			}
-		})
-	}
-}
-
-func TestParseURN_NamespaceVariants(t *testing.T) {
-	uuid := "3a1b2c3d-4e5f-6a7b-8c9d-0e1f2a3b4c5d"
-	valid := []string{
-		"a:note:" + uuid,          // single character
-		"acme:note:" + uuid,       // common short name
-		"my-company:note:" + uuid, // hyphen in middle
-		"abc123:note:" + uuid,     // alphanumeric mix
-	}
-	for _, raw := range valid {
-		t.Run(raw, func(t *testing.T) {
-			if _, err := ParseURN(raw); err != nil {
-				t.Errorf("unexpected error for valid namespace: %v", err)
-			}
-		})
+	if !u.IsAnon() {
+		t.Errorf("expected IsAnon() == true for %q", raw)
 	}
 }
 
 func TestParseURN_UnknownObjectTypeAllowed(t *testing.T) {
 	// Forward-compatibility: unknown object types must not cause parse errors.
-	raw := "notx:widget:3a1b2c3d-4e5f-6a7b-8c9d-0e1f2a3b4c5d"
+	raw := "urn:notx:widget:3a1b2c3d-4e5f-6a7b-8c9d-0e1f2a3b4c5d"
 	u, err := ParseURN(raw)
 	if err != nil {
 		t.Fatalf("unexpected error for unknown object type: %v", err)
@@ -122,8 +80,10 @@ func TestParseURN_UnknownObjectTypeAllowed(t *testing.T) {
 func TestParseURN_MissingSegments(t *testing.T) {
 	invalid := []string{
 		"",
-		"notx",
-		"notx:note",
+		"urn:notx:note",
+		"urn:notx:",
+		"notx:note:018e4f2a-9b1c-7d3e-8f2a-1b3c4d5e6f7a", // missing urn: prefix
+		"acme:usr:7f3e9c1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b",  // old namespace-based format
 		":",
 		"::",
 	}
@@ -137,37 +97,18 @@ func TestParseURN_MissingSegments(t *testing.T) {
 	}
 }
 
-func TestParseURN_InvalidNamespace(t *testing.T) {
-	uuid := "3a1b2c3d-4e5f-6a7b-8c9d-0e1f2a3b4c5d"
+func TestParseURN_InvalidID(t *testing.T) {
 	cases := []string{
-		"-acme:note:" + uuid,   // leading hyphen
-		"acme-:note:" + uuid,   // trailing hyphen
-		"ACME:note:" + uuid,    // uppercase
-		"acme_co:note:" + uuid, // underscore not allowed
-		"acme.co:note:" + uuid, // dot not allowed
+		"urn:notx:note:not-a-uuid",
+		"urn:notx:note:XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX",
+		"urn:notx:note:00000000000000000000000000000000", // missing hyphens
+		"urn:notx:note:", // empty id
 	}
 	for _, raw := range cases {
 		t.Run(raw, func(t *testing.T) {
 			_, err := ParseURN(raw)
 			if err == nil {
-				t.Errorf("expected error for invalid namespace in %q", raw)
-			}
-		})
-	}
-}
-
-func TestParseURN_InvalidUUID(t *testing.T) {
-	cases := []string{
-		"notx:note:not-a-uuid",
-		"notx:note:XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX",
-		"notx:note:00000000000000000000000000000000", // missing hyphens
-		"notx:note:", // empty uuid
-	}
-	for _, raw := range cases {
-		t.Run(raw, func(t *testing.T) {
-			_, err := ParseURN(raw)
-			if err == nil {
-				t.Errorf("expected error for invalid UUID in %q", raw)
+				t.Errorf("expected error for invalid ID in %q", raw)
 			}
 		})
 	}
@@ -175,7 +116,7 @@ func TestParseURN_InvalidUUID(t *testing.T) {
 
 func TestParseURN_TooLong(t *testing.T) {
 	// Build a URN that exceeds 256 characters.
-	raw := "notx:note:" + strings.Repeat("a", 250)
+	raw := "urn:notx:note:" + strings.Repeat("a", 250)
 	_, err := ParseURN(raw)
 	if err == nil {
 		t.Errorf("expected error for URN exceeding 256 characters")
@@ -192,9 +133,12 @@ func TestMustParseURN_Valid(t *testing.T) {
 			t.Fatalf("unexpected panic: %v", r)
 		}
 	}()
-	u := MustParseURN("notx:note:018e4f2a-9b1c-7d3e-8f2a-1b3c4d5e6f7a")
-	if u.Namespace != "notx" {
-		t.Errorf("Namespace: got %q", u.Namespace)
+	u := MustParseURN("urn:notx:note:018e4f2a-9b1c-7d3e-8f2a-1b3c4d5e6f7a")
+	if u.ObjectType != ObjectTypeNote {
+		t.Errorf("ObjectType: got %q, want %q", u.ObjectType, ObjectTypeNote)
+	}
+	if u.ID != "018e4f2a-9b1c-7d3e-8f2a-1b3c4d5e6f7a" {
+		t.Errorf("ID: got %q", u.ID)
 	}
 }
 
@@ -213,10 +157,10 @@ func TestMustParseURN_InvalidPanics(t *testing.T) {
 
 func TestURN_String_RoundTrip(t *testing.T) {
 	cases := []string{
-		"notx:note:018e4f2a-9b1c-7d3e-8f2a-1b3c4d5e6f7a",
-		"acme:usr:7f3e9c1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b",
-		"notx:usr:anon",
-		"mycompany:proj:3a1b2c3d-4e5f-6a7b-8c9d-0e1f2a3b4c5d",
+		"urn:notx:note:018e4f2a-9b1c-7d3e-8f2a-1b3c4d5e6f7a",
+		"urn:notx:usr:7f3e9c1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b",
+		"urn:notx:usr:anon",
+		"urn:notx:proj:3a1b2c3d-4e5f-6a7b-8c9d-0e1f2a3b4c5d",
 	}
 	for _, raw := range cases {
 		t.Run(raw, func(t *testing.T) {
@@ -236,25 +180,30 @@ func TestURN_String_RoundTrip(t *testing.T) {
 // ──────────────────────────────────────────────────────────────────────────────
 
 func TestURN_Equal(t *testing.T) {
-	a := MustParseURN("notx:note:018e4f2a-9b1c-7d3e-8f2a-1b3c4d5e6f7a")
-	b := MustParseURN("notx:note:018e4f2a-9b1c-7d3e-8f2a-1b3c4d5e6f7a")
-	c := MustParseURN("acme:note:018e4f2a-9b1c-7d3e-8f2a-1b3c4d5e6f7a")
+	a := MustParseURN("urn:notx:note:018e4f2a-9b1c-7d3e-8f2a-1b3c4d5e6f7a")
+	b := MustParseURN("urn:notx:note:018e4f2a-9b1c-7d3e-8f2a-1b3c4d5e6f7a")
 
 	if !a.Equal(b) {
 		t.Error("expected a == b")
-	}
-	if a.Equal(c) {
-		t.Error("expected a != c (different namespace)")
 	}
 }
 
 func TestURN_Equal_DifferentType(t *testing.T) {
 	uuid := "018e4f2a-9b1c-7d3e-8f2a-1b3c4d5e6f7a"
-	note := MustParseURN("notx:note:" + uuid)
-	event := MustParseURN("notx:event:" + uuid)
+	note := MustParseURN("urn:notx:note:" + uuid)
+	event := MustParseURN("urn:notx:event:" + uuid)
 
 	if note.Equal(event) {
 		t.Error("expected note != event (different object type)")
+	}
+}
+
+func TestURN_Equal_DifferentID(t *testing.T) {
+	a := MustParseURN("urn:notx:note:018e4f2a-9b1c-7d3e-8f2a-1b3c4d5e6f7a")
+	b := MustParseURN("urn:notx:note:7f3e9c1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b")
+
+	if a.Equal(b) {
+		t.Error("expected a != b (different ID)")
 	}
 }
 
@@ -263,12 +212,12 @@ func TestURN_Equal_DifferentType(t *testing.T) {
 // ──────────────────────────────────────────────────────────────────────────────
 
 func TestURN_IsAnon(t *testing.T) {
-	anon := MustParseURN("notx:usr:anon")
+	anon := MustParseURN("urn:notx:usr:anon")
 	if !anon.IsAnon() {
-		t.Error("expected IsAnon() == true for notx:usr:anon")
+		t.Error("expected IsAnon() == true for urn:notx:usr:anon")
 	}
 
-	real := MustParseURN("notx:usr:7f3e9c1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b")
+	real := MustParseURN("urn:notx:usr:7f3e9c1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b")
 	if real.IsAnon() {
 		t.Error("expected IsAnon() == false for real user URN")
 	}
@@ -281,12 +230,12 @@ func TestURN_IsAnon(t *testing.T) {
 func TestURN_IsKnownType(t *testing.T) {
 	uuid := "3a1b2c3d-4e5f-6a7b-8c9d-0e1f2a3b4c5d"
 	knownRaws := []string{
-		"notx:note:" + uuid,
-		"notx:event:" + uuid,
-		"notx:usr:" + uuid,
-		"notx:org:" + uuid,
-		"notx:proj:" + uuid,
-		"notx:folder:" + uuid,
+		"urn:notx:note:" + uuid,
+		"urn:notx:event:" + uuid,
+		"urn:notx:usr:" + uuid,
+		"urn:notx:org:" + uuid,
+		"urn:notx:proj:" + uuid,
+		"urn:notx:folder:" + uuid,
 	}
 	for _, raw := range knownRaws {
 		t.Run(raw, func(t *testing.T) {
@@ -297,7 +246,7 @@ func TestURN_IsKnownType(t *testing.T) {
 		})
 	}
 
-	unknown := MustParseURN("notx:widget:" + uuid)
+	unknown := MustParseURN("urn:notx:widget:" + uuid)
 	if unknown.IsKnownType() {
 		t.Errorf("expected IsKnownType() == false for unknown type")
 	}
@@ -308,26 +257,15 @@ func TestURN_IsKnownType(t *testing.T) {
 // ──────────────────────────────────────────────────────────────────────────────
 
 func TestAnonURN(t *testing.T) {
-	cases := []struct {
-		namespace string
-		want      string
-	}{
-		{"notx", "notx:usr:anon"},
-		{"acme", "acme:usr:anon"},
-		{"mycompany", "mycompany:usr:anon"},
+	u := AnonURN()
+	want := "urn:notx:usr:anon"
+	if u.String() != want {
+		t.Errorf("AnonURN().String() = %q, want %q", u.String(), want)
 	}
-	for _, tc := range cases {
-		t.Run(tc.namespace, func(t *testing.T) {
-			u := AnonURN(tc.namespace)
-			if u.String() != tc.want {
-				t.Errorf("AnonURN(%q).String() = %q, want %q", tc.namespace, u.String(), tc.want)
-			}
-			if u.ObjectType != ObjectTypeUser {
-				t.Errorf("AnonURN ObjectType: got %q, want %q", u.ObjectType, ObjectTypeUser)
-			}
-			if !u.IsAnon() {
-				t.Errorf("AnonURN(%q).IsAnon() should be true", tc.namespace)
-			}
-		})
+	if u.ObjectType != ObjectTypeUser {
+		t.Errorf("AnonURN ObjectType: got %q, want %q", u.ObjectType, ObjectTypeUser)
+	}
+	if !u.IsAnon() {
+		t.Errorf("AnonURN().IsAnon() should be true")
 	}
 }

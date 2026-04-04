@@ -4,10 +4,10 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 
-	pb "github.com/zebaqui/notx-engine/internal/server/proto"
+	"github.com/zebaqui/notx-engine/core"
+	pb "github.com/zebaqui/notx-engine/proto"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -209,7 +209,7 @@ Examples:
 
 		urn := projectsCreateFlags.urn
 		if urn == "" {
-			urn = "notx:proj:" + uuid.New().String()
+			urn = core.NewURN(core.ObjectTypeProject).String()
 		}
 
 		resp, err := conn.Projects().CreateProject(ctx, &pb.CreateProjectRequest{
@@ -306,10 +306,13 @@ Examples:
 		}
 
 		resp, err := conn.Projects().UpdateProject(ctx, &pb.UpdateProjectRequest{
-			Urn:         args[0],
-			Name:        name,
-			Description: description,
-			Deleted:     deleted,
+			Urn: args[0],
+			Project: &pb.Project{
+				Urn:         args[0],
+				Name:        name,
+				Description: description,
+				Deleted:     deleted,
+			},
 		})
 		if err != nil {
 			return fmt.Errorf("UpdateProject: %w", err)

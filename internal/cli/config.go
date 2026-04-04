@@ -100,7 +100,7 @@ func runConfigInteractive(cmd *cobra.Command, args []string) error {
 
 	printHeader("notx config")
 	fmt.Printf("  File: %s\n", path)
-	fmt.Println("  Press Enter to keep the current value. Ctrl-C to abort.\n")
+	fmt.Println("  Press Enter to keep the current value. Ctrl-C to abort.")
 
 	sc := bufio.NewScanner(os.Stdin)
 

@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 
-	pb "github.com/zebaqui/notx-engine/internal/server/proto"
+	"github.com/zebaqui/notx-engine/core"
+	pb "github.com/zebaqui/notx-engine/proto"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -56,7 +56,7 @@ var devicesListCmd = &cobra.Command{
 
 Examples:
   notxctl devices list
-  notxctl devices list --owner notx:usr:…`,
+  notxctl devices list --owner urn:notx:usr:…`,
 	RunE: func(cmd *cobra.Command, _ []string) error {
 		conn := connFromCtx(cmd)
 		ctx, cancel := rpcCtx(cmd)
@@ -127,7 +127,7 @@ var devicesGetKeyCmd = &cobra.Command{
 	Long: `Calls GetDevicePublicKey and prints the raw public key in base64.
 
 Example:
-  notxctl devices get-key notx:device:…`,
+  notxctl devices get-key urn:notx:device:…`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		conn := connFromCtx(cmd)
@@ -175,13 +175,13 @@ var devicesRegisterCmd = &cobra.Command{
 	Short: "Register a new device",
 	Long: `Calls RegisterDevice to store a new device and its public key.
 
-If --urn is omitted a random notx:device:<uuid> is generated.
+If --urn is omitted a random urn:notx:device:<uuidv7> is generated.
 --key must be a base64-encoded Ed25519 public key (32 bytes).
 
 Examples:
   notxctl devices register \
       --name "My Laptop" \
-      --owner notx:usr:… \
+      --owner urn:notx:usr:… \
       --key "$(cat pubkey.b64)"`,
 	RunE: func(cmd *cobra.Command, _ []string) error {
 		conn := connFromCtx(cmd)
@@ -209,7 +209,7 @@ Examples:
 
 		urn := devicesRegisterFlags.urn
 		if urn == "" {
-			urn = "notx:device:" + uuid.New().String()
+			urn = core.NewURN(core.ObjectTypeDevice).String()
 		}
 
 		resp, err := conn.Devices().RegisterDevice(ctx, &pb.RegisterDeviceRequest{
@@ -243,7 +243,7 @@ func init() {
 	f.StringVar(&devicesRegisterFlags.name, "name", "",
 		"human-readable device name (required)")
 	f.StringVar(&devicesRegisterFlags.ownerURN, "owner", "",
-		"owner URN notx:usr:… (required)")
+		"owner URN urn:notx:usr:… (required)")
 	f.StringVar(&devicesRegisterFlags.publicKey, "key", "",
 		"base64-encoded Ed25519 public key (required)")
 }
@@ -261,7 +261,7 @@ The device is removed from the registry. Future secure note shares will
 not include the revoked device.
 
 Example:
-  notxctl devices revoke notx:device:…`,
+  notxctl devices revoke urn:notx:device:…`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		conn := connFromCtx(cmd)
@@ -318,7 +318,7 @@ The token should be encoded into a QR code and displayed to the user.
 It is valid for 5 minutes.
 
 Example:
-  notxctl devices pair start --initiator notx:device:…`,
+  notxctl devices pair start --initiator urn:notx:device:…`,
 	RunE: func(cmd *cobra.Command, _ []string) error {
 		if devicesPairStartFlags.initiatorURN == "" {
 			return fmt.Errorf("--initiator is required")
@@ -400,7 +400,7 @@ Example:
 
 		urn := devicesPairCompleteFlags.deviceURN
 		if urn == "" {
-			urn = "notx:device:" + uuid.New().String()
+			urn = core.NewURN(core.ObjectTypeDevice).String()
 		}
 
 		conn := connFromCtx(cmd)

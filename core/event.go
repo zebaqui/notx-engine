@@ -45,7 +45,7 @@ type LineEntry struct {
 // time by a specific author. Events are immutable once written.
 type Event struct {
 	// URN is the globally unique identifier for this event.
-	// Format: <namespace>:event:<uuid>
+	// Format: urn:notx:event:<uuidv7>
 	// May be zero-value if the event was parsed from a file that does not
 	// carry per-event URNs (the file format encodes events inline without
 	// individual URNs).
@@ -59,7 +59,7 @@ type Event struct {
 	Sequence int
 
 	// AuthorURN is the URN of the user who authored the change, or the
-	// instance-specific anonymous sentinel (e.g. "notx:usr:anon").
+	// global anonymous sentinel (urn:notx:usr:anon).
 	AuthorURN URN
 
 	// CreatedAt is the UTC timestamp of when this event was recorded.
@@ -72,6 +72,19 @@ type Event struct {
 
 	// Entries contains the ordered list of line-level changes for this event.
 	Entries []LineEntry
+
+	// WrappedKeys holds per-device encrypted copies of the Content Encryption
+	// Key (CEK) for secure notes. The map key is a device URN string; the
+	// value is the CEK wrapped (encrypted) with that device's public key.
+	//
+	// This field is populated by the ShareSecureNote flow: the sharing client
+	// re-wraps the CEK for each recipient device and uploads the wrapped keys
+	// to the server, which stores them here without ever seeing the plaintext
+	// CEK. Recipient devices look up their own entry by URN and unwrap it with
+	// their private key to recover the CEK, then decrypt the event payload.
+	//
+	// Empty / nil for normal (non-secure) notes.
+	WrappedKeys map[string][]byte
 }
 
 // Payload returns the lane-format string representation of the event's line

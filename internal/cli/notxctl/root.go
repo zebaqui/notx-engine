@@ -270,7 +270,7 @@ func fmtBool(b bool, trueVal, falseVal string) string {
 }
 
 // shortURN returns the last 8 hex characters of the UUID segment of a notx URN.
-// e.g. "notx:note:1a9670dd-1a65-481a-ad17-03d77de021e5" → "03d77de021e5"
+// e.g. "urn:notx:note:1a9670dd-1a65-481a-ad17-03d77de021e5" → "1a9670dd-1a65-481a-ad17-03d77de021e5"
 // Falls back to the full string if the URN is malformed.
 func shortURN(urn string) string {
 	parts := strings.Split(urn, ":")

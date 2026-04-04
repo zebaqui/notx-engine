@@ -38,7 +38,7 @@ const (
 // and fast to enumerate.
 type Project struct {
 	// URN is the globally unique identifier for this project.
-	// Format: <namespace>:proj:<uuid>
+	// Format: urn:notx:proj:<uuidv7>
 	URN URN
 
 	// Name is the human-readable display name (mutable).
@@ -61,7 +61,7 @@ type Project struct {
 // Notes reference a folder by storing its URN in their FolderURN field.
 type Folder struct {
 	// URN is the globally unique identifier for this folder.
-	// Format: <namespace>:folder:<uuid>
+	// Format: urn:notx:folder:<uuidv7>
 	URN URN
 
 	// ProjectURN is the URN of the owning project. Required; a folder
@@ -88,7 +88,7 @@ type Folder struct {
 // Device URNs are used for per-device CEK wrapping in secure notes.
 type Device struct {
 	// URN is the globally unique device identifier.
-	// Format: <namespace>:device:<uuid>
+	// Format: urn:notx:device:<uuidv7>
 	URN URN
 
 	// Name is a human-readable label for the device (e.g. "MacBook Pro").

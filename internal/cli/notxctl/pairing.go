@@ -7,7 +7,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	pb "github.com/zebaqui/notx-engine/internal/server/proto"
+	pb "github.com/zebaqui/notx-engine/proto"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────

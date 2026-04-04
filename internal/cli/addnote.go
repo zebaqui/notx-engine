@@ -12,13 +12,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	"github.com/zebaqui/notx-engine/core"
 	"github.com/zebaqui/notx-engine/internal/clientconfig"
 	"github.com/zebaqui/notx-engine/internal/grpcclient"
-	pb "github.com/zebaqui/notx-engine/internal/server/proto"
+	pb "github.com/zebaqui/notx-engine/proto"
 )
 
 var addNoteCmd = &cobra.Command{
@@ -168,10 +168,8 @@ func runAddNote(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	ns := cfg.Client.Namespace
-
 	// ── Build and send CreateNote ─────────────────────────────────────────────
-	noteURNStr := fmt.Sprintf("%s:note:%s", ns, uuid.New().String())
+	noteURNStr := core.NewURN(core.ObjectTypeNote).String()
 
 	noteType := pb.NoteType_NOTE_TYPE_NORMAL
 	if addNoteFlags.secure {
@@ -195,16 +193,16 @@ func runAddNote(cmd *cobra.Command, args []string) error {
 
 	// ── Append initial content event (only for non-empty files) ───────────────
 	if len(lines) > 0 {
-		entries := make([]*pb.LineEntryProto, 0, len(lines))
+		entries := make([]*pb.LineEntry, 0, len(lines))
 		for i, line := range lines {
 			lineNum := int32(i + 1)
 			if line == "" {
-				entries = append(entries, &pb.LineEntryProto{
+				entries = append(entries, &pb.LineEntry{
 					Op:         1, // LineOpSetEmpty
 					LineNumber: lineNum,
 				})
 			} else {
-				entries = append(entries, &pb.LineEntryProto{
+				entries = append(entries, &pb.LineEntry{
 					Op:         0, // LineOpSet
 					LineNumber: lineNum,
 					Content:    line,
@@ -212,11 +210,11 @@ func runAddNote(cmd *cobra.Command, args []string) error {
 			}
 		}
 
-		eventURNStr := fmt.Sprintf("%s:event:%s", ns, uuid.New().String())
-		authorURNStr := fmt.Sprintf("%s:usr:anon", ns)
+		eventURNStr := core.NewURN(core.ObjectTypeEvent).String()
+		authorURNStr := core.AnonURN().String()
 
 		_, err = client.AppendEvent(ctx, &pb.AppendEventRequest{
-			Event: &pb.EventProto{
+			Event: &pb.Event{
 				Urn:       eventURNStr,
 				NoteUrn:   noteURNStr,
 				Sequence:  1,
@@ -273,8 +271,7 @@ func runUpdateContent(srcPath, noteURN, content string, cfg *clientconfig.Config
 		httpAddr = "localhost" + httpAddr
 	}
 
-	ns := cfg.Client.Namespace
-	authorURN := fmt.Sprintf("%s:usr:anon", ns)
+	authorURN := core.AnonURN().String()
 
 	body := struct {
 		Content   string `json:"content"`

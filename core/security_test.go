@@ -181,7 +181,7 @@ func TestNoteSecurityPolicy_UnknownFailsSafeToNormal(t *testing.T) {
 
 func TestNewNote_DefaultsToNormal(t *testing.T) {
 	n := NewNote(
-		MustParseURN("notx:note:018e4f2a-9b1c-7d3e-8f2a-1b3c4d5e6f7a"),
+		MustParseURN("urn:notx:note:018e4f2a-9b1c-7d3e-8f2a-1b3c4d5e6f7a"),
 		"Test",
 		time.Now().UTC(),
 	)
@@ -192,7 +192,7 @@ func TestNewNote_DefaultsToNormal(t *testing.T) {
 
 func TestNewSecureNote_SetsSecureType(t *testing.T) {
 	n := NewSecureNote(
-		MustParseURN("notx:note:7b2c3d4e-5f6a-7b8c-9d0e-1f2a3b4c5d6e"),
+		MustParseURN("urn:notx:note:7b2c3d4e-5f6a-7b8c-9d0e-1f2a3b4c5d6e"),
 		"Private",
 		time.Now().UTC(),
 	)
@@ -203,7 +203,7 @@ func TestNewSecureNote_SetsSecureType(t *testing.T) {
 
 func TestNote_SecurityPolicy_Normal(t *testing.T) {
 	n := NewNote(
-		MustParseURN("notx:note:018e4f2a-9b1c-7d3e-8f2a-1b3c4d5e6f7a"),
+		MustParseURN("urn:notx:note:018e4f2a-9b1c-7d3e-8f2a-1b3c4d5e6f7a"),
 		"Test",
 		time.Now().UTC(),
 	)
@@ -218,7 +218,7 @@ func TestNote_SecurityPolicy_Normal(t *testing.T) {
 
 func TestNote_SecurityPolicy_Secure(t *testing.T) {
 	n := NewSecureNote(
-		MustParseURN("notx:note:7b2c3d4e-5f6a-7b8c-9d0e-1f2a3b4c5d6e"),
+		MustParseURN("urn:notx:note:7b2c3d4e-5f6a-7b8c-9d0e-1f2a3b4c5d6e"),
 		"Private",
 		time.Now().UTC(),
 	)
@@ -236,7 +236,7 @@ func TestNote_SecurityPolicy_Secure(t *testing.T) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 func TestParseURN_DeviceType(t *testing.T) {
-	raw := "notx:device:4a5b6c7d-8e9f-0a1b-2c3d-4e5f6a7b8c9d"
+	raw := "urn:notx:device:4a5b6c7d-8e9f-0a1b-2c3d-4e5f6a7b8c9d"
 	u, err := ParseURN(raw)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -244,23 +244,20 @@ func TestParseURN_DeviceType(t *testing.T) {
 	if u.ObjectType != ObjectTypeDevice {
 		t.Errorf("ObjectType: got %q, want %q", u.ObjectType, ObjectTypeDevice)
 	}
-	if u.Namespace != "notx" {
-		t.Errorf("Namespace: got %q, want %q", u.Namespace, "notx")
-	}
-	if u.UUID != "4a5b6c7d-8e9f-0a1b-2c3d-4e5f6a7b8c9d" {
-		t.Errorf("UUID: got %q", u.UUID)
+	if u.ID != "4a5b6c7d-8e9f-0a1b-2c3d-4e5f6a7b8c9d" {
+		t.Errorf("ID: got %q", u.ID)
 	}
 }
 
 func TestURN_DeviceType_IsKnownType(t *testing.T) {
-	u := MustParseURN("notx:device:4a5b6c7d-8e9f-0a1b-2c3d-4e5f6a7b8c9d")
+	u := MustParseURN("urn:notx:device:4a5b6c7d-8e9f-0a1b-2c3d-4e5f6a7b8c9d")
 	if !u.IsKnownType() {
 		t.Error("device URN should be a known type")
 	}
 }
 
 func TestURN_DeviceType_String_RoundTrip(t *testing.T) {
-	raw := "notx:device:4a5b6c7d-8e9f-0a1b-2c3d-4e5f6a7b8c9d"
+	raw := "urn:notx:device:4a5b6c7d-8e9f-0a1b-2c3d-4e5f6a7b8c9d"
 	u := MustParseURN(raw)
 	if u.String() != raw {
 		t.Errorf("round-trip: got %q, want %q", u.String(), raw)
@@ -270,7 +267,7 @@ func TestURN_DeviceType_String_RoundTrip(t *testing.T) {
 // Device URNs must not accept the "anon" sentinel (devices are always
 // identified, never anonymous).
 func TestParseURN_DeviceType_RejectsAnon(t *testing.T) {
-	_, err := ParseURN("notx:device:anon")
+	_, err := ParseURN("urn:notx:device:anon")
 	if err != nil {
 		// anon is rejected at the UUID validation level — this is acceptable
 		// behaviour since the device type should never be anonymous.
@@ -280,7 +277,7 @@ func TestParseURN_DeviceType_RejectsAnon(t *testing.T) {
 	}
 	// If we get here the URN was accepted; verify the anon flag is set so
 	// callers can detect and reject it at a higher layer.
-	u := MustParseURN("notx:device:anon")
+	u := MustParseURN("urn:notx:device:anon")
 	if !u.IsAnon() {
 		t.Error("device:anon URN should report IsAnon() == true")
 	}
@@ -293,13 +290,13 @@ func TestParseURN_DeviceType_RejectsAnon(t *testing.T) {
 // Phase 1 acceptance criterion: parser reads note_type: normal correctly.
 func TestParser_NoteType_Normal(t *testing.T) {
 	content := `# notx/1.0
-# note_urn:      notx:note:018e4f2a-9b1c-7d3e-8f2a-1b3c4d5e6f7a
+# note_urn:      urn:notx:note:018e4f2a-9b1c-7d3e-8f2a-1b3c4d5e6f7a
 # note_type:     normal
 # name:          My Meeting Notes
 # created_at:    2025-01-15T09:00:00Z
 # head_sequence: 1
 
-1:2025-01-15T09:00:00Z:notx:usr:7f3e9c1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b
+1:2025-01-15T09:00:00Z:urn:notx:usr:7f3e9c1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b
 ->
 1 | hello
 `
@@ -315,13 +312,13 @@ func TestParser_NoteType_Normal(t *testing.T) {
 // Phase 1 acceptance criterion: parser reads note_type: secure correctly.
 func TestParser_NoteType_Secure(t *testing.T) {
 	content := `# notx/1.0
-# note_urn:      notx:note:7b2c3d4e-5f6a-7b8c-9d0e-1f2a3b4c5d6e
+# note_urn:      urn:notx:note:7b2c3d4e-5f6a-7b8c-9d0e-1f2a3b4c5d6e
 # note_type:     secure
 # name:          Private Journal
 # created_at:    2025-01-15T09:00:00Z
 # head_sequence: 1
 
-1:2025-01-15T09:00:00Z:notx:usr:7f3e9c1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b
+1:2025-01-15T09:00:00Z:urn:notx:usr:7f3e9c1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b
 ->
 1 | secret content
 `
@@ -338,12 +335,12 @@ func TestParser_NoteType_Secure(t *testing.T) {
 // (backward compatibility with pre-security-model files).
 func TestParser_NoteType_MissingDefaultsToNormal(t *testing.T) {
 	content := `# notx/1.0
-# note_urn:      notx:note:018e4f2a-9b1c-7d3e-8f2a-1b3c4d5e6f7a
+# note_urn:      urn:notx:note:018e4f2a-9b1c-7d3e-8f2a-1b3c4d5e6f7a
 # name:          Legacy Note
 # created_at:    2025-01-15T09:00:00Z
 # head_sequence: 1
 
-1:2025-01-15T09:00:00Z:notx:usr:7f3e9c1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b
+1:2025-01-15T09:00:00Z:urn:notx:usr:7f3e9c1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b
 ->
 1 | content
 `
@@ -370,7 +367,7 @@ func TestParser_NoteType_InvalidValueIsError(t *testing.T) {
 	for _, bad := range invalidTypes {
 		t.Run(bad, func(t *testing.T) {
 			content := "# notx/1.0\n" +
-				"# note_urn:      notx:note:018e4f2a-9b1c-7d3e-8f2a-1b3c4d5e6f7a\n" +
+				"# note_urn:      urn:notx:note:018e4f2a-9b1c-7d3e-8f2a-1b3c4d5e6f7a\n" +
 				"# note_type:     " + bad + "\n" +
 				"# name:          Bad Type Note\n" +
 				"# created_at:    2025-01-15T09:00:00Z\n" +
@@ -390,17 +387,17 @@ func TestParser_NoteType_InvalidValueIsError(t *testing.T) {
 // time and ApplyEvent cannot change it.
 func TestNote_NoteType_IsImmutableAcrossEvents(t *testing.T) {
 	content := `# notx/1.0
-# note_urn:      notx:note:7b2c3d4e-5f6a-7b8c-9d0e-1f2a3b4c5d6e
+# note_urn:      urn:notx:note:7b2c3d4e-5f6a-7b8c-9d0e-1f2a3b4c5d6e
 # note_type:     secure
 # name:          Immutable Type
 # created_at:    2025-01-15T09:00:00Z
 # head_sequence: 2
 
-1:2025-01-15T09:00:00Z:notx:usr:7f3e9c1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b
+1:2025-01-15T09:00:00Z:urn:notx:usr:7f3e9c1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b
 ->
 1 | first
 
-2:2025-01-15T09:05:00Z:notx:usr:7f3e9c1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b
+2:2025-01-15T09:05:00Z:urn:notx:usr:7f3e9c1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b
 ->
 1 | updated
 `
@@ -416,7 +413,7 @@ func TestNote_NoteType_IsImmutableAcrossEvents(t *testing.T) {
 	ev := &Event{
 		NoteURN:   note.URN,
 		Sequence:  3,
-		AuthorURN: MustParseURN("notx:usr:7f3e9c1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b"),
+		AuthorURN: MustParseURN("urn:notx:usr:7f3e9c1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b"),
 		CreatedAt: time.Now().UTC(),
 		Entries:   []LineEntry{{LineNumber: 1, Op: LineOpSet, Content: "changed"}},
 	}
@@ -434,25 +431,25 @@ func TestParser_BackwardCompat_ExistingFixturesStillParse(t *testing.T) {
 	fixtures := []string{
 		// Minimal legacy note — no note_type header
 		`# notx/1.0
-# note_urn:      notx:note:018e4f2a-9b1c-7d3e-8f2a-1b3c4d5e6f7a
+# note_urn:      urn:notx:note:018e4f2a-9b1c-7d3e-8f2a-1b3c4d5e6f7a
 # name:          Old Note
 # created_at:    2025-01-15T09:00:00Z
 # head_sequence: 1
 
-1:2025-01-15T09:00:00Z:notx:usr:7f3e9c1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b
+1:2025-01-15T09:00:00Z:urn:notx:usr:7f3e9c1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b
 ->
 1 | content
 `,
 		// Legacy note with project and folder URNs
 		`# notx/1.0
-# note_urn:      notx:note:018e4f2a-9b1c-7d3e-8f2a-1b3c4d5e6f7a
+# note_urn:      urn:notx:note:018e4f2a-9b1c-7d3e-8f2a-1b3c4d5e6f7a
 # name:          Linked Note
 # created_at:    2025-01-15T09:00:00Z
 # head_sequence: 1
-# project_urn:   notx:proj:3a1b2c3d-4e5f-6a7b-8c9d-0e1f2a3b4c5d
-# folder_urn:    notx:folder:1a2b3c4d-5e6f-7a8b-9c0d-1e2f3a4b5c6d
+# project_urn:   urn:notx:proj:3a1b2c3d-4e5f-6a7b-8c9d-0e1f2a3b4c5d
+# folder_urn:    urn:notx:folder:1a2b3c4d-5e6f-7a8b-9c0d-1e2f3a4b5c6d
 
-1:2025-01-15T09:00:00Z:notx:usr:7f3e9c1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b
+1:2025-01-15T09:00:00Z:urn:notx:usr:7f3e9c1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b
 ->
 1 | content
 `,
@@ -478,7 +475,7 @@ func TestParser_BackwardCompat_ExistingFixturesStillParse(t *testing.T) {
 
 func TestSecurityPolicy_NormalNote_ServerCanIndex(t *testing.T) {
 	n := NewNote(
-		MustParseURN("notx:note:018e4f2a-9b1c-7d3e-8f2a-1b3c4d5e6f7a"),
+		MustParseURN("urn:notx:note:018e4f2a-9b1c-7d3e-8f2a-1b3c4d5e6f7a"),
 		"Public Note",
 		time.Now().UTC(),
 	)
@@ -496,7 +493,7 @@ func TestSecurityPolicy_NormalNote_ServerCanIndex(t *testing.T) {
 
 func TestSecurityPolicy_SecureNote_ServerBlind(t *testing.T) {
 	n := NewSecureNote(
-		MustParseURN("notx:note:7b2c3d4e-5f6a-7b8c-9d0e-1f2a3b4c5d6e"),
+		MustParseURN("urn:notx:note:7b2c3d4e-5f6a-7b8c-9d0e-1f2a3b4c5d6e"),
 		"Private Note",
 		time.Now().UTC(),
 	)

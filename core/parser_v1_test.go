@@ -7,12 +7,12 @@ import (
 
 func TestParser_SimpleFile(t *testing.T) {
 	content := `# notx/1.0
-# note_urn:      notx:note:018e4f2a-9b1c-7d3e-8f2a-1b3c4d5e6f7a
+# note_urn:      urn:notx:note:018e4f2a-9b1c-7d3e-8f2a-1b3c4d5e6f7a
 # name:          Test Note
 # created_at:    2025-01-15T09:00:00Z
 # head_sequence: 1
 
-1:2025-01-15T09:00:00Z:notx:usr:7f3e9c1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b
+1:2025-01-15T09:00:00Z:urn:notx:usr:7f3e9c1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b
 ->
 1 | Line one
 2 | Line two
@@ -40,16 +40,16 @@ func TestParser_SimpleFile(t *testing.T) {
 
 func TestParser_MultipleEvents(t *testing.T) {
 	content := `# notx/1.0
-# note_urn:      notx:note:018e4f2a-9b1c-7d3e-8f2a-1b3c4d5e6f7a
+# note_urn:      urn:notx:note:018e4f2a-9b1c-7d3e-8f2a-1b3c4d5e6f7a
 # name:          Multi Event
 # created_at:    2025-01-15T09:00:00Z
 # head_sequence: 2
 
-1:2025-01-15T09:00:00Z:notx:usr:7f3e9c1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b
+1:2025-01-15T09:00:00Z:urn:notx:usr:7f3e9c1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b
 ->
 1 | First
 
-2:2025-01-15T09:05:00Z:notx:usr:3c4d5e6f-7a8b-9c0d-1e2f-3a4b5c6d7e8f
+2:2025-01-15T09:05:00Z:urn:notx:usr:3c4d5e6f-7a8b-9c0d-1e2f-3a4b5c6d7e8f
 ->
 2 | Second
 `
@@ -77,18 +77,18 @@ func TestParser_MultipleEvents(t *testing.T) {
 
 func TestParser_DeleteOperation(t *testing.T) {
 	content := `# notx/1.0
-# note_urn:      notx:note:018e4f2a-9b1c-7d3e-8f2a-1b3c4d5e6f7a
+# note_urn:      urn:notx:note:018e4f2a-9b1c-7d3e-8f2a-1b3c4d5e6f7a
 # name:          Delete Test
 # created_at:    2025-01-15T09:00:00Z
 # head_sequence: 2
 
-1:2025-01-15T09:00:00Z:notx:usr:7f3e9c1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b
+1:2025-01-15T09:00:00Z:urn:notx:usr:7f3e9c1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b
 ->
 1 | Line A
 2 | Line B
 3 | Line C
 
-2:2025-01-15T09:05:00Z:notx:usr:7f3e9c1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b
+2:2025-01-15T09:05:00Z:urn:notx:usr:7f3e9c1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b
 ->
 2 |-
 `
@@ -107,12 +107,12 @@ func TestParser_DeleteOperation(t *testing.T) {
 
 func TestParser_EmptyLineOperation(t *testing.T) {
 	content := `# notx/1.0
-# note_urn:      notx:note:018e4f2a-9b1c-7d3e-8f2a-1b3c4d5e6f7a
+# note_urn:      urn:notx:note:018e4f2a-9b1c-7d3e-8f2a-1b3c4d5e6f7a
 # name:          Empty Test
 # created_at:    2025-01-15T09:00:00Z
 # head_sequence: 1
 
-1:2025-01-15T09:00:00Z:notx:usr:7f3e9c1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b
+1:2025-01-15T09:00:00Z:urn:notx:usr:7f3e9c1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b
 ->
 1 | Text
 2 |
@@ -133,12 +133,12 @@ func TestParser_EmptyLineOperation(t *testing.T) {
 
 func TestParser_WithSnapshot(t *testing.T) {
 	content := `# notx/1.0
-# note_urn:      notx:note:018e4f2a-9b1c-7d3e-8f2a-1b3c4d5e6f7a
+# note_urn:      urn:notx:note:018e4f2a-9b1c-7d3e-8f2a-1b3c4d5e6f7a
 # name:          Snapshot Test
 # created_at:    2025-01-15T09:00:00Z
 # head_sequence: 2
 
-1:2025-01-15T09:00:00Z:notx:usr:7f3e9c1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b
+1:2025-01-15T09:00:00Z:urn:notx:usr:7f3e9c1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b
 ->
 1 | First
 
@@ -146,7 +146,7 @@ snapshot:1:2025-01-15T09:00:00Z
 =>
 1 | First
 
-2:2025-01-15T09:05:00Z:notx:usr:7f3e9c1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b
+2:2025-01-15T09:05:00Z:urn:notx:usr:7f3e9c1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b
 ->
 2 | Second
 `
@@ -173,12 +173,12 @@ snapshot:1:2025-01-15T09:00:00Z
 
 func TestParser_AuthorURN(t *testing.T) {
 	content := `# notx/1.0
-# note_urn:      notx:note:018e4f2a-9b1c-7d3e-8f2a-1b3c4d5e6f7a
+# note_urn:      urn:notx:note:018e4f2a-9b1c-7d3e-8f2a-1b3c4d5e6f7a
 # name:          Author Test
 # created_at:    2025-01-15T09:00:00Z
 # head_sequence: 1
 
-1:2025-01-15T09:00:00Z:acme:usr:7f3e9c1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b
+1:2025-01-15T09:00:00Z:urn:notx:usr:7f3e9c1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b
 ->
 1 | Content
 `
@@ -190,19 +190,20 @@ func TestParser_AuthorURN(t *testing.T) {
 	}
 
 	event, _ := note.EventAt(1)
-	if event.AuthorURN.Namespace != "acme" {
-		t.Errorf("Author namespace: got %q, want %q", event.AuthorURN.Namespace, "acme")
+	wantAuthor := "urn:notx:usr:7f3e9c1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b"
+	if event.AuthorURN.String() != wantAuthor {
+		t.Errorf("AuthorURN: got %q, want %q", event.AuthorURN.String(), wantAuthor)
 	}
 }
 
 func TestParser_GapAndAppend(t *testing.T) {
 	content := `# notx/1.0
-# note_urn:      notx:note:018e4f2a-9b1c-7d3e-8f2a-1b3c4d5e6f7a
+# note_urn:      urn:notx:note:018e4f2a-9b1c-7d3e-8f2a-1b3c4d5e6f7a
 # name:          Gap Test
 # created_at:    2025-01-15T09:00:00Z
 # head_sequence: 1
 
-1:2025-01-15T09:00:00Z:notx:usr:7f3e9c1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b
+1:2025-01-15T09:00:00Z:urn:notx:usr:7f3e9c1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b
 ->
 1 | First
 5 | Fifth
@@ -230,20 +231,20 @@ func TestParser_GapAndAppend(t *testing.T) {
 
 func TestParser_ContentAt(t *testing.T) {
 	content := `# notx/1.0
-# note_urn:      notx:note:018e4f2a-9b1c-7d3e-8f2a-1b3c4d5e6f7a
+# note_urn:      urn:notx:note:018e4f2a-9b1c-7d3e-8f2a-1b3c4d5e6f7a
 # name:          History Test
 # created_at:    2025-01-15T09:00:00Z
 # head_sequence: 3
 
-1:2025-01-15T09:00:00Z:notx:usr:7f3e9c1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b
+1:2025-01-15T09:00:00Z:urn:notx:usr:7f3e9c1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b
 ->
 1 | A
 
-2:2025-01-15T09:05:00Z:notx:usr:7f3e9c1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b
+2:2025-01-15T09:05:00Z:urn:notx:usr:7f3e9c1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b
 ->
 2 | B
 
-3:2025-01-15T09:10:00Z:notx:usr:7f3e9c1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b
+3:2025-01-15T09:10:00Z:urn:notx:usr:7f3e9c1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b
 ->
 3 | C
 `

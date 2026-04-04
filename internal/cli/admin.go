@@ -15,8 +15,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/spf13/cobra"
+	"github.com/zebaqui/notx-engine/core"
 	"github.com/zebaqui/notx-engine/internal/admin"
 	"github.com/zebaqui/notx-engine/internal/buildinfo"
 	"github.com/zebaqui/notx-engine/internal/clientconfig"
@@ -124,12 +124,8 @@ type adminRegisterResponse struct {
 // registerRemoteAdminDevice registers a new admin device on the remote server
 // using the supplied passphrase. It returns the registered device URN.
 func registerRemoteAdminDevice(serverBase, passphrase string) (string, error) {
-	namespace := "notx"
-	deviceID := uuid.New().String()
-	ownerID := uuid.New().String()
-
-	deviceURN := fmt.Sprintf("%s:device:%s", namespace, deviceID)
-	ownerURN := fmt.Sprintf("%s:usr:%s", namespace, ownerID)
+	deviceURN := core.NewURN(core.ObjectTypeDevice).String()
+	ownerURN := core.NewURN(core.ObjectTypeUser).String()
 
 	payload := adminRegisterRequest{
 		URN:             deviceURN,
@@ -299,11 +295,15 @@ func runAdmin(cmd *cobra.Command, args []string) error {
 		modeLabel = "remote"
 	}
 
+	// Fetch server URN for display.
+	serverURN := fetchServerURN(apiBase)
+
 	log.Info("notx admin UI",
 		"addr", fmt.Sprintf("http://%s", actualAddr),
 		"api", apiBase,
 		"mode", modeLabel,
 		"device_urn", deviceURN,
+		"server_urn", serverURN,
 		"version", buildinfo.Version,
 		"commit", buildinfo.Commit,
 		"built_at", buildinfo.BuildTime,
@@ -312,6 +312,9 @@ func runAdmin(cmd *cobra.Command, args []string) error {
 	// Pretty-print for humans.
 	fmt.Fprintf(os.Stdout, "\n  \033[1;32m▶\033[0m  notx admin   →  \033[1;36mhttp://%s\033[0m\n", actualAddr)
 	fmt.Fprintf(os.Stdout, "  \033[1;34m⇒\033[0m  proxying API →  \033[0;36m%s\033[0m\n", apiBase)
+	if serverURN != "" {
+		fmt.Fprintf(os.Stdout, "  \033[1;34m⇒\033[0m  server URN   →  \033[0;36m%s\033[0m\n", serverURN)
+	}
 	if deviceURN != "" {
 		fmt.Fprintf(os.Stdout, "  \033[1;34m⇒\033[0m  admin device →  \033[0;36m%s\033[0m\n", deviceURN)
 	}
@@ -398,4 +401,37 @@ type statusWriter struct {
 func (sw *statusWriter) WriteHeader(code int) {
 	sw.status = code
 	sw.ResponseWriter.WriteHeader(code)
+}
+
+// fetchServerURN calls GET /v1/info on the API server and returns the
+// server's own URN. Returns empty string if pairing is not enabled or
+// the server cannot be reached.
+func fetchServerURN(apiBase string) string {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiBase+"/v1/info", nil)
+	if err != nil {
+		return ""
+	}
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return ""
+	}
+
+	var result struct {
+		ServerURN string `json:"server_urn"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return ""
+	}
+
+	return result.ServerURN
 }
