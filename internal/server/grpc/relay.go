@@ -12,17 +12,17 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/zebaqui/notx-engine/internal/relay"
+	pb "github.com/zebaqui/notx-engine/proto"
 	"github.com/zebaqui/notx-engine/repo"
-	pb "github.com/zebaqui/notx-engine/internal/server/proto"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
-// RelayServiceServer — gRPC implementation of RelayService
+// RelayServer — gRPC implementation of RelayService
 // ─────────────────────────────────────────────────────────────────────────────
 
-// RelayServiceServer is the concrete gRPC implementation of RelayService.
+// RelayServer is the concrete gRPC implementation of RelayService.
 // ALL execution logic lives here; the HTTP adapter is a thin translator.
-type RelayServiceServer struct {
+type RelayServer struct {
 	pb.UnimplementedRelayServiceServer
 
 	dev      repo.DeviceRepository
@@ -48,15 +48,15 @@ type RelayEvent struct {
 	FlowLen    int    // total steps in flow, 0 for single Execute
 }
 
-// NewRelayServiceServer constructs a RelayServiceServer with the given
+// NewRelayServer constructs a RelayServer with the given
 // dependencies.  eventEmitter may be nil.
-func NewRelayServiceServer(
+func NewRelayServer(
 	devRepo repo.DeviceRepository,
 	policy relay.Policy,
 	log *slog.Logger,
 	eventEmitter func(RelayEvent),
-) *RelayServiceServer {
-	return &RelayServiceServer{
+) *RelayServer {
+	return &RelayServer{
 		dev:          devRepo,
 		executor:     relay.NewExecutor(policy),
 		policy:       policy,
@@ -69,7 +69,7 @@ func NewRelayServiceServer(
 // Execute — single HTTP request
 // ─────────────────────────────────────────────────────────────────────────────
 
-func (s *RelayServiceServer) Execute(ctx context.Context, req *pb.ExecuteRequest) (*pb.ExecuteResponse, error) {
+func (s *RelayServer) Execute(ctx context.Context, req *pb.ExecuteRequest) (*pb.ExecuteResponse, error) {
 	start := time.Now()
 
 	// ── Validate device ───────────────────────────────────────────────────────
@@ -126,7 +126,7 @@ func (s *RelayServiceServer) Execute(ctx context.Context, req *pb.ExecuteRequest
 // ExecuteFlow — multi-step pipeline
 // ─────────────────────────────────────────────────────────────────────────────
 
-func (s *RelayServiceServer) ExecuteFlow(ctx context.Context, req *pb.ExecuteFlowRequest) (*pb.ExecuteFlowResponse, error) {
+func (s *RelayServer) ExecuteFlow(ctx context.Context, req *pb.ExecuteFlowRequest) (*pb.ExecuteFlowResponse, error) {
 	// ── Validate device ───────────────────────────────────────────────────────
 	if err := s.validateDevice(ctx, req.GetDeviceUrn()); err != nil {
 		return nil, err
@@ -241,7 +241,7 @@ func (s *RelayServiceServer) ExecuteFlow(ctx context.Context, req *pb.ExecuteFlo
 
 // validateDevice checks that the device_urn refers to a registered,
 // non-revoked device.  All validation runs inside the gRPC layer.
-func (s *RelayServiceServer) validateDevice(ctx context.Context, deviceURN string) error {
+func (s *RelayServer) validateDevice(ctx context.Context, deviceURN string) error {
 	if strings.TrimSpace(deviceURN) == "" {
 		return status.Error(codes.InvalidArgument, "device_urn is required")
 	}
@@ -268,17 +268,17 @@ func (s *RelayServiceServer) validateDevice(ctx context.Context, deviceURN strin
 
 // mapExecError maps a relay executor error to a gRPC status error for single
 // Execute calls.
-func (s *RelayServiceServer) mapExecError(err error, stepID string, durationMS int64) error {
+func (s *RelayServer) mapExecError(err error, stepID string, durationMS int64) error {
 	return s.buildGRPCError(err, stepID, durationMS)
 }
 
 // mapExecErrorFlow maps a relay executor error to a gRPC status error for flow
 // steps, attaching the step_id to the detail.
-func (s *RelayServiceServer) mapExecErrorFlow(err error, stepID string, durationMS int64) error {
+func (s *RelayServer) mapExecErrorFlow(err error, stepID string, durationMS int64) error {
 	return s.buildGRPCError(err, stepID, durationMS)
 }
 
-func (s *RelayServiceServer) buildGRPCError(err error, stepID string, durationMS int64) error {
+func (s *RelayServer) buildGRPCError(err error, stepID string, durationMS int64) error {
 	var policyErr *relay.PolicyViolationError
 	var timeoutErr *relay.TimeoutError
 
@@ -353,7 +353,7 @@ func resultToProto(r *relay.ResponseResult) *pb.HttpResponse {
 
 // emit calls the eventEmitter if set, swallowing any panic to avoid breaking
 // the execution path on event system errors.
-func (s *RelayServiceServer) emit(evt RelayEvent) {
+func (s *RelayServer) emit(evt RelayEvent) {
 	if s.eventEmitter == nil {
 		return
 	}

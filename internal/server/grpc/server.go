@@ -15,29 +15,32 @@ import (
 	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/reflection"
 
-	"github.com/zebaqui/notx-engine/internal/relay"
-	"github.com/zebaqui/notx-engine/repo"
 	"github.com/zebaqui/notx-engine/config"
-	pb "github.com/zebaqui/notx-engine/internal/server/proto"
+	"github.com/zebaqui/notx-engine/internal/relay"
+	pb "github.com/zebaqui/notx-engine/proto"
+	"github.com/zebaqui/notx-engine/repo"
 
 	"time"
 )
 
 // Server wraps a grpc.Server and owns the lifecycle of the gRPC listener.
-// It registers NoteServiceServer and DeviceServiceServer and handles TLS /
-// mTLS configuration derived from Config.
+// It registers NoteServer, DeviceServer, DeviceAdminServer and the other
+// service servers, and handles TLS / mTLS configuration derived from Config.
 type Server struct {
-	cfg     *config.Config
-	log     *slog.Logger
-	gs      *grpc.Server
-	noteS   *NoteServiceServer
-	deviceS *DeviceServiceServer
-	relayS  *RelayServiceServer
+	cfg          *config.Config
+	log          *slog.Logger
+	gs           *grpc.Server
+	noteS        *NoteServer
+	deviceS      *DeviceServer
+	deviceAdminS *DeviceAdminServer
+	projS        *ProjectServer
+	relayS       *RelayServer
+	userS        *UserServer
 }
 
 // NewServer creates a fully wired gRPC Server ready to call Serve on.
 // It does NOT start listening; call Serve to begin accepting connections.
-func NewServer(cfg *config.Config, r repo.NoteRepository, devRepo repo.DeviceRepository, log *slog.Logger) (*Server, error) {
+func NewServer(cfg *config.Config, r repo.NoteRepository, projRepo repo.ProjectRepository, devRepo repo.DeviceRepository, userRepo repo.UserRepository, log *slog.Logger) (*Server, error) {
 	creds, err := buildTransportCredentials(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("grpc: build TLS credentials: %w", err)
@@ -64,25 +67,35 @@ func NewServer(cfg *config.Config, r repo.NoteRepository, devRepo repo.DeviceRep
 
 	gs := grpc.NewServer(opts...)
 
-	noteS := NewNoteServiceServer(r, cfg.DefaultPageSize, cfg.MaxPageSize)
-	deviceS := NewDeviceServiceServer(devRepo)
+	noteS := NewNoteServer(r, cfg.DefaultPageSize, cfg.MaxPageSize)
+	projS := NewProjectServer(projRepo, cfg.DefaultPageSize, cfg.MaxPageSize)
+	deviceS := NewDeviceServer(devRepo)
+	deviceAdminS := NewDeviceAdminServer(devRepo)
 	relayPolicy := relay.DefaultPolicy()
-	relayS := NewRelayServiceServer(devRepo, relayPolicy, log, nil)
+	relayS := NewRelayServer(devRepo, relayPolicy, log, nil)
+	userS := NewUserServer(userRepo, cfg.DefaultPageSize, cfg.MaxPageSize)
 
 	pb.RegisterNoteServiceServer(gs, noteS)
+	pb.RegisterProjectServiceServer(gs, projS)
 	pb.RegisterDeviceServiceServer(gs, deviceS)
+	pb.RegisterDeviceAdminServiceServer(gs, deviceAdminS)
 	pb.RegisterRelayServiceServer(gs, relayS)
+
+	pb.RegisterUserServiceServer(gs, userS)
 
 	// Enable gRPC server reflection so tools like grpcurl work out of the box.
 	reflection.Register(gs)
 
 	return &Server{
-		cfg:     cfg,
-		log:     log,
-		gs:      gs,
-		noteS:   noteS,
-		deviceS: deviceS,
-		relayS:  relayS,
+		cfg:          cfg,
+		log:          log,
+		gs:           gs,
+		noteS:        noteS,
+		projS:        projS,
+		deviceS:      deviceS,
+		deviceAdminS: deviceAdminS,
+		relayS:       relayS,
+		userS:        userS,
 	}, nil
 }
 
@@ -108,10 +121,40 @@ func (s *Server) Serve() error {
 	return nil
 }
 
-// RelayService returns the RelayServiceServer so the HTTP adapter layer can
+// RelayService returns the RelayServer so the HTTP adapter layer can
 // call it directly without a network hop.
-func (s *Server) RelayService() *RelayServiceServer {
+func (s *Server) RelayService() *RelayServer {
 	return s.relayS
+}
+
+// UserService returns the UserServer so the HTTP adapter layer can
+// call it directly without a network hop.
+func (s *Server) UserService() *UserServer {
+	return s.userS
+}
+
+// NoteService returns the NoteServer so the HTTP adapter layer can
+// call it directly without a network hop.
+func (s *Server) NoteService() *NoteServer {
+	return s.noteS
+}
+
+// ProjectService returns the ProjectServer so the HTTP adapter layer
+// can call it directly without a network hop.
+func (s *Server) ProjectService() *ProjectServer {
+	return s.projS
+}
+
+// DeviceService returns the DeviceServer so the HTTP adapter layer can
+// call it directly without a network hop.
+func (s *Server) DeviceService() *DeviceServer {
+	return s.deviceS
+}
+
+// DeviceAdminService returns the DeviceAdminServer so the HTTP adapter
+// layer can call it directly without a network hop.
+func (s *Server) DeviceAdminService() *DeviceAdminServer {
+	return s.deviceAdminS
 }
 
 // Shutdown initiates a graceful shutdown.  In-flight RPCs are allowed to
