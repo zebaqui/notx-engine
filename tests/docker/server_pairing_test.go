@@ -43,12 +43,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 
-	pb "github.com/zebaqui/notx-engine/internal/server/proto"
+	"github.com/zebaqui/notx-engine/core"
+	pb "github.com/zebaqui/notx-engine/proto"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -117,7 +117,7 @@ func TestServerPairing_FullLifecycle(t *testing.T) {
 	// over the bootstrap port (insecure in local testing since no TLS cert is
 	// configured in the test container).
 	t.Log("Calling RegisterServer from test host …")
-	joiningURN := "notx:srv:" + uuid.New().String()
+	joiningURN := core.NewURN(core.ObjectTypeServer).String()
 	certPEM, caCertPEM := registerServerFromHost(t, authorityBootstrap, joiningURN, secret)
 
 	t.Logf("Certificate received (%d bytes), CA cert (%d bytes)", len(certPEM), len(caCertPEM))
@@ -220,7 +220,7 @@ func TestServerPairing_SecretExpiry(t *testing.T) {
 	time.Sleep(2 * time.Second)
 
 	// RegisterServer must be rejected.
-	joiningURN := "notx:srv:" + uuid.New().String()
+	joiningURN := core.NewURN(core.ObjectTypeServer).String()
 	assertRegisterServerFails(t, authorityBootstrap, joiningURN, secret,
 		"expired secret should be rejected")
 
@@ -242,7 +242,7 @@ func TestServerPairing_InvalidSecret(t *testing.T) {
 	waitForGRPCPort(t, authorityBootstrap)
 	time.Sleep(500 * time.Millisecond)
 
-	joiningURN := "notx:srv:" + uuid.New().String()
+	joiningURN := core.NewURN(core.ObjectTypeServer).String()
 	wrongSecret := "NTXP-WRONG-WRONG-WRONG-WRONG-WRG"
 	assertRegisterServerFails(t, authorityBootstrap, joiningURN, wrongSecret,
 		"wrong secret should be rejected")
@@ -271,7 +271,7 @@ func TestServerPairing_MultipleServers(t *testing.T) {
 
 	for i := 0; i < numServers; i++ {
 		secret := execGenerateSecret(t, authorityID)
-		urns[i] = "notx:srv:" + uuid.New().String()
+		urns[i] = core.NewURN(core.ObjectTypeServer).String()
 		certPEM, caCertPEM := registerServerFromHost(t, authorityBootstrap, urns[i], secret)
 		assertCertCN(t, certPEM, urns[i])
 		assertCertSignedByCA(t, certPEM, caCertPEM)
@@ -607,7 +607,7 @@ func getCACertificate(t *testing.T, bootstrapHostPort int) []byte {
 }
 
 // listServers calls ListServers on the primary port and returns the ServerInfo slice.
-func listServers(t *testing.T, grpcHostPort int, includeRevoked bool) []*pb.ServerInfo {
+func listServers(t *testing.T, grpcHostPort int, includeRevoked bool) []*pb.Server {
 	t.Helper()
 
 	cc := dialPrimary(t, grpcHostPort)

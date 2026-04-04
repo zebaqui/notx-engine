@@ -13,9 +13,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zebaqui/notx-engine/repo/memory"
-	"github.com/zebaqui/notx-engine/internal/server"
 	"github.com/zebaqui/notx-engine/config"
+	"github.com/zebaqui/notx-engine/internal/server"
+	"github.com/zebaqui/notx-engine/repo/memory"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -158,8 +158,8 @@ type registerDeviceResponse struct {
 func registerTestDevice(t *testing.T, client *http.Client, baseURL string) string {
 	t.Helper()
 	const (
-		devURN   = "notx:device:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
-		ownerURN = "notx:usr:7f3e9c1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b"
+		devURN   = "urn:notx:device:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+		ownerURN = "urn:notx:usr:7f3e9c1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b"
 	)
 	resp := postJSONWithDeviceID(t, client, baseURL+"/v1/devices", "", registerDeviceRequest{
 		URN:      devURN,
@@ -256,9 +256,9 @@ func TestGetNotes(t *testing.T) {
 	defer stop()
 
 	const (
-		noteURN   = "notx:note:018e4f2a-9b1c-7d3e-8f2a-1b3c4d5e6f7a"
+		noteURN   = "urn:notx:note:018e4f2a-9b1c-7d3e-8f2a-1b3c4d5e6f7a"
 		noteName  = "Smoke Test Note"
-		authorURN = "notx:usr:7f3e9c1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b"
+		authorURN = "urn:notx:usr:7f3e9c1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b"
 	)
 
 	// ── Step 0: register a device (auto-approved) and obtain its URN ─────────

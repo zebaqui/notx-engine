@@ -42,16 +42,16 @@ Both ports and the bind host are configurable at startup (see `--http-port`,
 Every resource is identified by a URN with the following format:
 
 ```
-<namespace>:<object-type>:<uuid>
+urn:notx:<object-type>:<id>
 ```
 
 | Segment       | Rules                                                            | Example                                |
 | ------------- | ---------------------------------------------------------------- | -------------------------------------- |
-| `namespace`   | lowercase alphanumeric + hyphens, 1–63 chars                     | `notx`                                 |
+| `urn:notx`    | Fixed scheme prefix for all notx URNs                            | `urn:notx`                             |
 | `object-type` | one of `note`, `event`, `usr`, `org`, `proj`, `folder`, `device` | `note`                                 |
-| `uuid`        | standard UUID (8-4-4-4-12 hex) or the sentinel `anon`            | `1a9670dd-1a65-481a-ad17-03d77de021e5` |
+| `id`          | standard UUID (8-4-4-4-12 hex) or the sentinel `anon`            | `1a9670dd-1a65-481a-ad17-03d77de021e5` |
 
-Full example: `notx:note:1a9670dd-1a65-481a-ad17-03d77de021e5`
+Full example: `urn:notx:note:1a9670dd-1a65-481a-ad17-03d77de021e5`
 
 When URNs appear in HTTP URL path segments they must be **percent-encoded**
 (`:` → `%3A`).
@@ -71,8 +71,8 @@ Projects and folders are **index-only** entities — they have no `.notx` file o
 disk. They exist solely in the Badger index and are used to organise notes
 logically.
 
-- A **project** (`notx:proj:<uuid>`) is the top-level grouping.
-- A **folder** (`notx:folder:<uuid>`) belongs to exactly one project and can
+- A **project** (`urn:notx:proj:<id>`) is the top-level grouping.
+- A **folder** (`urn:notx:folder:<id>`) belongs to exactly one project and can
   contain notes.
 - A note references its project and folder via the `project_urn` and
   `folder_urn` fields on its header. The note itself stores those URNs; the
@@ -85,17 +85,17 @@ logically.
 Users are **index-only** entities identified by a `usr` URN:
 
 ```
-<namespace>:usr:<uuid>
+urn:notx:usr:<id>
 ```
 
-Example: `notx:usr:3f8a1b2c-4d5e-6f7a-8b9c-0d1e2f3a4b5c`
+Example: `urn:notx:usr:3f8a1b2c-4d5e-6f7a-8b9c-0d1e2f3a4b5c`
 
 A user record stores a display name, an optional email address, and lifecycle
 timestamps. Users are soft-deleted; a deleted user's URN continues to appear
 in note `author_urn` fields and device `owner_urn` fields — it is never
 garbage-collected.
 
-The special sentinel URN `<namespace>:usr:anon` identifies an anonymous author
+The special sentinel URN `urn:notx:usr:anon` identifies an anonymous author
 and is never backed by a real user record.
 
 ### Pagination
@@ -135,7 +135,7 @@ value must be the fully-qualified device URN of a registered, approved, and
 non-revoked device.
 
 ```
-X-Device-ID: notx:device:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa
+X-Device-ID: urn:notx:device:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa
 ```
 
 The following endpoints are **exempt** from device authentication and can be
@@ -225,11 +225,11 @@ POST /v1/notes
 
 ```json
 {
-  "urn": "notx:note:<uuid>",
+  "urn": "urn:notx:note:<id>",
   "name": "Meeting notes",
   "note_type": "normal",
-  "project_urn": "notx:proj:<uuid>",
-  "folder_urn": "notx:folder:<uuid>"
+  "project_urn": "urn:notx:proj:<id>",
+  "folder_urn": "urn:notx:folder:<id>"
 }
 ```
 
@@ -301,8 +301,8 @@ are changed. `note_type` cannot be changed after creation.
 ```json
 {
   "name": "Renamed title",
-  "project_urn": "notx:proj:<uuid>",
-  "folder_urn": "notx:folder:<uuid>",
+  "project_urn": "urn:notx:proj:<id>",
+  "folder_urn": "urn:notx:folder:<id>",
   "deleted": false
 }
 ```
@@ -375,20 +375,20 @@ submitted via `POST /v1/events` instead.
 ```json
 {
   "content": "# Title\n\nParagraph one.\nParagraph two.",
-  "author_urn": "notx:usr:<uuid>"
+  "author_urn": "urn:notx:usr:<id>"
 }
 ```
 
-| Field        | Type   | Required | Description                                                         |
-| ------------ | ------ | -------- | ------------------------------------------------------------------- |
-| `content`    | string | **yes**  | The complete new document text. Lines are separated by `\n`.        |
-| `author_urn` | string | no       | URN of the author. Defaults to `<namespace>:usr:anon` when omitted. |
+| Field        | Type   | Required | Description                                                      |
+| ------------ | ------ | -------- | ---------------------------------------------------------------- |
+| `content`    | string | **yes**  | The complete new document text. Lines are separated by `\n`.     |
+| `author_urn` | string | no       | URN of the author. Defaults to `urn:notx:usr:anon` when omitted. |
 
 **Response `201 Created`** — content changed
 
 ```json
 {
-  "note_urn": "notx:note:<uuid>",
+  "note_urn": "urn:notx:note:<id>",
   "sequence": 4,
   "changed": true
 }
@@ -398,7 +398,7 @@ submitted via `POST /v1/events` instead.
 
 ```json
 {
-  "note_urn": "notx:note:<uuid>",
+  "note_urn": "urn:notx:note:<id>",
   "sequence": 3,
   "changed": false
 }
@@ -439,9 +439,9 @@ computed the exact line-level diff you want to record, or when writing to a
 
 ```json
 {
-  "note_urn": "notx:note:<uuid>",
+  "note_urn": "urn:notx:note:<id>",
   "sequence": 1,
-  "author_urn": "notx:usr:<uuid>",
+  "author_urn": "urn:notx:usr:<id>",
   "created_at": "2025-01-15T11:00:00Z",
   "entries": [
     { "op": "set", "line_number": 1, "content": "# Title" },
@@ -506,7 +506,7 @@ sequence number. Use this to replay history or sync an offline client.
 
 ```json
 {
-  "note_urn": "notx:note:<uuid>",
+  "note_urn": "urn:notx:note:<id>",
   "count": 3,
   "events": ["<Event>", "..."]
 }
@@ -606,7 +606,7 @@ POST /v1/projects
 
 ```json
 {
-  "urn": "notx:proj:<uuid>",
+  "urn": "urn:notx:proj:<id>",
   "name": "Q3 Planning",
   "description": "All notes related to Q3 planning."
 }
@@ -745,8 +745,8 @@ POST /v1/folders
 
 ```json
 {
-  "urn": "notx:folder:<uuid>",
-  "project_urn": "notx:proj:<uuid>",
+  "urn": "urn:notx:folder:<id>",
+  "project_urn": "urn:notx:proj:<id>",
   "name": "Meeting notes",
   "description": "Weekly sync notes."
 }
@@ -881,7 +881,7 @@ Device endpoints are **open** — they do not require `X-Device-ID` — so that
 devices can register themselves and check their approval status before being
 granted data access.
 
-Device URNs follow the format `notx:device:<uuid>`.
+Device URNs follow the format `urn:notx:device:<id>`.
 
 ---
 
@@ -901,18 +901,18 @@ server's onboarding configuration:
 
 ```json
 {
-  "urn": "notx:device:<uuid>",
+  "urn": "urn:notx:device:<id>",
   "name": "MacBook Pro (work)",
-  "owner_urn": "notx:usr:<uuid>",
+  "owner_urn": "urn:notx:usr:<id>",
   "public_key_b64": "MCowBQYDK2VwAyEA..."
 }
 ```
 
 | Field            | Type   | Required | Description                                                                        |
 | ---------------- | ------ | -------- | ---------------------------------------------------------------------------------- |
-| `urn`            | string | **yes**  | Client-assigned device URN (`notx:device:<uuid>`).                                 |
+| `urn`            | string | **yes**  | Client-assigned device URN (`urn:notx:device:<id>`).                               |
 | `name`           | string | **yes**  | Human-readable label (e.g. `"iPhone 15 Pro"`).                                     |
-| `owner_urn`      | string | **yes**  | URN of the user who owns this device (`notx:usr:<uuid>`).                          |
+| `owner_urn`      | string | **yes**  | URN of the user who owns this device (`urn:notx:usr:<id>`).                        |
 | `public_key_b64` | string | no       | Base64-encoded Ed25519 public key (32 bytes). Required for secure-note operations. |
 
 **Response `201 Created`** — returns the full `Device` object including the
@@ -943,7 +943,7 @@ been approved — no `X-Device-ID` header is required.
 
 ```json
 {
-  "urn": "notx:device:<uuid>",
+  "urn": "urn:notx:device:<id>",
   "approval_status": "pending",
   "revoked": false,
   "approved": false
@@ -1001,10 +1001,10 @@ Emitted on connection and on every status change.
 
 ```
 event: status
-data: {"urn":"notx:device:<uuid>","approval_status":"pending","approved":false}
+data: {"urn":"urn:notx:device:<id>","approval_status":"pending","approved":false}
 
 event: status
-data: {"urn":"notx:device:<uuid>","approval_status":"approved","approved":true}
+data: {"urn":"urn:notx:device:<id>","approval_status":"approved","approved":true}
 ```
 
 | Field             | Type   | Description                                                                            |
@@ -1248,7 +1248,7 @@ GET /v1/users
 {
   "users": [
     {
-      "urn": "notx:usr:3f8a1b2c-4d5e-6f7a-8b9c-0d1e2f3a4b5c",
+      "urn": "urn:notx:usr:3f8a1b2c-4d5e-6f7a-8b9c-0d1e2f3a4b5c",
       "display_name": "Alice Example",
       "email": "alice@example.com",
       "created_at": "2025-01-15T11:00:00Z",
@@ -1271,17 +1271,17 @@ POST /v1/users
 
 ```json
 {
-  "urn": "notx:usr:<uuid>",
+  "urn": "urn:notx:usr:<id>",
   "display_name": "Alice Example",
   "email": "alice@example.com"
 }
 ```
 
-| Field          | Required | Description                                                            |
-| -------------- | -------- | ---------------------------------------------------------------------- |
-| `urn`          | **yes**  | A valid `<namespace>:usr:<uuid>` URN. Must be unique across all users. |
-| `display_name` | **yes**  | Human-readable name shown in the UI. Must be non-empty.                |
-| `email`        | no       | Optional contact address.                                              |
+| Field          | Required | Description                                                       |
+| -------------- | -------- | ----------------------------------------------------------------- |
+| `urn`          | **yes**  | A valid `urn:notx:usr:<id>` URN. Must be unique across all users. |
+| `display_name` | **yes**  | Human-readable name shown in the UI. Must be non-empty.           |
+| `email`        | no       | Optional contact address.                                         |
 
 **Response `201 Created`** — the newly created `User` object.
 
@@ -1300,7 +1300,7 @@ POST /v1/users
 GET /v1/users/:urn
 ```
 
-`:urn` must be percent-encoded (e.g. `notx%3Ausr%3A3f8a1b2c-...`).
+`:urn` must be percent-encoded (e.g. `urn%3Anotx%3Ausr%3A3f8a1b2c-...`).
 
 **Response `200 OK`** — returns a `User` object.
 
@@ -1418,7 +1418,7 @@ Returns the note header and the full event stream for the given URN.
 
 ```
 GetNoteRequest {
-  urn: string   // notx:note:<uuid>
+  urn: string   // urn:notx:note:<id>
 }
 
 GetNoteResponse {
@@ -1636,7 +1636,7 @@ FolderProto {
 
 ```
 CreateProjectRequest {
-  urn:         string   // notx:proj:<uuid>
+  urn:         string   // urn:notx:proj:<id>
   name:        string
   description: string   // optional
 }
@@ -1713,8 +1713,8 @@ DeleteProjectResponse { deleted: bool }
 
 ```
 CreateFolderRequest {
-  urn:         string   // notx:folder:<uuid>
-  project_urn: string   // notx:proj:<uuid>  — required
+  urn:         string   // urn:notx:folder:<id>
+  project_urn: string   // urn:notx:proj:<id>  — required
   name:        string
   description: string   // optional
 }
@@ -1818,9 +1818,9 @@ must be exactly 32 bytes.
 
 ```
 RegisterDeviceRequest {
-  device_urn:  string   // notx:device:<uuid>
+  device_urn:  string   // urn:notx:device:<id>
   device_name: string
-  owner_urn:   string   // notx:usr:<uuid>
+  owner_urn:   string   // urn:notx:usr:<id>
   public_key:  bytes    // Ed25519 public key — exactly 32 bytes
 }
 
@@ -1928,7 +1928,7 @@ the session token is consumed (single-use).
 ```
 CompletePairingRequest {
   session_token: string
-  device_urn:    string   // notx:device:<uuid>
+  device_urn:    string   // urn:notx:device:<id>
   device_name:   string
   public_key:    bytes    // Ed25519 public key, exactly 32 bytes
 }
@@ -1973,9 +1973,9 @@ Returned by all HTTP device endpoints.
 
 | Field             | Type   | Description                                                                      |
 | ----------------- | ------ | -------------------------------------------------------------------------------- |
-| `urn`             | string | Unique device identifier (`notx:device:<uuid>`).                                 |
+| `urn`             | string | Unique device identifier (`urn:notx:device:<id>`).                               |
 | `name`            | string | Human-readable device label.                                                     |
-| `owner_urn`       | string | URN of the owning user (`notx:usr:<uuid>`).                                      |
+| `owner_urn`       | string | URN of the owning user (`urn:notx:usr:<id>`).                                    |
 | `public_key_b64`  | string | Base64-encoded Ed25519 public key. Empty string if not provided at registration. |
 | `approval_status` | string | Onboarding state: `"pending"`, `"approved"`, or `"rejected"`.                    |
 | `revoked`         | bool   | `true` if the device has been permanently revoked. Omitted when `false`.         |
@@ -1988,14 +1988,14 @@ Returned by all HTTP device endpoints.
 
 Returned by all project endpoints and by `ProjectProto` over gRPC.
 
-| Field         | Type   | Description                                     |
-| ------------- | ------ | ----------------------------------------------- |
-| `urn`         | string | Unique project identifier (`notx:proj:<uuid>`). |
-| `name`        | string | Human-readable display name.                    |
-| `description` | string | Optional summary. Empty string if not set.      |
-| `deleted`     | bool   | `true` if the project has been soft-deleted.    |
-| `created_at`  | string | RFC 3339 creation timestamp.                    |
-| `updated_at`  | string | RFC 3339 last-modified timestamp.               |
+| Field         | Type   | Description                                       |
+| ------------- | ------ | ------------------------------------------------- |
+| `urn`         | string | Unique project identifier (`urn:notx:proj:<id>`). |
+| `name`        | string | Human-readable display name.                      |
+| `description` | string | Optional summary. Empty string if not set.        |
+| `deleted`     | bool   | `true` if the project has been soft-deleted.      |
+| `created_at`  | string | RFC 3339 creation timestamp.                      |
+| `updated_at`  | string | RFC 3339 last-modified timestamp.                 |
 
 ---
 
@@ -2003,15 +2003,15 @@ Returned by all project endpoints and by `ProjectProto` over gRPC.
 
 Returned by all folder endpoints and by `FolderProto` over gRPC.
 
-| Field         | Type   | Description                                      |
-| ------------- | ------ | ------------------------------------------------ |
-| `urn`         | string | Unique folder identifier (`notx:folder:<uuid>`). |
-| `project_urn` | string | URN of the owning project. Immutable.            |
-| `name`        | string | Human-readable display name.                     |
-| `description` | string | Optional summary. Empty string if not set.       |
-| `deleted`     | bool   | `true` if the folder has been soft-deleted.      |
-| `created_at`  | string | RFC 3339 creation timestamp.                     |
-| `updated_at`  | string | RFC 3339 last-modified timestamp.                |
+| Field         | Type   | Description                                        |
+| ------------- | ------ | -------------------------------------------------- |
+| `urn`         | string | Unique folder identifier (`urn:notx:folder:<id>`). |
+| `project_urn` | string | URN of the owning project. Immutable.              |
+| `name`        | string | Human-readable display name.                       |
+| `description` | string | Optional summary. Empty string if not set.         |
+| `deleted`     | bool   | `true` if the folder has been soft-deleted.        |
+| `created_at`  | string | RFC 3339 creation timestamp.                       |
+| `updated_at`  | string | RFC 3339 last-modified timestamp.                  |
 
 ---
 
@@ -2021,7 +2021,7 @@ Returned by all user endpoints.
 
 | Field          | Type   | Description                                                     |
 | -------------- | ------ | --------------------------------------------------------------- |
-| `urn`          | string | Unique user identifier (`<namespace>:usr:<uuid>`).              |
+| `urn`          | string | Unique user identifier (`urn:notx:usr:<id>`).                   |
 | `display_name` | string | Human-readable name shown in the UI.                            |
 | `email`        | string | Optional contact address. Omitted when empty.                   |
 | `deleted`      | bool   | `true` if the user has been soft-deleted. Omitted when `false`. |

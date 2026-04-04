@@ -467,7 +467,7 @@ Full CRUD management for user records.
 | `showCreate`     | Whether the "New User" creation modal is open          |
 | `deleting`       | URN of the user pending soft-delete confirmation       |
 
-**Create flow.** Clicking **New User** opens `UserCreateModal`. The modal auto-generates a `notx:usr:<uuid-v4>` URN, accepts a required `display_name` and optional `email`, then calls `POST /v1/users`. On success the query is invalidated and the modal closes.
+**Create flow.** Clicking **New User** opens `UserCreateModal`. The modal auto-generates a `urn:notx:usr:<id>` URN, accepts a required `display_name` and optional `email`, then calls `POST /v1/users`. On success the query is invalidated and the modal closes.
 
 **Detail panel.** Clicking a table row opens `UserPanel` — a right-side slide-in with all fields displayed. An inline edit form allows updating `display_name` and `email` via `PATCH /v1/users/{urn}`. The **Delete** button opens `ConfirmDeleteModal` which calls `DELETE /v1/users/{urn}` (soft-delete).
 

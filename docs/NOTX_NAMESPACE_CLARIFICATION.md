@@ -1,256 +1,308 @@
-# notx Namespace Clarification
+# notx Namespace & Identity Clarification
 
-## The Core Distinction
+This document explains how **object identity**, **namespace**, and **server authority** work in the notx system. If you're coming from the old model where namespace was encoded in the URN, read the [What Changed](#what-changed-from-the-old-model) section first.
 
-notx uses **namespaces** to distinguish between:
+---
 
-1. **The official notx Platform** — A SaaS offering operated by notx
-2. **Self-hosted notx Instances** — Private deployments run by organizations
+## The Core Principle
 
-Every URN (entity identifier) includes a namespace that encodes which instance owns the resource.
+> **Namespace is a label. It is not identity.**
 
-## The Official notx Platform
+In the current notx model, every object has a **globally unique, immutable URN** that is independent of namespace, server, or location. Namespace is a separate metadata field — a logical grouping tag stored alongside the object, not encoded in its identifier.
 
-- **Namespace**: `notx` (reserved)
-- **Operator**: notx Inc.
-- **Scope**: SaaS multi-tenant platform
-- **Examples**:
-  ```
-  notx:note:018e4f2a-9b1c-7d3e-8f2a-1b3c4d5e6f7a
-  notx:usr:7f3e9c1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b
-  notx:proj:3a1b2c3d-4e5f-6a7b-8c9d-0e1f2a3b4c5d
-  ```
+---
 
-The namespace `notx` is **reserved** and can only be used for the official platform. No other instance, organization, or deployment may use the `notx` namespace.
+## URN Format
 
-## Self-Hosted Instances
+All notx URNs follow this format:
 
-- **Namespace**: Custom, chosen by the deployer (e.g., `acme`, `mycompany`, `internal`)
-- **Operator**: The organization running the instance
-- **Scope**: Private, independent from all other instances
-- **Examples** (for organization "Acme Corp"):
-  ```
-  acme:note:018e4f2a-9b1c-7d3e-8f2a-1b3c4d5e6f7a
-  acme:usr:7f3e9c1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b
-  acme:proj:3a1b2c3d-4e5f-6a7b-8c9d-0e1f2a3b4c5d
-  ```
+```
+urn:notx:<type>:<id>
+```
 
-Each self-hosted instance chooses its own namespace. This namespace uniquely identifies that instance globally. Two different organizations cannot both use the namespace `acme`—the first to register it owns it.
+| Component  | Description                                 | Example                      |
+| ---------- | ------------------------------------------- | ---------------------------- |
+| `urn:notx` | Scheme prefix — universal for all notx URNs | `urn:notx`                   |
+| `<type>`   | Object type                                 | `note`, `usr`, `proj`, `srv` |
+| `<id>`     | Globally unique identifier (ULID or UUID)   | `01HZX3K8J9X2M4P7R8T1Y6ZQ`   |
 
-## Federation: What It Means
+### Examples
 
-Federation means that instances can **reference each other's resources** and **resolve metadata** across instance boundaries. It does **not** mean data sharing or replication.
+```
+urn:notx:note:01HZX3K8J9X2M4P7R8T1Y6ZQ
+urn:notx:usr:01HZUSER987654321ABCDEFGH
+urn:notx:proj:01HZPROJ111222333444555AA
+urn:notx:srv:01HZSERVER123456789ZZZZZZ
+```
 
-### What Federation Enables
+A URN never changes. It does not encode which server owns the object. It does not encode a namespace. It simply says: _"this is a notx note/user/project, and its unique ID is X."_
 
-1. **Cross-instance URN references** — A note on `acme` can reference a note on `mycompany` or `notx`
-   ```
-   # In acme:note:018e4f2a...
-   node_links:
-     requirements: "mycompany:note:7c3e9f1a..."
-     api_docs: "notx:note:9c8d7e6f..."
-   ```
+---
 
-2. **Metadata resolution for UX** — When displaying a link to `mycompany:note:...`, the `acme` instance can query `mycompany`'s metadata API to get the note's name, author, and timestamp
-   ```
-   Display: "See mycompany:note:7c3e9f1a (Requirements [by Alice Smith, Jan 15])"
-   ```
+## The Object Data Model
 
-3. **User metadata display** — When showing `mycompany:usr:...` as an author, display their name and avatar from their home instance
-
-### What Federation Does NOT Enable
-
-1. **No content fetching** — The `acme` instance never downloads the content (events, payload) of `mycompany:note:...`. The note's data remains on `mycompany` forever.
-
-2. **No data replication** — Changes to a `mycompany:note:...` are not mirrored to `acme`. Cross-references are read-only.
-
-3. **No access override** — If you don't have permission to view `mycompany:note:...` on `mycompany`, you cannot access it via `acme` either. Access control is per-instance.
-
-4. **No data API keys** — The metadata resolution uses restrictive, read-only API keys that expose only:
-   - Note: name, author_urn, created_at, updated_at (NO content, NO events)
-   - User: name, profile_pic (NO email, NO organization)
-   - Organization: name (NO members, NO private info)
-
-5. **No mutual data sharing** — Two instances do not trade event logs or sync content. Instances remain completely independent sources of truth for their own data.
-
-## Namespace Registration
-
-### Why Register?
-
-If your organization runs a self-hosted instance and wants to enable federation (optional), you register your namespace in a **namespace registry**. This registry is purely informational and enables:
-
-- **Discovery** — Other instances can find your metadata API endpoint
-- **UX improvement** — When showing cross-instance references, instances know how to resolve metadata
-- **Validation** — Instances can verify that a namespace actually exists (prevents typos from silently failing)
-
-### What Gets Registered?
+Every notx object carries three identity-related fields:
 
 ```json
 {
+  "id":        "urn:notx:note:01HZX3K8J9X2M4P7R8T1Y6ZQ",
+  "authority": "urn:notx:srv:01HZSERVER123456789ZZZZZZ",
   "namespace": "acme",
-  "instance_name": "Acme Corp notx",
-  "metadata_api": "https://notes.acme.internal/api/v1/metadata",
-  "public": false,
-  "admin_email": "admin@acme.com"
+  ...
 }
 ```
 
-- `namespace` — The unique identifier for your instance
-- `instance_name` — Human-readable name
-- `metadata_api` — The HTTPS endpoint for metadata queries (read-only)
-- `public` — Whether other instances can discover you (may be private/internal)
-- `admin_email` — Contact for registry issues
+| Field       | Type         | Description                                                              |
+| ----------- | ------------ | ------------------------------------------------------------------------ |
+| `id`        | URN          | Globally unique, immutable object identity. Never changes.               |
+| `authority` | Server URN   | The server that owns and manages this object. This is how you find it.   |
+| `namespace` | String label | Logical grouping tag for UI, filtering, and multi-tenancy. Not identity. |
 
-### What Does NOT Get Registered?
+### What each field does
 
-- User credentials or authentication tokens
-- Database connection strings
-- Private content or proprietary data
-- Access control lists
-- Event histories or note payloads
+- **`id`** — The object's permanent name in the universe. If the object moves servers, the `id` stays the same.
+- **`authority`** — Points to the server URN responsible for this object. Used for routing and resolution. _This_ is the location anchor, not the namespace.
+- **`namespace`** — A human-friendly label like `"acme"` or `"internal"`. Used to group objects logically. Has no bearing on where the object lives or who can resolve it.
 
-The registry is **metadata-only**. It reveals only that your instance exists and where to ask for safe, public metadata.
+---
 
-### Metadata API
+## What Namespace IS
 
-The metadata API is accessed with a **restricted, read-only API key**. When instance A queries instance B's metadata API:
+Namespace is a **logical grouping label**. Think of it like a folder name or a tenant tag. It is useful for:
+
+- **Multi-tenancy within a cluster** — A cluster of servers all serving the `acme` namespace can use this field to scope queries and filter results.
+- **UI and filtering** — Display notes "in the acme namespace" without caring which server they live on.
+- **Routing hints** — A load balancer or gateway may use namespace to route requests to the right cluster, but this is advisory, not authoritative.
+- **Human-readable context** — Helps operators and users understand which logical domain an object belongs to.
+
+Namespace is **not** required to be globally unique. Two completely different servers — run by two completely different organizations — can both use the namespace `"acme"`. That is fine, because namespace is not identity.
+
+---
+
+## What Namespace Is NOT
+
+| Namespace is NOT...              | Why                                                                                    |
+| -------------------------------- | -------------------------------------------------------------------------------------- |
+| Part of the URN                  | URNs are `urn:notx:<type>:<id>` — namespace appears nowhere in them                    |
+| An instance identity anchor      | Servers are identified by their own server URN (`urn:notx:srv:<id>`), not by namespace |
+| Required to be globally unique   | Multiple servers can share a namespace; authority distinguishes them                   |
+| Used for cross-server resolution | Resolution uses the `authority` field and the routing table, not namespace             |
+| A reserved keyword               | `"notx"` is the URN scheme prefix for all objects, not a namespace anyone owns         |
+
+---
+
+## How Identity Actually Works
+
+Object identity in notx is a two-part system:
+
+### 1. The Object's Own URN — what it is
 
 ```
-POST https://notes.acme.internal/api/v1/metadata
-Authorization: Bearer <read-only-api-key>
-Content-Type: application/json
-
-{
-  "urn": "acme:note:7c3e9f1a..."
-}
+urn:notx:note:01HZX3K8J9X2M4P7R8T1Y6ZQ
 ```
 
-Response:
+This is globally unique and immutable. It is generated once at object creation and never changes, regardless of where the object moves or who serves it.
+
+### 2. The Authority Field — where to find it
+
+```json
+"authority": "urn:notx:srv:01HZSERVER123456789ZZZZZZ"
+```
+
+This is a server URN pointing to the server responsible for the object. Server URNs _are_ globally unique — each server generates its own unique URN at startup or registration. If you encounter an object and need to fetch its content or verify its state, you look up the authority server.
+
+Together: **`id` tells you what the object is; `authority` tells you who owns it.**
+
+---
+
+## Clusters and Namespace Sharing
+
+Multiple servers **can and often will** share a namespace. This is by design, not a collision.
+
+**Example: Acme Corp runs a three-node notx cluster**
+
+All three servers serve the `"acme"` namespace, but each has its own unique server URN:
+
+| Server      | Server URN                              | Namespace |
+| ----------- | --------------------------------------- | --------- |
+| acme-node-1 | `urn:notx:srv:01HZSVR1AAAAAAAAAAAAAAAA` | `acme`    |
+| acme-node-2 | `urn:notx:srv:01HZSVR2BBBBBBBBBBBBBBBB` | `acme`    |
+| acme-node-3 | `urn:notx:srv:01HZSVR3CCCCCCCCCCCCCCCC` | `acme`    |
+
+A note owned by `acme-node-2` looks like this:
+
 ```json
 {
-  "urn": "acme:note:7c3e9f1a...",
-  "name": "Requirements",
-  "author_urn": "acme:usr:2d3e4f5a...",
-  "created_at": "2025-01-15T09:00:00Z",
-  "updated_at": "2025-01-15T14:30:00Z"
+  "id": "urn:notx:note:01HZX3K8J9X2M4P7R8T1Y6ZQ",
+  "authority": "urn:notx:srv:01HZSVR2BBBBBBBBBBBBBBBB",
+  "namespace": "acme",
+  "name": "Q3 Roadmap"
 }
 ```
 
-**Critically**: There is no `content`, `events`, `payload`, or `head_sequence` in the response. The requesting instance learns only enough to display a helpful link. It cannot access the actual data.
+The namespace `"acme"` is shared by all three nodes. The `authority` field is what uniquely distinguishes which node owns any given object. If you need to fetch that note, you resolve `urn:notx:srv:01HZSVR2BBBBBBBBBBBBBBBB` — not the namespace.
 
-## Examples
+---
 
-### Scenario: Acme and MyCompany Both Run notx
+## The Routing Table
 
-**Acme's instance:**
-- Namespace: `acme`
-- Registered in the registry
-- Metadata API at: `https://notes.acme.internal/api/v1/metadata`
-
-**MyCompany's instance:**
-- Namespace: `mycompany`
-- Registered in the registry
-- Metadata API at: `https://notes.mycompany.io/api/v1/metadata`
-
-**Acme's note references MyCompany's:**
+Each notx node maintains a **routing table** that maps server URNs to their network endpoints. This is how cross-server resolution works.
 
 ```
-# acme:note:018e4f2a-9b1c-7d3e-8f2a-1b3c4d5e6f7a
-# name: Vendor Integration Plan
-
-See requirements: mycompany:note:7c3e9f1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b
+Routing Table (on acme-node-1)
+──────────────────────────────────────────────────────────────────
+Server URN                                  │ Endpoint
+────────────────────────────────────────────┼─────────────────────
+urn:notx:srv:01HZSVR2BBBBBBBBBBBBBBBB       │ https://acme-2.internal:4000
+urn:notx:srv:01HZSVR3CCCCCCCCCCCCCCCC       │ https://acme-3.internal:4000
+urn:notx:srv:01HZEXTERNAL99999999999        │ https://notes.mycompany.io
+urn:notx:srv:01HZPLATFORM00000000000        │ https://platform.notx.io
+──────────────────────────────────────────────────────────────────
 ```
 
-**When Acme displays this note:**
+Resolution is always: **`object.authority` → routing table → endpoint → fetch**. Namespace is not consulted.
 
-1. Parser encounters the URN `mycompany:note:7c3e9f1a...`
-2. Acme queries its registry for `mycompany` → gets `metadata_api = https://notes.mycompany.io/api/v1/metadata`
-3. Acme sends a metadata query with its restricted API key
-4. MyCompany responds: `{ urn: "mycompany:note:...", name: "Requirements", author_urn: "mycompany:usr:...", created_at: "2025-01-15..." }`
-5. Acme caches this for 1 hour
-6. Acme displays: "See requirements: [Requirements](by Alice Smith, Jan 15)"
-7. The actual content of `mycompany:note:...` is **never** fetched, cached, or accessible to Acme
+---
 
-**If MyCompany is unreachable:**
+## Federation: Cross-Server Resolution
 
-Acme gracefully degrades and displays the raw URN:
+Federation is the ability for one notx node to reference and resolve objects owned by a different server.
+
+### How it works (step by step)
+
+Suppose `acme-node-1` is rendering a note that contains a reference to an object owned by an external server:
+
+**The referenced object:**
+
+```json
+{
+  "id": "urn:notx:note:01HZEXTERNAL555555555555",
+  "authority": "urn:notx:srv:01HZEXTERNAL99999999999",
+  "namespace": "mycompany",
+  "name": "Vendor Requirements"
+}
 ```
-See requirements: mycompany:note:7c3e9f1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b
+
+**Resolution steps on `acme-node-1`:**
+
+1. Node encounters `urn:notx:note:01HZEXTERNAL555555555555` in a cross-reference.
+2. Node looks up this object's `authority`: `urn:notx:srv:01HZEXTERNAL99999999999`.
+3. Node consults its routing table → finds endpoint `https://notes.mycompany.io`.
+4. Node sends a metadata query to `https://notes.mycompany.io` for the object.
+5. Response includes name, author URN, timestamps — enough for display.
+6. Node renders the reference: _"Vendor Requirements (by Alice, Jan 15)"_
+
+**If the remote server is unreachable:**
+
+The node gracefully degrades and displays the raw URN:
+
+```
+urn:notx:note:01HZEXTERNAL555555555555
 ```
 
-### Scenario: Two Acme Offices (Both on Same Instance)
+Notice that at **no point** was the namespace `"mycompany"` used for routing or resolution. The routing was done entirely through the `authority` server URN and the routing table.
 
-If two teams within Acme both use the same self-hosted instance (`acme`), they can:
+### What federation enables
 
-- Reference each other's notes freely (same URN namespace)
-- Access each other's content (if permissions allow)
-- Edit and replicate notes
+| Capability                                                | Supported |
+| --------------------------------------------------------- | --------- |
+| Cross-server URN references                               | ✅ Yes    |
+| Metadata resolution for display (name, author, timestamp) | ✅ Yes    |
+| Graceful degradation when remote is unreachable           | ✅ Yes    |
+| Content/event-log fetching from remote servers            | ❌ No     |
+| Data replication between servers                          | ❌ No     |
+| Access control override across servers                    | ❌ No     |
 
-This is **not** federation—both teams share the same instance. Federation only applies across instance boundaries.
+---
 
 ## The Anonymous Author Sentinel
 
-Unauthenticated or unknown edits use an instance-specific sentinel:
-
-- On `notx` platform: `notx:usr:anon`
-- On `acme` instance: `acme:usr:anon`
-- On `mycompany` instance: `mycompany:usr:anon`
-
-This sentinel is **not** resolvable—it has no record in the user table. It simply means "the author of this edit is unknown".
-
-## Key Principles
-
-1. **Instance Autonomy** — Each instance is completely independent. Data never flows between instances automatically.
-
-2. **Namespace = Home** — The namespace in a URN is the definitive statement of which instance owns the resource and where its authoritative copy lives.
-
-3. **Read-Only References** — Cross-instance URN references are read-only pointers. The referenced resource lives on its home instance forever.
-
-4. **Metadata ≠ Data** — Federation exposes only safe, public metadata (names, timestamps, authors). Never content or events.
-
-5. **No Data Sharing** — Even if instance A has permission to view instance B's notes, there is no mechanism for A to download or cache B's event logs. A can only query B's metadata API.
-
-6. **Privacy Boundary** — The metadata API uses API keys and can be made private. Instance A can choose to allow or deny metadata queries from instance B.
-
-## Implementation Checklist
-
-For a self-hosted notx instance that wants federation:
-
-- [ ] Choose a unique namespace (e.g., `acme`)
-- [ ] Configure namespace in the notx server config
-- [ ] Implement the metadata API endpoint (read-only, restricted API keys)
-- [ ] Register the namespace and metadata API URL in the registry (optional but recommended)
-- [ ] Generate restricted read-only API keys for peer instances
-- [ ] Document the metadata API contract (which fields are exposed)
-- [ ] Test cross-instance URN resolution (query other instances' metadata APIs)
-
-For a standalone instance with no federation:
-
-- [ ] Choose a namespace
-- [ ] Disable federation (metadata API is unreachable)
-- [ ] Cross-instance URN references still work (graceful degradation: raw URNs displayed)
-
-## Relationship to `.notx` Files
-
-When exporting a note to a `.notx` file:
+Unauthenticated or unknown edits are attributed to a single global sentinel:
 
 ```
-# notx/1.0
-# note_urn:      acme:note:018e4f2a-9b1c-7d3e-8f2a-1b3c4d5e6f7a
-# name:          Vendor Integration
-# project_urn:   acme:proj:3a1b2c3d-4e5f-6a7b-8c9d-0e1f2a3b4c5d
-# created_at:    2025-01-15T09:00:00Z
-# head_sequence: 4
-
-1:2025-01-15T09:00:00Z:acme:usr:7f3e9c1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b
-->
-1 | See requirements: mycompany:note:7c3e9f1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b
+urn:notx:usr:anon
 ```
 
-The file carries the namespace everywhere. When imported into another instance, the namespace tells the importer:
+Because namespace is no longer part of URN identity, there is one universal anonymous sentinel across the entire system. It is not resolvable to a user record — it simply means _"the author of this change is unknown."_
 
-- This note originated on the `acme` instance
-- The event author is `acme:usr:7f3e9c1a...` (lives on acme)
-- The cross-reference is to `mycompany:note:...` (lives on mycompany)
+The old per-namespace sentinels (`acme:usr:anon`, `notx:usr:anon`, etc.) are replaced by this single global value.
 
-The importing instance respects these URNs as foreign references and does not claim ownership.
+---
+
+## Platform Role
+
+The notx platform (if used) is an optional orchestration layer. It provides:
+
+- **Identity registry** — A directory of known server URNs and their endpoints.
+- **Discovery** — Helps nodes bootstrap their routing tables.
+- **Federation bridge** — Assists in resolving objects across servers that don't have direct routing table entries for each other.
+
+The platform is **not** a special privileged namespace owner. It is identified by its own server URN, just like any other server:
+
+```
+urn:notx:srv:01HZPLATFORM00000000000
+```
+
+The platform does not "own" all data. It does not require a reserved namespace. The string `"notx"` in a URN (`urn:notx:...`) is the universal scheme prefix for the notx protocol — it is not a namespace, and it does not belong to any single organization or operator.
+
+A fully self-hosted deployment with no connection to the notx platform is completely valid. It simply manages its own routing table manually or via a self-hosted registry.
+
+---
+
+## What Changed from the Old Model
+
+| Concept                  | Old Model                                    | New Model                                     |
+| ------------------------ | -------------------------------------------- | --------------------------------------------- |
+| URN format               | `acme:note:018e4f2a-...`                     | `urn:notx:note:01HZX3K8J9...`                 |
+| Namespace location       | Encoded in the URN                           | Separate metadata field on the object         |
+| Namespace uniqueness     | Required to be globally unique               | Not required — multiple servers can share one |
+| Instance identity anchor | Namespace                                    | Server URN (`urn:notx:srv:<id>`)              |
+| Cross-server resolution  | Namespace prefix → registry lookup           | `authority` field → routing table lookup      |
+| `notx` string meaning    | Reserved namespace for the official platform | Universal URN scheme prefix for all objects   |
+| Anonymous author         | `acme:usr:anon` (per-instance)               | `urn:notx:usr:anon` (global)                  |
+
+---
+
+## Quick Reference
+
+**✅ Correct — namespace as metadata, URN is pure identity:**
+
+```json
+{
+  "id": "urn:notx:note:01HZX3K8J9X2M4P7R8T1Y6ZQ",
+  "authority": "urn:notx:srv:01HZSERVER123456789ZZZZZZ",
+  "namespace": "acme"
+}
+```
+
+**❌ Incorrect — namespace encoded in the URN (old model, do not use):**
+
+```json
+{
+  "urn": "acme:note:018e4f2a-9b1c-7d3e-8f2a-1b3c4d5e6f7a"
+}
+```
+
+**✅ To resolve a cross-server reference:**
+
+```
+object.authority → routing_table[authority] → endpoint → fetch
+```
+
+**❌ To resolve a cross-server reference (old model, do not use):**
+
+```
+urn.namespace → namespace_registry[namespace] → endpoint → fetch
+```
+
+---
+
+## Summary
+
+1. **URNs are globally unique and immutable** — `urn:notx:<type>:<id>`. They do not encode namespace or server location.
+2. **Namespace is metadata** — a logical grouping label stored on the object, not in its identity.
+3. **Authority is the location anchor** — `"authority": "urn:notx:srv:<id>"` tells you which server owns the object.
+4. **Multiple servers can share a namespace** — that's fine, because namespace isn't identity.
+5. **Federation uses the routing table** — `authority → endpoint`, not `namespace → registry`.
+6. **Server URNs are globally unique** — they are the true identity anchors for servers.
+7. **The notx platform is optional** — it is one server among many, identified by its server URN, not by owning a special namespace.

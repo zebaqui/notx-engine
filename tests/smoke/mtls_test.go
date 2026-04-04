@@ -22,9 +22,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zebaqui/notx-engine/repo/memory"
-	"github.com/zebaqui/notx-engine/internal/server"
 	"github.com/zebaqui/notx-engine/config"
+	"github.com/zebaqui/notx-engine/internal/server"
+	"github.com/zebaqui/notx-engine/repo/memory"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -370,8 +370,8 @@ func mustGETWithDeviceID(t *testing.T, client *http.Client, url, deviceID string
 func registerSecureTestDevice(t *testing.T, client *http.Client, baseURL string) string {
 	t.Helper()
 	const (
-		devURN   = "notx:device:bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
-		ownerURN = "notx:usr:7f3e9c1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b"
+		devURN   = "urn:notx:device:bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+		ownerURN = "urn:notx:usr:7f3e9c1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b"
 	)
 	resp := mustPOSTJSONWithDeviceID(t, client, baseURL+"/v1/devices", "", registerDeviceRequest{
 		URN:      devURN,
@@ -483,7 +483,7 @@ func TestMTLS(t *testing.T) {
 
 		// create a note (requires X-Device-ID)
 		createResp := mustPOSTJSONWithDeviceID(t, client, baseURL+"/v1/notes", deviceID, createNoteRequest{
-			URN:      "notx:note:11111111-1111-4111-8111-111111111111",
+			URN:      "urn:notx:note:11111111-1111-4111-8111-111111111111",
 			Name:     "mTLS smoke note",
 			NoteType: "normal",
 		})

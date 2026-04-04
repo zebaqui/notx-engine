@@ -18,10 +18,12 @@ Every notx file has three logical sections:
 
 ```
 # notx/1.0
-# note_urn:      notx:note:<uuid>
+# note_urn:      urn:notx:note:<id>
 # name:          <note name>
-# project_urn:   notx:proj:<uuid>
-# folder_urn:    notx:folder:<uuid>
+# authority:     urn:notx:srv:<id>       (optional)
+# namespace:     <label>                 (optional)
+# project_urn:   urn:notx:proj:<id>     (optional)
+# folder_urn:    urn:notx:folder:<id>   (optional)
 # created_at:    <iso-8601>
 # head_sequence: <N>
 
@@ -52,14 +54,14 @@ The file header consists of lines prefixed with `# ` (hash and space). These lin
 
 ### Required Fields
 
-| Field           | Format         | Purpose                                                                            |
-| --------------- | -------------- | ---------------------------------------------------------------------------------- |
-| `notx/1.0`      | Version string | Format version. Required as first header line.                                     |
-| `note_urn`      | URN string     | Unique identifier: `<namespace>:note:<uuid>`                                       |
-| `note_type`     | Enum string    | Security classification: `normal` (default) or `secure`. Immutable after creation. |
-| `name`          | Plain text     | Display name / title of the note                                                   |
-| `created_at`    | ISO-8601 UTC   | Timestamp of note creation (immutable)                                             |
-| `head_sequence` | Integer        | Sequence number of the last applied event (current state)                          |
+| Field           | Format         | Purpose                                                                                                          |
+| --------------- | -------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `notx/1.0`      | Version string | Format version. Required as first header line.                                                                   |
+| `note_urn`      | URN string     | Unique identifier: `urn:notx:note:<uuidv7>` (UUID v7, e.g. `urn:notx:note:01932c7b-1b4a-7e3f-9abc-0123456789ab`) |
+| `note_type`     | Enum string    | Security classification: `normal` (default) or `secure`. Immutable after creation.                               |
+| `name`          | Plain text     | Display name / title of the note                                                                                 |
+| `created_at`    | ISO-8601 UTC   | Timestamp of note creation (immutable)                                                                           |
+| `head_sequence` | Integer        | Sequence number of the last applied event (current state)                                                        |
 
 **`note_type` semantics**:
 
@@ -70,13 +72,15 @@ The file header consists of lines prefixed with `# ` (hash and space). These lin
 
 ### Optional Fields
 
-| Field         | Format               | Purpose                                                                |
-| ------------- | -------------------- | ---------------------------------------------------------------------- |
-| `project_urn` | URN string or null   | URN of the containing project: `<namespace>:proj:<uuid>`               |
-| `folder_urn`  | URN string or null   | URN of the containing folder: `<namespace>:folder:<uuid>`              |
-| `parent_urn`  | URN string or null   | URN of parent note (for hierarchical notes): `<namespace>:note:<uuid>` |
-| `deleted`     | Boolean (true/false) | Soft-delete flag                                                       |
-| `updated_at`  | ISO-8601 UTC         | Timestamp of last change (derived from last event)                     |
+| Field         | Format               | Purpose                                                                         |
+| ------------- | -------------------- | ------------------------------------------------------------------------------- |
+| `project_urn` | URN string or null   | URN of the containing project: `urn:notx:proj:<id>`                             |
+| `folder_urn`  | URN string or null   | URN of the containing folder: `urn:notx:folder:<id>`                            |
+| `parent_urn`  | URN string or null   | URN of parent note (for hierarchical notes): `urn:notx:note:<id>`               |
+| `authority`   | URN string or null   | `urn:notx:srv:<id>` of the server that created/owns this note                   |
+| `namespace`   | Plain text or null   | Logical grouping label (e.g., `acme`); informational only, not part of identity |
+| `deleted`     | Boolean (true/false) | Soft-delete flag                                                                |
+| `updated_at`  | ISO-8601 UTC         | Timestamp of last change (derived from last event)                              |
 
 ### Header Parsing Rules
 
@@ -86,11 +90,24 @@ The file header consists of lines prefixed with `# ` (hash and space). These lin
 4. Metadata lines are never consumed during event replay.
 5. The `head_sequence` value is updated by writers whenever new events are appended.
 
+### ID Format
+
+All `<id>` values in notx URNs must be **UUID v7** (time-ordered UUID, RFC 9562). UUID v7 embeds a millisecond-precision Unix timestamp in the top 48 bits, making IDs naturally time-ordered and self-describing without a separate creation timestamp lookup.
+
+**Format:** `xxxxxxxx-xxxx-7xxx-yxxx-xxxxxxxxxxxx` (36 characters, lowercase hexadecimal with hyphens)
+
+- The 13th character (version nibble) is always `7`
+- The 17th character (variant nibble) is one of `8`, `9`, `a`, or `b`
+- All hex digits are **lowercase**
+- No other UUID version (v1, v4, etc.) or ULID format is accepted
+
+The special sentinel value `anon` is the only non-UUID allowed in any `<id>` position (used exclusively in `urn:notx:usr:anon` to represent an unknown author).
+
 ### Header Immutability
 
 The `note_urn`, `created_at`, and `note_type` fields **must never change** once the file is created. `note_urn` and `created_at` establish the identity and origin time of the note. `note_type` establishes the security pipeline — changing it after creation would silently break all encrypted events or expose data that was authored under a different security expectation.
 
-Other fields (`name`, `project_urn`, `folder_urn`, `parent_urn`, `deleted`) may be updated by writers, but **only in the metadata header**, never stored as event data.
+Other fields (`name`, `project_urn`, `folder_urn`, `parent_urn`, `authority`, `namespace`, `deleted`) may be updated by writers, but **only in the metadata header**, never stored as event data.
 
 ## Event Stream
 
@@ -105,12 +122,12 @@ The event stream is the core of the file—a chronological sequence of changes a
 **Example:**
 
 ```
-1:2025-01-15T09:00:00Z:notx:usr:7f3e9c1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b
+1:2025-01-15T09:00:00Z:urn:notx:usr:01932c7b-1b4a-7e3f-9abc-0123456789ab
 ```
 
 - **Sequence** — Monotonically increasing integer starting at 1. No gaps; must be contiguous.
 - **ISO-timestamp** — ISO-8601 format with UTC timezone (Z suffix). Timestamps do not need to be strictly increasing (two events can have the same timestamp), but should generally advance.
-- **Author URN** — Full URN of the user who authored the change, or `notx:usr:anon` for unknown authors.
+- **Author URN** — Full URN of the user who authored the change, or `urn:notx:usr:anon` for unknown authors. The `<id>` segment of the author URN must be a valid UUID v7 string (`xxxxxxxx-xxxx-7xxx-yxxx-xxxxxxxxxxxx`, hyphenated lowercase hex, version 7), or the sentinel `anon`.
 
 ### Event Separator
 
@@ -149,13 +166,13 @@ The special sequence `|-` (pipe followed by hyphen with no space between) indica
 For files with `note_type: secure`, the normal `N | content` line entries inside an event are replaced with an **encrypted block**. The `!encrypted` marker must be the first line after the `->` separator:
 
 ```
-1:2025-01-15T09:00:00Z:notx:usr:7f3e9c1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b
+1:2025-01-15T09:00:00Z:urn:notx:usr:01932c7b-1b4a-7e3f-9abc-0123456789ab
 ->
 !encrypted
 nonce:   <base64-nonce>
 payload: <base64-ciphertext>
-key[notx:device:4a5b6c7d-8e9f-0a1b-2c3d-4e5f6a7b8c9d]: <base64-wrapped-cek>
-key[notx:device:9f8e7d6c-5b4a-3c2d-1e0f-9a8b7c6d5e4f]: <base64-wrapped-cek>
+key[urn:notx:device:01932c7b-1b4a-7e3f-aaaa-000000000001]: <base64-wrapped-cek>
+key[urn:notx:device:01932c7b-1b4a-7e3f-aaaa-000000000002]: <base64-wrapped-cek>
 ```
 
 | Field               | Description                                                                                                                             |
@@ -418,7 +435,7 @@ A robust system should maintain backups or use a database backend (not file-only
 When exporting a note from a database or other system to a notx file:
 
 1. Collect all events for the note in sequence order
-2. Write the metadata header (note_urn, name, project_urn, etc.)
+2. Write the metadata header (`note_urn`, `name`, `project_urn`, `authority`, `namespace`, etc.)
 3. Write all events in order
 4. Include snapshots at regular intervals (optional but recommended)
 5. Write the final `# head_sequence:` value
@@ -430,11 +447,11 @@ The exported file is immediately readable and importable into any other system.
 
 When importing a notx file:
 
-1. Parse the metadata header to extract note_urn, name, and other fields
+1. Parse the metadata header to extract `note_urn`, `name`, and other fields
 2. Validate that the sequence numbers are contiguous and start at 1
 3. Replay all events to compute the materialized current state
 4. Store the events (and optionally snapshots) in the target system
-5. Set the note's current state to the replayed content and head_sequence
+5. Set the note's current state to the replayed content and `head_sequence`
 
 If a note with the same `note_urn` already exists in the target system, the import must either:
 
@@ -444,7 +461,11 @@ If a note with the same `note_urn` already exists in the target system, the impo
 
 ### Cross-System Compatibility
 
-The key to notx portability is that **all identity is encoded in the file itself** (note_urn, project_urn, etc.). A file can be imported into any notx system without loss of information or identity. The URN scheme ensures that the imported note retains its identity across systems and can be linked to its original.
+The key to notx portability is that **all identity is encoded in the URN itself** (`urn:notx:<type>:<id>`) and the optional `authority` field. A file can be imported into any notx system without loss of identity. URNs are globally unique and immutable — a note retains its identity regardless of which system holds it or where it was originally created.
+
+The `namespace` label is preserved across import and export for context (e.g., to indicate the organizational grouping the note belonged to), but it is informational only and does not form part of the note's identity. Two notes with the same `note_urn` are the same note, regardless of their `namespace` values.
+
+The conflict resolution strategy on `note_urn` collision (merge / replace / reject) is unchanged by this model.
 
 ## Version Numbers and Sequencing
 
@@ -517,7 +538,7 @@ For very long-lived notes (thousands of events), consider:
 A valid notx file must have:
 
 - [ ] First line is `# notx/1.0`
-- [ ] Metadata header with at least `note_urn`, `name`, `created_at`, `head_sequence`
+- [ ] Metadata header with at least `note_urn` (in `urn:notx:note:<uuidv7>` format), `name`, `created_at`, `head_sequence`
 - [ ] Event headers with contiguous, strictly increasing sequence numbers starting at 1
 - [ ] Each event header followed by `->` separator
 - [ ] Each event header followed by one or more line entries or zero entries (empty event)
@@ -526,6 +547,7 @@ A valid notx file must have:
 - [ ] Snapshot sequence numbers correspond to events in the stream
 - [ ] UTF-8 encoding throughout
 - [ ] `head_sequence` value matches the last event's sequence
+- [ ] All URN `<id>` segments are valid UUID v7 strings (`xxxxxxxx-xxxx-7xxx-yxxx-xxxxxxxxxxxx`) or the sentinel `anon`
 
 ### Reference Implementations
 

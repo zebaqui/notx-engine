@@ -32,7 +32,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
+	"github.com/zebaqui/notx-engine/core"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -195,6 +195,7 @@ func startContainer(t *testing.T) (containerID, baseURL string) {
 		"--publish", fmt.Sprintf("%d:4060", hostPort), // map random host port → container 4060
 		imageName,
 		"server",
+		"--foreground",
 		"--data-dir", "/data",
 		"--grpc=false",
 		"--admin-passphrase", adminPassphrase,
@@ -344,30 +345,29 @@ func assertStatus(t *testing.T, label string, expected, actual int, body []byte)
 // Domain helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-// newDeviceURN returns a fresh notx:device:<uuidv4> URN.
+// newDeviceURN returns a fresh urn:notx:device:<uuidv7> URN.
 func newDeviceURN() string {
-	return "notx:device:" + uuid.New().String()
+	return core.NewURN(core.ObjectTypeDevice).String()
 }
 
-// newOwnerURN returns a fresh notx:usr:<uuidv4> URN.
+// newOwnerURN returns a fresh urn:notx:usr:<uuidv7> URN.
 func newOwnerURN() string {
-	return "notx:usr:" + uuid.New().String()
+	return core.NewURN(core.ObjectTypeUser).String()
 }
 
-// newNoteURN returns a fresh notx:note:<uuidv7-ish> URN.
-// We use a plain random UUID here to keep the test self-contained.
+// newNoteURN returns a fresh urn:notx:note:<uuidv7> URN.
 func newNoteURN() string {
-	return "notx:note:" + uuid.New().String()
+	return core.NewURN(core.ObjectTypeNote).String()
 }
 
-// newProjectURN returns a fresh notx:proj:<uuidv4> URN.
+// newProjectURN returns a fresh urn:notx:proj:<uuidv7> URN.
 func newProjectURN() string {
-	return "notx:proj:" + uuid.New().String()
+	return core.NewURN(core.ObjectTypeProject).String()
 }
 
-// newUserURN returns a fresh notx:usr:<uuidv4> URN.
+// newUserURN returns a fresh urn:notx:usr:<uuidv7> URN.
 func newUserURN() string {
-	return "notx:usr:" + uuid.New().String()
+	return core.NewURN(core.ObjectTypeUser).String()
 }
 
 // randomName returns a short random name string suitable for display names /
@@ -699,7 +699,7 @@ func TestAdminRemote_NoPassphraseOnServer(t *testing.T) {
 		"run", "--detach", "--rm",
 		"--publish", fmt.Sprintf("%d:4060", hostPort),
 		imageName,
-		"server", "--data-dir", "/data", "--grpc=false",
+		"server", "--foreground", "--data-dir", "/data", "--grpc=false",
 	}
 
 	out, err := exec.Command("docker", args...).Output()

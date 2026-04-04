@@ -20,39 +20,47 @@ The current state of any document is reconstructed by **replaying all events fro
 
 ## notx URN Scheme
 
-All identifiable entities in notx use a three-segment URN (Uniform Resource Name):
+All identifiable entities in notx use a four-segment URN (Uniform Resource Name):
 
 ```
-<namespace>:<object-type>:<uuid>
+urn:notx:<object-type>:<id>
 ```
 
 ### URN Components
 
-| Component     | Description                                                                                          |
-| ------------- | ---------------------------------------------------------------------------------------------------- |
-| `namespace`   | Instance identifier. `notx` for official platform; custom for self-hosted (e.g., `acme`, `company`). |
-| `object-type` | The kind of entity (see table below).                                                                |
-| `uuid`        | A UUID v4 (or v7). Unique within the object-type on that instance.                                   |
+| Component     | Description                                                   |
+| ------------- | ------------------------------------------------------------- |
+| `urn`         | Fixed prefix. Marks this as a notx URN.                       |
+| `notx`        | Fixed scheme identifier.                                      |
+| `object-type` | The kind of entity (see table below).                         |
+| `id`          | ULID (preferred) or UUID. Globally unique. Generated locally. |
 
 ### Standard Object Types
 
-| Type     | Description                 | Example URN (official platform)                    | Example URN (self-hosted)                          |
-| -------- | --------------------------- | -------------------------------------------------- | -------------------------------------------------- |
-| `note`   | A note document             | `notx:note:018e4f2a-9b1c-7d3e-8f2a-1b3c4d5e6f7a`   | `acme:note:018e4f2a-9b1c-7d3e-8f2a-1b3c4d5e6f7a`   |
-| `usr`    | A registered user or author | `notx:usr:7f3e9c1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b`    | `acme:usr:7f3e9c1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b`    |
-| `proj`   | A project                   | `notx:proj:3a1b2c3d-4e5f-6a7b-8c9d-0e1f2a3b4c5d`   | `acme:proj:3a1b2c3d-4e5f-6a7b-8c9d-0e1f2a3b4c5d`   |
-| `folder` | A folder within a project   | `notx:folder:1c2d3e4f-5a6b-7c8d-9e0f-1a2b3c4d5e6f` | `acme:folder:1c2d3e4f-5a6b-7c8d-9e0f-1a2b3c4d5e6f` |
-| `org`    | An organization             | `notx:org:9e8d7c6b-5a4f-3e2d-1c0b-9a8f7e6d5c4b`    | `acme:org:9e8d7c6b-5a4f-3e2d-1c0b-9a8f7e6d5c4b`    |
-| `event`  | A history event             | `notx:event:2d3e4f5a-6b7c-8d9e-0f1a-2b3c4d5e6f7a`  | `acme:event:2d3e4f5a-6b7c-8d9e-0f1a-2b3c4d5e6f7a`  |
+| Type     | Description                 | Example URN                              |
+| -------- | --------------------------- | ---------------------------------------- |
+| `note`   | A note document             | `urn:notx:note:01HZX3K8J9X2M4P7R8T1Y6ZQ` |
+| `usr`    | A registered user or author | `urn:notx:usr:01HZX3K8ABCDEF1234567890`  |
+| `proj`   | A project                   | `urn:notx:proj:01HZX3K8PROJID123456789`  |
+| `folder` | A folder within a project   | `urn:notx:folder:01HZX3K8FOLDERID12345`  |
+| `org`    | An organization             | `urn:notx:org:01HZX3K8ORGID1234567890`   |
+| `event`  | A history event             | `urn:notx:event:01HZX3K8EVENTID123456`   |
+| `device` | A registered device (E2EE)  | `urn:notx:device:01HZX3K8DEVICEID12345`  |
+| `srv`    | A notx server instance      | `urn:notx:srv:01HZX3K8SERVERID123456`    |
 
 ### The `anon` Sentinel
 
-Unauthenticated or unknown authors use an instance-specific sentinel:
+Unauthenticated or unknown authors use a single global sentinel value:
 
-- Official platform: `notx:usr:anon`
-- Self-hosted `acme`: `acme:usr:anon`
+```
+urn:notx:usr:anon
+```
 
-This is not a real UUID. It is a special value interpreted by parsers as "unknown author on that instance".
+This is not a real ID. It is a special value interpreted by parsers as "unknown or unauthenticated author". There is no namespace prefix — it is universal regardless of which server or deployment created the event.
+
+### Note on Namespace
+
+Namespace is **separate metadata on the object** (`"namespace": "acme"`), not encoded in the URN. The `.notx` file format may include optional `# authority:` and `# namespace:` header fields for human context, but the `note_urn`, event author URNs, and device URNs all use the `urn:notx:...` format regardless of which server or namespace created them. There is no distinction in URN structure between the official platform and any self-hosted instance.
 
 ## File Structure
 
@@ -68,25 +76,29 @@ The file begins with metadata lines, each prefixed with `#`:
 
 ```
 # notx/1.0
-# note_urn:      notx:note:018e4f2a-9b1c-7d3e-8f2a-1b3c4d5e6f7a
+# note_urn:      urn:notx:note:01HZX3K8J9X2M4P7R8T1Y6ZQ
+# authority:     urn:notx:srv:01HZSERVER1234567890123
+# namespace:     acme
 # note_type:     normal
 # name:          My Meeting Notes
-# project_urn:   notx:proj:3a1b2c3d-4e5f-6a7b-8c9d-0e1f2a3b4c5d
-# folder_urn:    notx:folder:1c2d3e4f-5a6b-7c8d-9e0f-1a2b3c4d5e6f
+# project_urn:   urn:notx:proj:01HZX3K8PROJID123456789
+# folder_urn:    urn:notx:folder:01HZX3K8FOLDERID12345
 # created_at:    2025-01-15T09:00:00Z
 # head_sequence: 4
 ```
 
-| Field           | Purpose                                                                            |
-| --------------- | ---------------------------------------------------------------------------------- |
-| `notx/1.0`      | Format version. Always `notx/1.0` for this specification.                          |
-| `note_urn`      | The unique identity of this note (`<namespace>:note:<uuid>`).                      |
-| `note_type`     | Security classification: `normal` (default) or `secure`. Immutable after creation. |
-| `name`          | Human-readable name / title of the note.                                           |
-| `project_urn`   | URN of the project this note belongs to (`<namespace>:proj:<uuid>`) (optional).    |
-| `folder_urn`    | URN of the folder this note is in (`<namespace>:folder:<uuid>`) (optional).        |
-| `created_at`    | ISO-8601 UTC timestamp of when the note was created.                               |
-| `head_sequence` | The sequence number of the last applied event (current state).                     |
+| Field           | Purpose                                                                                                                |
+| --------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `notx/1.0`      | Format version. Always `notx/1.0` for this specification.                                                              |
+| `note_urn`      | The unique identity of this note (`urn:notx:note:<id>`).                                                               |
+| `authority`     | URN of the server instance that created or owns this note (`urn:notx:srv:<id>`). Optional.                             |
+| `namespace`     | Human-readable namespace label for the owning organization (e.g. `acme`). Optional context only — not part of any URN. |
+| `note_type`     | Security classification: `normal` (default) or `secure`. Immutable after creation.                                     |
+| `name`          | Human-readable name / title of the note.                                                                               |
+| `project_urn`   | URN of the project this note belongs to (`urn:notx:proj:<id>`). Optional.                                              |
+| `folder_urn`    | URN of the folder this note is in (`urn:notx:folder:<id>`). Optional.                                                  |
+| `created_at`    | ISO-8601 UTC timestamp of when the note was created.                                                                   |
+| `head_sequence` | The sequence number of the last applied event (current state).                                                         |
 
 The `head_sequence` field is updated whenever new events are appended, allowing the file header to always reflect the current state without rewriting the entire file.
 
@@ -112,16 +124,16 @@ An event header is a single line with three colon-delimited fields:
 Example:
 
 ```
-1:2025-01-15T09:00:00Z:notx:usr:7f3e9c1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b
+1:2025-01-15T09:00:00Z:urn:notx:usr:01HZX3K8ABCDEF1234567890
 ```
 
-| Field           | Type         | Description                                |
-| --------------- | ------------ | ------------------------------------------ |
-| `sequence`      | integer      | Monotonically increasing, starts at 1      |
-| `iso-timestamp` | ISO-8601 UTC | When the event was recorded                |
-| `author-urn`    | URN string   | Full URN of the author, or `notx:usr:anon` |
+| Field           | Type         | Description                                    |
+| --------------- | ------------ | ---------------------------------------------- |
+| `sequence`      | integer      | Monotonically increasing, starts at 1          |
+| `iso-timestamp` | ISO-8601 UTC | When the event was recorded                    |
+| `author-urn`    | URN string   | Full URN of the author, or `urn:notx:usr:anon` |
 
-**Parser note:** The author URN contains colons, so the header has variable token count. The parser must treat everything after the second colon as the author URN.
+**Parser note:** The author URN contains colons (e.g. `urn:notx:usr:01HZX3K8ABCDEF1234567890`); everything after the second colon in the header line is the author URN, which itself starts with `urn:`. The parser must treat everything after the second colon as the author URN.
 
 #### Event Separator
 
@@ -152,13 +164,13 @@ The line number is 1-based. The pipe `|` separates the line number from its cont
 For notes with `note_type: secure`, the normal `N | content` line entries are replaced with an **encrypted block**. The `!encrypted` marker on the first line of the event body signals this:
 
 ```
-1:2025-01-15T09:00:00Z:notx:usr:7f3e9c1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b
+1:2025-01-15T09:00:00Z:urn:notx:usr:01HZX3K8ABCDEF1234567890
 ->
 !encrypted
 nonce:   <base64-nonce>
 payload: <base64-ciphertext>
-key[notx:device:4a5b6c7d-8e9f-0a1b-2c3d-4e5f6a7b8c9d]: <base64-wrapped-cek>
-key[notx:device:9f8e7d6c-5b4a-3c2d-1e0f-9a8b7c6d5e4f]: <base64-wrapped-cek>
+key[urn:notx:device:01HZX3K8DEVICEID12345]: <base64-wrapped-cek>
+key[urn:notx:device:01HZX3K8DEVICE2ID1234]: <base64-wrapped-cek>
 ```
 
 | Field               | Description                                                                                                                             |
@@ -214,7 +226,7 @@ The core of notx is the **lane format**—a simple, line-oriented language for e
 ### Anatomy of an Event
 
 ```
-1:2025-01-15T09:00:00Z:notx:usr:7f3e9c1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b
+1:2025-01-15T09:00:00Z:urn:notx:usr:01HZX3K8ABCDEF1234567890
 ->
 1 | # Meeting Notes
 2 |
@@ -223,7 +235,7 @@ The core of notx is the **lane format**—a simple, line-oriented language for e
 
 This event:
 
-1. Is event #1, created on 2025-01-15 at 09:00:00 UTC by user `7f3e9c1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b`
+1. Is event #1, created on 2025-01-15 at 09:00:00 UTC by user `urn:notx:usr:01HZX3K8ABCDEF1234567890`
 2. Creates three lines:
    - Line 1: `# Meeting Notes`
    - Line 2: empty string
@@ -260,7 +272,7 @@ Remove line 5 entirely. All subsequent line numbers shift down by 1.
 An event can change multiple lines:
 
 ```
-2:2025-01-15T09:15:00Z:notx:usr:7f3e9c1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b
+2:2025-01-15T09:15:00Z:urn:notx:usr:01HZX3K8ABCDEF1234567890
 ->
 3 | Attendees: Alice, Bob, Carol
 4 |
@@ -279,7 +291,7 @@ Example sequence:
 **Event 1:**
 
 ```
-1:2025-01-15T09:00:00Z:notx:usr:7f3e9c1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b
+1:2025-01-15T09:00:00Z:urn:notx:usr:01HZX3K8ABCDEF1234567890
 ->
 1 | # Meeting Notes
 2 |
@@ -297,7 +309,7 @@ Attendees: Alice, Bob
 **Event 2:**
 
 ```
-2:2025-01-15T09:15:00Z:notx:usr:7f3e9c1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b
+2:2025-01-15T09:15:00Z:urn:notx:usr:01HZX3K8ABCDEF1234567890
 ->
 3 | Attendees: Alice, Bob, Carol
 ```
@@ -313,7 +325,7 @@ Attendees: Alice, Bob, Carol
 **Event 3:**
 
 ```
-3:2025-01-15T09:30:00Z:notx:usr:3c4d5e6f-7a8b-9c0d-1e2f-3a4b5c6d7e8f
+3:2025-01-15T09:30:00Z:urn:notx:usr:01HZX3K8CDEF1234567890AB
 ->
 4 |
 5 | ## Action Items
@@ -334,7 +346,7 @@ Attendees: Alice, Bob, Carol
 **Event 4:**
 
 ```
-4:2025-01-15T10:00:00Z:notx:usr:7f3e9c1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b
+4:2025-01-15T10:00:00Z:urn:notx:usr:01HZX3K8ABCDEF1234567890
 ->
 2 |-
 ```
@@ -360,7 +372,7 @@ A notx file parser must follow these rules:
 3. **Event header** — A line matching the regex `^(\d+):(\S+):(.+)$` is an event header.
    - Capture group 1: sequence number (integer)
    - Capture group 2: ISO-8601 timestamp
-   - Capture group 3: author URN (remainder of line, including colons)
+   - Capture group 3: author URN (remainder of line, including colons). The author URN starts with `urn:` and contains additional colons as part of the `urn:notx:<type>:<id>` structure. Everything after the second colon in the header line is treated as the author URN.
 
 4. **Snapshot header** — A line matching `^snapshot:(\d+):(\S+)$` is a snapshot header.
    - Capture group 1: sequence number
@@ -429,68 +441,42 @@ Snapshots are **never the source of truth**. Events always are. A snapshot is a 
 
 ## Complete Example
 
-```
-# notx/1.0
-# note_urn:      notx:note:018e4f2a-9b1c-7d3e-8f2a-1b3c4d5e6f7a
-# name:          Meeting Notes
-# project_urn:   notx:proj:3a1b2c3d-4e5f-6a7b-8c9d-0e1f2a3b4c5d
-# created_at:    2025-01-15T09:00:00Z
-# head_sequence: 4
-```
-
-Or on a self-hosted instance:
+The following is a complete `.notx` file. The `urn:notx:...` URN format is identical regardless of whether the file was created on the official notx platform or any self-hosted instance. The optional `authority` and `namespace` header fields provide server and organizational context, but are not part of any URN.
 
 ```
 # notx/1.0
-# note_urn:      notx:note:018e4f2a-9b1c-7d3e-8f2a-1b3c4d5e6f7a
+# note_urn:      urn:notx:note:01HZX3K8J9X2M4P7R8T1Y6ZQ
+# authority:     urn:notx:srv:01HZSERVER1234567890123
+# namespace:     acme
 # name:          Meeting Notes
-# project_urn:   notx:proj:3a1b2c3d-4e5f-6a7b-8c9d-0e1f2a3b4c5d
+# project_urn:   urn:notx:proj:01HZX3K8PROJID123456789
 # created_at:    2025-01-15T09:00:00Z
 # head_sequence: 4
 
-1:2025-01-15T09:00:00Z:notx:usr:7f3e9c1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b
+1:2025-01-15T09:00:00Z:urn:notx:usr:01HZX3K8ABCDEF1234567890
 ->
 1 | # Meeting Notes
 2 |
 3 | Attendees: Alice, Bob
 
-2:2025-01-15T09:15:00Z:notx:usr:7f3e9c1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b
+2:2025-01-15T09:15:00Z:urn:notx:usr:01HZX3K8ABCDEF1234567890
 ->
 3 | Attendees: Alice, Bob, Carol
 
-3:2025-01-15T09:30:00Z:notx:usr:3c4d5e6f-7a8b-9c0d-1e2f-3a4b5c6d7e8f
+3:2025-01-15T09:30:00Z:urn:notx:usr:01HZX3K8CDEF1234567890AB
 ->
 4 |
 5 | ## Action Items
 6 | - Alice: send recap
 
-4:2025-01-15T10:00:00Z:notx:usr:7f3e9c1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b
+4:2025-01-15T10:00:00Z:urn:notx:usr:01HZX3K8ABCDEF1234567890
 ->
 2 |-
 ```
 
-**Reading this file (on notx platform):**
+**Reading this file:**
 
-1. Parse header → note `018e4f2a-9b1c-7d3e-8f2a-1b3c4d5e6f7a`, named "Meeting Notes", in project `3a1b2c3d-4e5f-6a7b-8c9d-0e1f2a3b4c5d`, created 2025-01-15 09:00:00 UTC, currently at sequence 4, on the `notx` platform.
-
-**Same file on self-hosted instance (acme):**
-
-The only differences would be the namespace in all URNs:
-
-```
-# notx/1.0
-# note_urn:      acme:note:018e4f2a-9b1c-7d3e-8f2a-1b3c4d5e6f7a
-# name:          Meeting Notes
-# project_urn:   acme:proj:3a1b2c3d-4e5f-6a7b-8c9d-0e1f2a3b4c5d
-# created_at:    2025-01-15T09:00:00Z
-# head_sequence: 4
-
-1:2025-01-15T09:00:00Z:acme:usr:7f3e9c1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b
-->
-1 | # Meeting Notes
-...
-```
-
+1. Parse header → note `urn:notx:note:01HZX3K8J9X2M4P7R8T1Y6ZQ`, named "Meeting Notes", in project `urn:notx:proj:01HZX3K8PROJID123456789`, created 2025-01-15 09:00:00 UTC, currently at sequence 4, associated with the `acme` namespace on server `urn:notx:srv:01HZSERVER1234567890123`.
 2. Replay event 1 → 3 lines created
 3. Replay event 2 → line 3 updated
 4. Replay event 3 → lines 4–6 added

@@ -81,11 +81,9 @@ func initTracer(t testing.TB, traceFile string) func() {
 // It is used by both the benchmark functions and the profiled smoke run so the
 // exact same code path is measured regardless of how the test is invoked.
 func runWorkload(ctx context.Context, r repo.NoteRepository, notes, eventsPerNote int) error {
-	ns := "notx"
-
 	urns := make([]string, notes)
 	for i := 0; i < notes; i++ {
-		urn := fmt.Sprintf("%s:note:%08d-0000-0000-0000-000000000000", ns, i)
+		urn := fmt.Sprintf("urn:notx:note:%08d-0000-0000-0000-000000000000", i)
 		urns[i] = urn
 		noteURN, err := core.ParseURN(urn)
 		if err != nil {
@@ -98,10 +96,7 @@ func runWorkload(ctx context.Context, r repo.NoteRepository, notes, eventsPerNot
 		}
 	}
 
-	authorURN, err := core.ParseURN(fmt.Sprintf("%s:usr:anon", ns))
-	if err != nil {
-		return fmt.Errorf("parse author urn: %w", err)
-	}
+	authorURN := core.AnonURN()
 
 	for i, urn := range urns {
 		noteURN, _ := core.ParseURN(urn)

@@ -12,11 +12,11 @@ Entry point: `internal/cli/server.go` (cobra command) → `internal/server/serve
 
 When `notx server` is run for the first time on a machine with no existing configuration, it automatically initialises everything needed before starting:
 
-| Step                  | What happens                                                                                                                                                                                                                                                                                       |
-| --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **1. Config file**    | `~/.notx/config.json` is written from built-in defaults. A notice is printed to stdout.                                                                                                                                                                                                            |
-| **2. Data directory** | `~/.notx/data/notes/` and `~/.notx/data/index/` are created (mode `0755`).                                                                                                                                                                                                                         |
-| **3. Admin device**   | A well-known admin device (`notx:device:00000000-0000-0000-0000-000000000000`) is registered with `approval_status: approved`. This device is restored to approved on every subsequent startup, so the admin UI can always reach data endpoints regardless of the `--device-auto-approve` setting. |
+| Step                  | What happens                                                                                                                                                                                                                                                                                           |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **1. Config file**    | `~/.notx/config.json` is written from built-in defaults. A notice is printed to stdout.                                                                                                                                                                                                                |
+| **2. Data directory** | `~/.notx/data/notes/` and `~/.notx/data/index/` are created (mode `0755`).                                                                                                                                                                                                                             |
+| **3. Admin device**   | A well-known admin device (`urn:notx:device:00000000-0000-0000-0000-000000000000`) is registered with `approval_status: approved`. This device is restored to approved on every subsequent startup, so the admin UI can always reach data endpoints regardless of the `--device-auto-approve` setting. |
 
 All three steps are **idempotent** — running `notx server` a second time is safe and produces no duplicates or overwrites.
 
@@ -26,7 +26,7 @@ All three steps are **idempotent** — running `notx server` a second time is sa
   ✓  First run — created default config at /Users/you/.notx/config.json
        Run notx config to customise it.
 
-time=... level=INFO msg="admin device registered" device_urn=notx:device:00000000-0000-0000-0000-000000000000
+time=... level=INFO msg="admin device registered" device_urn=urn:notx:device:00000000-0000-0000-0000-000000000000
 time=... level=INFO msg="notx server starting" http=true http_addr=:4060 grpc=true grpc_addr=:50051 ...
 ```
 
@@ -84,34 +84,34 @@ type ServerPairingConfig struct {
 
 Defaults are provided by `Config.Default()`:
 
-| Field                          | Default                                            | Notes                                                  |
-| ------------------------------ | -------------------------------------------------- | ------------------------------------------------------ |
-| `EnableHTTP`                   | `true`                                             |                                                        |
-| `EnableGRPC`                   | `true`                                             |                                                        |
-| `HTTPPort`                     | `4060`                                             |                                                        |
-| `GRPCPort`                     | `50051`                                            |                                                        |
-| `Host`                         | `""` (all interfaces)                              | Empty string binds to `0.0.0.0`                        |
-| `DataDir`                      | `~/.notx/data`                                     |                                                        |
-| `TLSCertFile`                  | `""`                                               | Empty = plaintext (dev only)                           |
-| `TLSKeyFile`                   | `""`                                               |                                                        |
-| `TLSCAFile`                    | `""`                                               | Non-empty enables mTLS                                 |
-| `ShutdownTimeout`              | `30s`                                              |                                                        |
-| `MaxPageSize`                  | `200`                                              |                                                        |
-| `DefaultPageSize`              | `50`                                               |                                                        |
-| `LogLevel`                     | `"info"`                                           |                                                        |
-| `DeviceOnboarding.AutoApprove` | `false`                                            | Set `true` to skip manual approval step                |
-| `Admin.DeviceURN`              | `notx:device:00000000-0000-0000-0000-000000000000` | Built-in admin device; always approved                 |
-| `Admin.OwnerURN`               | `notx:usr:00000000-0000-0000-0000-000000000000`    | Owner of the admin device                              |
-| `Pairing.Enabled`              | `false`                                            | Opt-in; set `true` or pass `--pairing`                 |
-| `Pairing.BootstrapPort`        | `50052`                                            | Bootstrap listener port                                |
-| `Pairing.CertTTL`              | `720h` (30 days)                                   | Validity of issued server certificates                 |
-| `Pairing.SecretTTL`            | `15m`                                              | Validity of a generated pairing secret                 |
-| `Pairing.CADir`                | `<data-dir>/ca`                                    | Where the authority CA key and cert are stored         |
-| `Pairing.RenewalCheckInterval` | `6h`                                               | How often a joining server checks cert expiry          |
-| `Pairing.RenewalThreshold`     | `168h` (7 days)                                    | TTL remaining at which renewal is triggered            |
-| `Pairing.PeerAuthority`        | `""`                                               | Authority gRPC endpoint for a joining server           |
-| `Pairing.PeerSecret`           | `""`                                               | Pairing secret (used once, then cleared)               |
-| `Pairing.PeerCertDir`          | `""`                                               | Directory for the joining server's client cert and key |
+| Field                          | Default                                                | Notes                                                  |
+| ------------------------------ | ------------------------------------------------------ | ------------------------------------------------------ |
+| `EnableHTTP`                   | `true`                                                 |                                                        |
+| `EnableGRPC`                   | `true`                                                 |                                                        |
+| `HTTPPort`                     | `4060`                                                 |                                                        |
+| `GRPCPort`                     | `50051`                                                |                                                        |
+| `Host`                         | `""` (all interfaces)                                  | Empty string binds to `0.0.0.0`                        |
+| `DataDir`                      | `~/.notx/data`                                         |                                                        |
+| `TLSCertFile`                  | `""`                                                   | Empty = plaintext (dev only)                           |
+| `TLSKeyFile`                   | `""`                                                   |                                                        |
+| `TLSCAFile`                    | `""`                                                   | Non-empty enables mTLS                                 |
+| `ShutdownTimeout`              | `30s`                                                  |                                                        |
+| `MaxPageSize`                  | `200`                                                  |                                                        |
+| `DefaultPageSize`              | `50`                                                   |                                                        |
+| `LogLevel`                     | `"info"`                                               |                                                        |
+| `DeviceOnboarding.AutoApprove` | `false`                                                | Set `true` to skip manual approval step                |
+| `Admin.DeviceURN`              | `urn:notx:device:00000000-0000-0000-0000-000000000000` | Built-in admin device; always approved                 |
+| `Admin.OwnerURN`               | `urn:notx:usr:00000000-0000-0000-0000-000000000000`    | Owner of the admin device                              |
+| `Pairing.Enabled`              | `false`                                                | Opt-in; set `true` or pass `--pairing`                 |
+| `Pairing.BootstrapPort`        | `50052`                                                | Bootstrap listener port                                |
+| `Pairing.CertTTL`              | `720h` (30 days)                                       | Validity of issued server certificates                 |
+| `Pairing.SecretTTL`            | `15m`                                                  | Validity of a generated pairing secret                 |
+| `Pairing.CADir`                | `<data-dir>/ca`                                        | Where the authority CA key and cert are stored         |
+| `Pairing.RenewalCheckInterval` | `6h`                                                   | How often a joining server checks cert expiry          |
+| `Pairing.RenewalThreshold`     | `168h` (7 days)                                        | TTL remaining at which renewal is triggered            |
+| `Pairing.PeerAuthority`        | `""`                                                   | Authority gRPC endpoint for a joining server           |
+| `Pairing.PeerSecret`           | `""`                                                   | Pairing secret (used once, then cleared)               |
+| `Pairing.PeerCertDir`          | `""`                                                   | Directory for the joining server's client cert and key |
 
 ### Config File Seeding
 
@@ -154,17 +154,17 @@ All artefacts live under `DataDir` (default `~/.notx/data`):
 ```
 <dataDir>/
 ├── notes/
-│   ├── <namespace>_note_<uuid>.notx         # creation-time stub
-│   └── <namespace>_note_<uuid>.meta.json    # live header (mutable)
+│   ├── notx_note_<id>.notx         # creation-time stub
+│   └── notx_note_<id>.meta.json    # live header (mutable)
 ├── events/
-│   └── <namespace>_note_<uuid>.jsonl        # append-only event journal
+│   └── notx_note_<id>.jsonl        # append-only event journal
 ├── index/
 │   └── (Badger v4 database files)
 ├── ca/
 │   ├── ca.key          ← EC P-256 CA private key (mode 0600, authority only)
 │   └── ca.crt          ← Self-signed CA certificate (mode 0644)
 ├── servers/
-│   └── notx_srv_<uuid>.json   ← (concept only – stored in Badger via server: prefix)
+│   └── notx_srv_<id>.json   ← (concept only – stored in Badger via server: prefix)
 └── pairing_secrets/
     └── <id>.json       ← single-use pairing secret records (bcrypt hash only)
 ```
@@ -177,7 +177,7 @@ All artefacts live under `DataDir` (default `~/.notx/data`):
 
 ### Filename Sanitisation
 
-URNs are not used verbatim in filenames because colons are illegal or problematic on several filesystems. The URN `notx:note:abc-123` is sanitised to `notx_note_abc-123` (colons replaced with underscores) before constructing any file path. This transform is applied consistently everywhere in the provider.
+URNs are not used verbatim in filenames because colons are illegal or problematic on several filesystems. The URN `urn:notx:note:abc-123` is sanitised to `urn_notx_note_abc-123` (colons replaced with underscores) before constructing any file path. This transform is applied consistently everywhere in the provider.
 
 ### The Three Storage Artefacts
 
@@ -189,7 +189,7 @@ Written once at note creation by `writeNotxStub()`. Never updated after that. It
 
 ```
 # notx/1.0
-# note_urn:      notx:note:<uuid>
+# note_urn:      urn:notx:note:<id>
 # note_type:     normal
 # name:          my-note
 # created_at:    2025-01-01T00:00:00Z
@@ -204,10 +204,10 @@ A mutable JSON file updated on every write operation: `Create`, `Update`, `Appen
 
 ```json
 {
-  "urn": "notx:note:<uuid>",
+  "urn": "urn:notx:note:<id>",
   "name": "my-note",
   "note_type": "normal",
-  "project_urn": "notx:proj:<uuid>",
+  "project_urn": "urn:notx:proj:<id>",
   "folder_urn": null,
   "deleted": false,
   "created_at": "2025-01-01T00:00:00Z",
@@ -224,10 +224,10 @@ An append-only newline-delimited JSON file. One line per event. Written by `appe
 
 ```json
 {
-  "urn": "notx:event:<uuid>",
-  "note_urn": "notx:note:<uuid>",
+  "urn": "urn:notx:event:<id>",
+  "note_urn": "urn:notx:note:<id>",
   "sequence": 1,
-  "author_urn": "notx:usr:<uuid>",
+  "author_urn": "urn:notx:usr:<id>",
   "created_at": "2025-01-01T00:00:00Z",
   "entries": [{ "ln": 1, "op": "insert", "c": "Hello, world" }]
 }
@@ -471,7 +471,7 @@ The admin UI at `http://localhost:9090` proxies all `/v1/*` calls to the API ser
 Every server startup ensures the built-in admin device exists and is approved. To make requests to data endpoints from scripts or the admin UI, pass the following header:
 
 ```
-X-Device-ID: notx:device:00000000-0000-0000-0000-000000000000
+X-Device-ID: urn:notx:device:00000000-0000-0000-0000-000000000000
 ```
 
 This device bypasses the normal approval/revocation checks and is restored to `approved` automatically on each restart, even if it was manually revoked in the database.
@@ -497,7 +497,7 @@ notx server --peer-authority grpc.authority.example.com:50052 \
 notx server pairing list-servers
 
 # Revoke a server
-notx server pairing revoke notx:srv:01932c4f-89ab-7def-8012-3456789abcde
+notx server pairing revoke urn:notx:srv:01932c4f-89ab-7def-8012-3456789abcde
 ```
 
 See the [Server Pairing](#server-pairing) section below for a full description of the lifecycle and security model.
@@ -564,7 +564,7 @@ An admin generates a pairing secret on the authority with `notx server pairing a
 
 1. **Admin** generates a pairing secret on the authority and distributes it out-of-band to the joining server's operator (secure message, secrets manager, CI variable, etc.).
 2. **Joining server** generates an EC P-256 key-pair and PKCS#10 CSR locally. The private key never leaves the joining server.
-3. **Joining server** dials the authority's bootstrap port (`50052`) over TLS (no client cert required) and calls `RegisterServer`, sending its self-assigned `notx:srv:<uuid>` URN, the CSR, the plaintext secret, a human name, and its advertised gRPC endpoint.
+3. **Joining server** dials the authority's bootstrap port (`50052`) over TLS (no client cert required) and calls `RegisterServer`, sending its self-assigned `urn:notx:srv:<id>` URN, the CSR, the plaintext secret, a human name, and its advertised gRPC endpoint.
 4. **Authority** bcrypt-compares the secret against all stored hashes, checks it is unexpired and unused, then atomically marks it consumed.
 5. **Authority** signs the CSR with its CA, producing an X.509 client certificate (`ExtKeyUsage: ClientAuth`, EC P-256, 30-day TTL by default, `CN = <server_urn>`).
 6. **Authority** stores a server record (URN, name, endpoint, cert PEM, cert serial, expiry) in the Badger index under the `server:` prefix and returns the signed cert and CA cert to the joining server.
