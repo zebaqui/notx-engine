@@ -145,3 +145,207 @@ The format is simple, text-based, and designed to be understood and implemented 
 - **Format Specifications**: Start with [NOTX_FORMAT.md](./docs/NOTX_FORMAT.md)
 - **Security Model**: See [NOTX_SECURITY_MODEL.md](./docs/NOTX_SECURITY_MODEL.md)
 - **Issues & Questions**: [GitHub Issues](https://github.com/yourusername/notx-engine/issues)
+
+---
+
+## Embedding the Engine in an iOS App
+
+This is a step-by-step guide for embedding `notx-engine` into an iOS app using `gomobile bind`. The result is a native `.xcframework` that Swift can call directly — no HTTP, no IPC, just function calls.
+
+### Prerequisites
+
+- Go 1.21+
+- Xcode 15+
+- `gomobile` and `gobind` installed
+
+```sh
+go install golang.org/x/mobile/cmd/gomobile@latest
+go install golang.org/x/mobile/cmd/gobind@latest
+gomobile init
+```
+
+---
+
+### Step 1 — Build the xcframework
+
+From the root of `notx-engine`, run:
+
+```sh
+gomobile bind \
+  -target ios \
+  -o Notx.xcframework \
+  github.com/zebaqui/notx-engine/mobile
+```
+
+This compiles the `mobile` package into `Notx.xcframework`. Only types and methods exported from the `mobile` package are bridged to Swift — nothing else is exposed.
+
+This takes a minute or two the first time. The output file is self-contained and includes slices for the simulator and device.
+
+---
+
+### Step 2 — Add the framework to Xcode
+
+1. In Xcode, select your app target → **General** tab.
+2. Scroll to **Frameworks, Libraries, and Embedded Content**.
+3. Click **+** → **Add Other…** → **Add Files…**
+4. Select `Notx.xcframework`.
+5. Set embed to **Embed & Sign**.
+
+The framework will appear in your project navigator. You don't need to add it to any build phases manually — Xcode handles it.
+
+---
+
+### Step 3 — Implement the Platform protocol in Swift
+
+The engine needs a `Platform` object to handle keychain, filesystem, and config operations. Create a Swift class that conforms to `MobilePlatform` (gomobile generates this name from the Go `Platform` interface):
+
+```swift
+import Notx
+
+final class iOSPlatform: NSObject, MobilePlatform {
+
+    // Return the app's Application Support directory.
+    func dataDir() throws -> String {
+        let url = try FileManager.default.url(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask,
+            appropriateFor: nil,
+            create: true
+        )
+        let notxURL = url.appendingPathComponent("notx", isDirectory: true)
+        try FileManager.default.createDirectory(at: notxURL, withIntermediateDirectories: true)
+        return notxURL.path
+    }
+
+    // Config: backed by UserDefaults
+    func getConfig(_ key: String) throws -> String {
+        return UserDefaults.standard.string(forKey: key) ?? ""
+    }
+
+    func setConfig(_ key: String, value: String) throws {
+        UserDefaults.standard.set(value, forKey: key)
+    }
+
+    // Key + cert operations: stub these out to return errors until
+    // you wire up Secure Enclave / Keychain (needed for pairing only).
+    func generateKey(_ alias: String) throws -> Data { throw PlatformError.notImplemented }
+    func sign(_ alias: String, digest: Data) throws -> Data { throw PlatformError.notImplemented }
+    func buildCSR(_ alias: String, commonName: String) throws -> Data { throw PlatformError.notImplemented }
+    func publicKeyDER(_ alias: String) throws -> Data { throw PlatformError.notImplemented }
+    func deleteKey(_ alias: String) throws { throw PlatformError.notImplemented }
+    func hasKey(_ alias: String) throws -> Bool { return false }
+    func storeCert(_ alias: String, certPEM: Data) throws { throw PlatformError.notImplemented }
+    func loadCert(_ alias: String) throws -> Data { throw PlatformError.notImplemented }
+    func deleteCert(_ alias: String) throws { throw PlatformError.notImplemented }
+    func hasCert(_ alias: String) throws -> Bool { return false }
+}
+
+enum PlatformError: Error { case notImplemented }
+```
+
+For local mode (no pairing, no sync) the key/cert stubs are fine — the engine only calls them during the pairing and cert-renewal flows.
+
+---
+
+### Step 4 — Create the engine at app startup
+
+In your `App` struct or `AppDelegate`, create one engine instance and keep it alive for the lifetime of the app:
+
+```swift
+import Notx
+
+@main
+struct MyApp: App {
+    // Hold the engine alive for the full app session.
+    private let engine: MobileEngine = {
+        let platform = iOSPlatform()
+        return try! MobileNew(platform)   // gomobile generates MobileNew from mobile.New
+    }()
+
+    var body: some Scene {
+        WindowGroup {
+            ContentView()
+        }
+    }
+}
+```
+
+---
+
+### Step 5 — Call engine methods from Swift
+
+Once you have an engine instance, creating and listing data is straightforward:
+
+```swift
+// Create a project
+let projectURN = try engine.createProject("My Project")
+
+// Create a folder inside it
+let folderURN = try engine.createFolder("Design", projectURN: projectURN)
+
+// Create a note inside the folder
+let noteURN = try engine.createNote("API spec", projectURN: projectURN, folderURN: folderURN)
+
+// Write content (stored as an event in the SQLite index)
+try engine.appendNoteContent(noteURN, content: "# API spec\n\nFirst draft.")
+
+// Read it back
+let content = try engine.getNoteContent(noteURN)
+
+// List all projects
+let projects = try engine.listProjects()   // returns [MobileProjectHeader]
+
+// List notes filtered by project
+let opts = MobileListOptions()
+opts.projectURN = projectURN
+let notes = try engine.listNotes(opts)    // returns MobileNoteList
+```
+
+All methods follow the `(value, error)` → Swift `throws` pattern that gomobile generates automatically.
+
+---
+
+### Step 6 — Replace the local EngineStore with the real engine
+
+The app currently uses `EngineStore` (a `UserDefaults`-backed local-mode store) that mirrors the engine's API. Once the framework is linked, swap each method body in `EngineStore.swift` to delegate to the real engine:
+
+```swift
+// Before (local mode)
+func createProject(name: String) -> ProjectItem {
+    let project = ProjectItem(id: UUID(), name: name)
+    projects.append(project)
+    persist()
+    return project
+}
+
+// After (real engine)
+func createProject(name: String) -> ProjectItem {
+    let urn = try! engine.createProject(name)
+    let project = ProjectItem(id: uuidFrom(urn: urn), name: name)
+    projects.append(project)
+    return project
+}
+```
+
+The views and navigation never need to change — they only talk to `EngineStore`.
+
+---
+
+### What each layer does
+
+```
+┌─────────────────────────────────┐
+│         SwiftUI Views           │  NotesListView, MarkdownEditorView, …
+├─────────────────────────────────┤
+│          EngineStore            │  @Observable singleton, owns app state
+├─────────────────────────────────┤
+│       Notx.xcframework          │  gomobile-compiled mobile package
+├─────────────────────────────────┤
+│    SQLite index  +  .notx files │  Stored in Application Support/notx/
+└─────────────────────────────────┘
+```
+
+- **Views** never touch the engine directly — they read from and write to `EngineStore`.
+- **EngineStore** is the only place that calls engine methods — swap the bodies here to go from local mode to live engine.
+- **The framework** handles all persistence, event sourcing, and full-text search.
+- **SQLite + notes files** live in the app's sandboxed Application Support directory.

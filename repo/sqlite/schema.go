@@ -7,19 +7,23 @@ import (
 	"time"
 )
 
-// currentSchemaVersion is incremented every time a new migration is added.
-// Migrations are additive only: new columns, new tables.
-const currentSchemaVersion = 1
+// currentSchemaVersion must match len(migrations).
+// Bump it by 1 every time you add a migration to the slice below.
+// NEVER edit or remove existing migrations — only append new ones.
+const currentSchemaVersion = 2
 
-// currentProjectionVersion is incremented when the projection logic changes
-// (i.e. when existing SQLite rows need to be recomputed from the event log
-// even though the schema itself has not changed).
+// currentProjectionVersion is incremented when projection logic changes
+// (i.e. existing rows need recomputing from the event log even though
+// the schema itself has not changed).
 const currentProjectionVersion = 1
 
-// ddl contains every CREATE TABLE and CREATE INDEX statement for the schema.
-// Executed once when the database is first created.
+// ddl is the baseline schema applied on first install (empty DB).
+// It must always represent the fully up-to-date schema so that fresh
+// installs skip all migrations.
+// RULE: every structural change goes BOTH here (for new installs) AND
+// as a migration below (for existing installs). Keep them in sync.
 const ddl = `
--- Materialized note state derived from .notx event logs.
+-- Materialized note state derived from the event log.
 CREATE TABLE IF NOT EXISTS notes (
     urn               TEXT    PRIMARY KEY,
     project_urn       TEXT    NOT NULL DEFAULT '',
@@ -38,14 +42,33 @@ CREATE INDEX IF NOT EXISTS idx_notes_updated ON notes(updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_notes_project ON notes(project_urn, deleted, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_notes_folder  ON notes(folder_urn,  deleted, updated_at DESC);
 
+-- Event log: one row per appended event on a note.
+CREATE TABLE IF NOT EXISTS events (
+    note_urn   TEXT    NOT NULL,
+    sequence   INTEGER NOT NULL,
+    author_urn TEXT    NOT NULL DEFAULT '',
+    label      TEXT    NOT NULL DEFAULT '',
+    payload    TEXT    NOT NULL DEFAULT '[]',
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (note_urn, sequence)
+);
+
+CREATE INDEX IF NOT EXISTS idx_events_note ON events(note_urn, sequence ASC);
+
+-- Note content cache (materialised plaintext for FTS and fast reads).
+-- Separate table so secure note content is never stored here.
+CREATE TABLE IF NOT EXISTS note_content (
+    urn     TEXT PRIMARY KEY,
+    content TEXT NOT NULL DEFAULT ''
+);
+
 -- Full-text search over normal note content.
--- Each row is one note; content is the full materialised text.
+-- Standalone FTS5 table — no content= backing table.
+-- Rows are inserted/updated explicitly by the provider on every AppendEvent.
 CREATE VIRTUAL TABLE IF NOT EXISTS notes_fts USING fts5(
     urn    UNINDEXED,
     title,
-    body,
-    content='notes',
-    content_rowid='rowid'
+    body
 );
 
 -- Projects (lightweight index-only entities).
@@ -112,13 +135,6 @@ CREATE TABLE IF NOT EXISTS pairing_secrets (
     used_at      INTEGER         -- NULL means not yet used
 );
 
--- Note content cache (materialised plaintext for FTS and fast reads).
--- Separate table so secure note content is never stored here.
-CREATE TABLE IF NOT EXISTS note_content (
-    urn     TEXT PRIMARY KEY,
-    content TEXT NOT NULL DEFAULT ''
-);
-
 -- Schema version tracking.
 CREATE TABLE IF NOT EXISTS schema_version (
     version    INTEGER PRIMARY KEY,
@@ -133,22 +149,49 @@ CREATE TABLE IF NOT EXISTS projection_meta (
 );
 `
 
-// migrations holds the ordered set of additive SQL migrations.
-// Index 0 is migration 1, index 1 is migration 2, etc.
+// migrations is the ordered list of additive SQL migrations.
+//
+// Rules:
+//  1. NEVER edit or remove an existing entry — existing DBs have already run them.
+//  2. ALWAYS append new entries at the end.
+//  3. Bump currentSchemaVersion to match len(migrations) when you add one.
+//  4. Mirror every structural change in ddl above so fresh installs are identical.
+//
+// Migration history:
+//
+//	v1 — initial schema (tables created via ddl; this is a no-op for existing DBs)
+//	v2 — add events table and replace content-backed notes_fts with standalone FTS5
 var migrations = []string{
-	// Migration 1: initial schema. Already applied via ddl above.
-	// Listed here so schema_version tracking is consistent.
-	"SELECT 1", // no-op; schema already created by ddl
+	// v1: initial schema — ddl already handles this on new installs.
+	"SELECT 1",
+
+	// v2: add the events table (was missing from the original schema).
+	//     Drop and recreate notes_fts as a standalone table so it no longer
+	//     uses content='note_content' which referenced non-existent columns.
+	`CREATE TABLE IF NOT EXISTS events (
+		note_urn   TEXT    NOT NULL,
+		sequence   INTEGER NOT NULL,
+		author_urn TEXT    NOT NULL DEFAULT '',
+		label      TEXT    NOT NULL DEFAULT '',
+		payload    TEXT    NOT NULL DEFAULT '[]',
+		created_at INTEGER NOT NULL,
+		PRIMARY KEY (note_urn, sequence)
+	);
+	CREATE INDEX IF NOT EXISTS idx_events_note ON events(note_urn, sequence ASC);
+	DROP TABLE IF EXISTS notes_fts;
+	CREATE VIRTUAL TABLE IF NOT EXISTS notes_fts USING fts5(
+		urn    UNINDEXED,
+		title,
+		body
+	);`,
 }
 
-// applySchema creates all tables/indexes and seeds the meta rows if they do
-// not already exist. It is idempotent and safe to call on every startup.
+// applySchema creates all tables/indexes on a fresh DB and seeds meta rows.
+// Safe to call on every startup — all statements use IF NOT EXISTS.
 func applySchema(ctx context.Context, db *sql.DB) error {
 	if _, err := db.ExecContext(ctx, ddl); err != nil {
 		return fmt.Errorf("sqlite schema: create tables: %w", err)
 	}
-
-	// Seed projection_meta if absent.
 	_, err := db.ExecContext(ctx,
 		`INSERT OR IGNORE INTO projection_meta(key, value) VALUES ('projection_version', ?)`,
 		fmt.Sprintf("%d", currentProjectionVersion),
@@ -159,8 +202,7 @@ func applySchema(ctx context.Context, db *sql.DB) error {
 	return nil
 }
 
-// schemaVersion returns the highest migration version recorded in
-// schema_version, or 0 if the table is empty.
+// schemaVersion returns the highest applied migration version, or 0.
 func schemaVersion(ctx context.Context, db *sql.DB) (int, error) {
 	var v int
 	err := db.QueryRowContext(ctx,
@@ -172,8 +214,7 @@ func schemaVersion(ctx context.Context, db *sql.DB) (int, error) {
 	return v, nil
 }
 
-// projectionVersion returns the projection logic version recorded in
-// projection_meta, or 0 if absent.
+// projectionVersion returns the stored projection logic version, or 0.
 func projectionVersion(ctx context.Context, db *sql.DB) (int, error) {
 	var v string
 	err := db.QueryRowContext(ctx,
@@ -193,12 +234,12 @@ func projectionVersion(ctx context.Context, db *sql.DB) (int, error) {
 
 // runMigrations applies any migrations whose version > appliedVersion.
 func runMigrations(ctx context.Context, db *sql.DB, appliedVersion int) error {
-	for i, sql := range migrations {
+	for i, sqlStmt := range migrations {
 		version := i + 1
 		if version <= appliedVersion {
 			continue
 		}
-		if _, err := db.ExecContext(ctx, sql); err != nil {
+		if _, err := db.ExecContext(ctx, sqlStmt); err != nil {
 			return fmt.Errorf("sqlite schema: migration %d: %w", version, err)
 		}
 		now := time.Now().UnixMilli()
@@ -224,8 +265,7 @@ func setProjectionVersion(ctx context.Context, db *sql.DB, v int) error {
 	return nil
 }
 
-// integrityOK runs PRAGMA integrity_check and returns true if the database
-// has no corruption.
+// integrityOK runs PRAGMA integrity_check and returns true if the DB is clean.
 func integrityOK(ctx context.Context, db *sql.DB) bool {
 	rows, err := db.QueryContext(ctx, `PRAGMA integrity_check`)
 	if err != nil {

@@ -14,6 +14,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -290,7 +291,7 @@ func (e *Engine) ListNotes(opts *ListOptions) (*NoteList, error) {
 	for i, n := range result.Notes {
 		headers[i] = noteToHeader(n)
 	}
-	return &NoteList{Items: headers, NextPageToken: result.NextPageToken}, nil
+	return &NoteList{items: headers, NextPageToken: result.NextPageToken}, nil
 }
 
 // DeleteNote soft-deletes the note with the given URN.
@@ -305,7 +306,7 @@ func (e *Engine) DeleteNote(urn string) error {
 // SearchNotes performs full-text search over normal note content.
 func (e *Engine) SearchNotes(opts *SearchOptions) (*SearchResults, error) {
 	if opts == nil || opts.Query == "" {
-		return &SearchResults{Results: []*SearchResult{}}, nil
+		return &SearchResults{}, nil
 	}
 	ctx := context.Background()
 	repoOpts := repo.SearchOptions{
@@ -324,7 +325,7 @@ func (e *Engine) SearchNotes(opts *SearchOptions) (*SearchResults, error) {
 			Excerpt: r.Excerpt,
 		}
 	}
-	return &SearchResults{Results: results, NextPageToken: result.NextPageToken}, nil
+	return &SearchResults{items: results, NextPageToken: result.NextPageToken}, nil
 }
 
 // DataDir returns the engine's data directory path as resolved by the Platform.
@@ -364,7 +365,7 @@ func (e *Engine) CreateProject(name string) (string, error) {
 }
 
 // ListProjects returns all non-deleted projects.
-func (e *Engine) ListProjects() ([]*ProjectHeader, error) {
+func (e *Engine) ListProjects() (*ProjectList, error) {
 	ctx := context.Background()
 	result, err := e.provider.ListProjects(ctx, repo.ProjectListOptions{PageSize: 1000})
 	if err != nil {
@@ -380,7 +381,115 @@ func (e *Engine) ListProjects() ([]*ProjectHeader, error) {
 			UpdatedAtMs: p.UpdatedAt.UnixMilli(),
 		}
 	}
-	return headers, nil
+	return &ProjectList{items: headers}, nil
+}
+
+// ─── Folder operations ───────────────────────────────────────────────────────
+
+// CreateFolder creates a new folder inside a project and returns its URN.
+func (e *Engine) CreateFolder(name, projectURN string) (string, error) {
+	ctx := context.Background()
+	projURN, err := core.ParseURN(projectURN)
+	if err != nil {
+		return "", fmt.Errorf("mobile: CreateFolder: invalid projectURN: %w", err)
+	}
+	urn := core.NewURN(core.ObjectTypeFolder)
+	now := time.Now().UTC()
+	f := &core.Folder{
+		URN:        urn,
+		ProjectURN: projURN,
+		Name:       name,
+		CreatedAt:  now,
+		UpdatedAt:  now,
+	}
+	if err := e.provider.CreateFolder(ctx, f); err != nil {
+		return "", fmt.Errorf("mobile: CreateFolder: %w", err)
+	}
+	return urn.String(), nil
+}
+
+// ListFolders returns all non-deleted folders for the given project.
+func (e *Engine) ListFolders(projectURN string) (*FolderList, error) {
+	ctx := context.Background()
+	result, err := e.provider.ListFolders(ctx, repo.FolderListOptions{
+		ProjectURN: projectURN,
+		PageSize:   1000,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("mobile: ListFolders: %w", err)
+	}
+	headers := make([]*FolderHeader, len(result.Folders))
+	for i, f := range result.Folders {
+		headers[i] = &FolderHeader{
+			URN:         f.URN.String(),
+			ProjectURN:  f.ProjectURN.String(),
+			Name:        f.Name,
+			Deleted:     f.Deleted,
+			CreatedAtMs: f.CreatedAt.UnixMilli(),
+			UpdatedAtMs: f.UpdatedAt.UnixMilli(),
+		}
+	}
+	return &FolderList{items: headers}, nil
+}
+
+// DeleteFolder soft-deletes the folder with the given URN.
+func (e *Engine) DeleteFolder(urn string) error {
+	ctx := context.Background()
+	if err := e.provider.DeleteFolder(ctx, urn); err != nil {
+		return fmt.Errorf("mobile: DeleteFolder: %w", err)
+	}
+	return nil
+}
+
+// ─── Content operations ──────────────────────────────────────────────────────
+
+// AppendNoteContent appends a single event to the note that sets the full
+// document content. Each line of content becomes a LineOpSet entry.
+func (e *Engine) AppendNoteContent(noteURN, content string) error {
+	ctx := context.Background()
+
+	note, err := e.provider.Get(ctx, noteURN)
+	if err != nil {
+		return fmt.Errorf("mobile: AppendNoteContent: get note: %w", err)
+	}
+
+	parsedNoteURN, err := core.ParseURN(noteURN)
+	if err != nil {
+		return fmt.Errorf("mobile: AppendNoteContent: invalid noteURN: %w", err)
+	}
+
+	lines := strings.Split(content, "\n")
+	entries := make([]core.LineEntry, len(lines))
+	for i, line := range lines {
+		entries[i] = core.LineEntry{
+			LineNumber: i + 1,
+			Op:         core.LineOpSet,
+			Content:    line,
+		}
+	}
+
+	event := core.Event{
+		NoteURN:   parsedNoteURN,
+		Sequence:  note.HeadSequence() + 1,
+		AuthorURN: core.AnonURN(),
+		CreatedAt: time.Now().UTC(),
+		Entries:   entries,
+	}
+
+	if err := e.provider.AppendEvent(ctx, &event, repo.AppendEventOptions{}); err != nil {
+		return fmt.Errorf("mobile: AppendNoteContent: %w", err)
+	}
+	return nil
+}
+
+// GetNoteContent returns the materialised plain-text content of the note.
+func (e *Engine) GetNoteContent(noteURN string) (string, error) {
+	ctx := context.Background()
+	note, err := e.provider.Get(ctx, noteURN)
+	if err != nil {
+		return "", fmt.Errorf("mobile: GetNoteContent: %w", err)
+	}
+	return note.Content(), nil
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

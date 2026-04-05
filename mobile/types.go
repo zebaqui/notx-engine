@@ -35,13 +35,31 @@ type NoteHeader struct {
 }
 
 // NoteList is a page of NoteHeader results returned by Engine.ListNotes.
+// gomobile cannot bridge []*NoteHeader directly, so items are accessed via
+// Count / Item instead.
 type NoteList struct {
-	// Items holds the notes in this page.
-	Items []*NoteHeader
+	items []*NoteHeader
 
 	// NextPageToken is the opaque continuation token for the next page,
 	// or empty string when this is the last page.
 	NextPageToken string
+}
+
+// Count returns the number of notes in this page.
+func (l *NoteList) Count() int {
+	if l == nil {
+		return 0
+	}
+	return len(l.items)
+}
+
+// Item returns the NoteHeader at index i (0-based).
+// Returns nil when i is out of range.
+func (l *NoteList) Item(i int) *NoteHeader {
+	if l == nil || i < 0 || i >= len(l.items) {
+		return nil
+	}
+	return l.items[i]
 }
 
 // ProjectHeader is a gomobile-compatible summary of a project.
@@ -60,6 +78,30 @@ type ProjectHeader struct {
 
 	// UpdatedAtMs is the last-update timestamp in Unix milliseconds.
 	UpdatedAtMs int64
+}
+
+// ProjectList is the return value of Engine.ListProjects.
+// gomobile cannot bridge []*ProjectHeader directly, so items are accessed via
+// Count / Item instead.
+type ProjectList struct {
+	items []*ProjectHeader
+}
+
+// Count returns the number of projects in the list.
+func (l *ProjectList) Count() int {
+	if l == nil {
+		return 0
+	}
+	return len(l.items)
+}
+
+// Item returns the ProjectHeader at index i (0-based).
+// Returns nil when i is out of range.
+func (l *ProjectList) Item(i int) *ProjectHeader {
+	if l == nil || i < 0 || i >= len(l.items) {
+		return nil
+	}
+	return l.items[i]
 }
 
 // FolderHeader is a gomobile-compatible summary of a folder.
@@ -81,6 +123,30 @@ type FolderHeader struct {
 
 	// UpdatedAtMs is the last-update timestamp in Unix milliseconds.
 	UpdatedAtMs int64
+}
+
+// FolderList is the return value of Engine.ListFolders.
+// gomobile cannot bridge []*FolderHeader directly, so items are accessed via
+// Count / Item instead.
+type FolderList struct {
+	items []*FolderHeader
+}
+
+// Count returns the number of folders in the list.
+func (l *FolderList) Count() int {
+	if l == nil {
+		return 0
+	}
+	return len(l.items)
+}
+
+// Item returns the FolderHeader at index i (0-based).
+// Returns nil when i is out of range.
+func (l *FolderList) Item(i int) *FolderHeader {
+	if l == nil || i < 0 || i >= len(l.items) {
+		return nil
+	}
+	return l.items[i]
 }
 
 // ListOptions controls filtering and pagination for Engine.ListNotes.
@@ -126,10 +192,28 @@ type SearchResult struct {
 }
 
 // SearchResults is the return value of Engine.SearchNotes.
+// gomobile cannot bridge []*SearchResult directly, so items are accessed via
+// Count / Item instead.
 type SearchResults struct {
-	// Results holds the matches for this page.
-	Results []*SearchResult
+	items []*SearchResult
 
 	// NextPageToken is the opaque continuation token, or empty for last page.
 	NextPageToken string
+}
+
+// Count returns the number of search results in this page.
+func (s *SearchResults) Count() int {
+	if s == nil {
+		return 0
+	}
+	return len(s.items)
+}
+
+// Item returns the SearchResult at index i (0-based).
+// Returns nil when i is out of range.
+func (s *SearchResults) Item(i int) *SearchResult {
+	if s == nil || i < 0 || i >= len(s.items) {
+		return nil
+	}
+	return s.items[i]
 }

@@ -21,9 +21,14 @@ PROTOC_GEN_GO     := $(GOPATH)/bin/protoc-gen-go
 PROTOC_GEN_GO_GRPC := $(GOPATH)/bin/protoc-gen-go-grpc
 PROTOC_INCLUDE    := $(dir $(shell which $(PROTOC)))../include
 
+MOBILE_PKG        := github.com/zebaqui/notx-engine/mobile
+MOBILE_OUT        := Notx.xcframework
+GOMOBILE          := $(GOPATH)/bin/gomobile
+
 .PHONY: all build build-skip-ui build-go build-ctl \
         install-proto-plugins generate-proto \
         admin-install admin-dev admin-build \
+        mobile mobile-install \
         docker-build test-smoke test-integration test-pairing \
         clean
 
@@ -66,6 +71,25 @@ admin-dev:
 admin-build:
 	cd $(ADMIN_DIR) && npm run build
 
+# ── Mobile (gomobile bind → Notx.xcframework) ────────────────────────────────
+
+## Install gomobile and gobind into GOPATH/bin.
+mobile-install:
+	go install golang.org/x/mobile/cmd/gomobile@latest
+	go install golang.org/x/mobile/cmd/gobind@latest
+	$(GOMOBILE) init
+
+## Build Notx.xcframework for iOS (device + simulator).
+## Output: ./Notx.xcframework  — drag into Xcode, set Embed & Sign.
+## GOFLAGS=-mod=mod is required because the project uses a vendor/ directory
+## but golang.org/x/mobile is not vendored — gomobile must use the module cache.
+mobile:
+	GOFLAGS=-mod=mod GOWORK=off $(GOMOBILE) bind \
+		-target ios \
+		-o $(MOBILE_OUT) \
+		$(MOBILE_PKG)
+	@echo "✓ $(MOBILE_OUT) ready — add to Xcode via General → Frameworks, Libraries, and Embedded Content"
+
 docker-build:
 	docker build --tag $(DOCKER_IMAGE) --file Dockerfile .
 
@@ -81,3 +105,4 @@ test-pairing: docker-build
 clean:
 	@rm -f  $(BINARY) $(BINARY_CTL)
 	@rm -rf $(ADMIN_DIR)/dist internal/admin/ui
+	@rm -rf $(MOBILE_OUT)

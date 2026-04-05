@@ -98,11 +98,11 @@ func TestCreateAndListNotes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(list.Items) != 1 {
-		t.Fatalf("expected 1 note, got %d", len(list.Items))
+	if list.Count() != 1 {
+		t.Fatalf("expected 1 note, got %d", list.Count())
 	}
-	if list.Items[0].Name != "My Note" {
-		t.Fatalf("expected name %q, got %q", "My Note", list.Items[0].Name)
+	if list.Item(0).Name != "My Note" {
+		t.Fatalf("expected name %q, got %q", "My Note", list.Item(0).Name)
 	}
 }
 
@@ -169,8 +169,8 @@ func TestDeleteNote(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(list.Items) != 0 {
-		t.Fatalf("expected 0 notes after delete, got %d", len(list.Items))
+	if list.Count() != 0 {
+		t.Fatalf("expected 0 notes after delete, got %d", list.Count())
 	}
 
 	// The note must still be retrievable directly.
@@ -200,11 +200,11 @@ func TestCreateAndListProjects(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(projects) != 1 {
-		t.Fatalf("expected 1 project, got %d", len(projects))
+	if projects.Count() != 1 {
+		t.Fatalf("expected 1 project, got %d", projects.Count())
 	}
-	if projects[0].Name != "Alpha Project" {
-		t.Fatalf("expected name %q, got %q", "Alpha Project", projects[0].Name)
+	if projects.Item(0).Name != "Alpha Project" {
+		t.Fatalf("expected name %q, got %q", "Alpha Project", projects.Item(0).Name)
 	}
 }
 
@@ -232,8 +232,8 @@ func TestListNotes_Empty(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(list.Items) != 0 {
-		t.Fatalf("expected 0 notes on fresh engine, got %d", len(list.Items))
+	if list.Count() != 0 {
+		t.Fatalf("expected 0 notes on fresh engine, got %d", list.Count())
 	}
 	if list.NextPageToken != "" {
 		t.Fatalf("expected empty NextPageToken, got %q", list.NextPageToken)
@@ -249,8 +249,8 @@ func TestListProjects_Empty(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(projects) != 0 {
-		t.Fatalf("expected 0 projects on fresh engine, got %d", len(projects))
+	if projects.Count() != 0 {
+		t.Fatalf("expected 0 projects on fresh engine, got %d", projects.Count())
 	}
 }
 

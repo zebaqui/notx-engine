@@ -73,3 +73,5 @@ desktop.ini
 *.sublime-project
 /tests/smoke/testdata/
 /data/
+/Notx.xcframework
+/wrkingdocs
