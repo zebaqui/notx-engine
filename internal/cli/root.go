@@ -61,4 +61,8 @@ func init() {
 		"Delete the source file after successfully creating the note")
 	f.BoolVar(&addNoteFlags.secure, "secure", false,
 		"Mark the note as secure (end-to-end encrypted)")
+	f.StringVar(&addNoteFlags.projectURN, "project", "",
+		"Project URN to assign the note to (enables candidate detection)")
+	f.StringVar(&addNoteFlags.folderURN, "folder", "",
+		"Folder URN to assign the note to (optional, requires --project)")
 }

@@ -29,6 +29,8 @@ func NewFromRepos(
 	users repo.UserRepository,
 	servers repo.ServerRepository,
 	secretStore repo.PairingSecretStore,
+	context repo.ContextRepository,
+	links repo.LinkRepository,
 	log *slog.Logger,
 ) http.Handler {
 	noteSvc := grpcsvc.NewNoteServer(notes, 0, 0)
@@ -41,5 +43,15 @@ func NewFromRepos(
 		log = slog.Default()
 	}
 
-	return New(cfg, noteSvc, projSvc, folderSvc, deviceSvc, deviceAdminSvc, userSvc, log, nil, secretStore, nil)
+	var contextSvc *grpcsvc.ContextServer
+	if context != nil {
+		contextSvc = grpcsvc.NewContextServer(context, 0, 0)
+	}
+
+	var linkSvc *grpcsvc.LinkServer
+	if links != nil {
+		linkSvc = grpcsvc.NewLinkServer(links)
+	}
+
+	return New(cfg, noteSvc, projSvc, folderSvc, deviceSvc, deviceAdminSvc, userSvc, log, nil, secretStore, nil, contextSvc, linkSvc)
 }

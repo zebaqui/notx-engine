@@ -429,3 +429,261 @@ type UserRepository interface {
 	// Returns ErrNotFound if the user does not exist.
 	DeleteUser(ctx context.Context, urn string) error
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// LinkRepository — anchors, backlinks, and external links
+// ─────────────────────────────────────────────────────────────────────────────
+
+// AnchorRecord is the server-side representation of a declared anchor.
+type AnchorRecord struct {
+	NoteURN   string    `json:"note_urn"`
+	AnchorID  string    `json:"anchor_id"`
+	Line      int       `json:"line"`
+	CharStart int       `json:"char_start"`
+	CharEnd   int       `json:"char_end"`
+	Preview   string    `json:"preview"`
+	Status    string    `json:"status"` // "ok", "broken", "deprecated"
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// BacklinkRecord is a single entry in the backlink index.
+type BacklinkRecord struct {
+	SourceURN    string    `json:"source_urn"`
+	TargetURN    string    `json:"target_urn"`
+	TargetAnchor string    `json:"target_anchor"`
+	Label        string    `json:"label,omitempty"`
+	CreatedAt    time.Time `json:"created_at"`
+}
+
+// ExternalLinkRecord is a single entry in the external links index.
+type ExternalLinkRecord struct {
+	SourceURN string    `json:"source_urn"`
+	URI       string    `json:"uri"`
+	Label     string    `json:"label,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// RecentBacklinksOptions controls filtering for RecentBacklinks.
+type RecentBacklinksOptions struct {
+	NoteURN string // filter where source_urn OR target_urn matches (either side)
+	Label   string // substring filter on label (case-insensitive LIKE)
+	Limit   int    // 0 = default 50, max 200
+}
+
+// LinkRepository manages the anchor index, backlink index, and external links
+// index as defined in the notx Link Specification.
+type LinkRepository interface {
+	// ── Anchors ──────────────────────────────────────────────────────────────
+
+	// UpsertAnchor inserts or updates an anchor record in the server-side index.
+	UpsertAnchor(ctx context.Context, a AnchorRecord) error
+
+	// DeleteAnchor removes an anchor from the index. If createTombstone is true,
+	// the anchor is updated to status="deprecated" instead of being removed.
+	DeleteAnchor(ctx context.Context, noteURN, anchorID string, createTombstone bool) error
+
+	// GetAnchor retrieves a single anchor by note URN and anchor ID.
+	// Returns ErrNotFound if the anchor does not exist.
+	GetAnchor(ctx context.Context, noteURN, anchorID string) (AnchorRecord, error)
+
+	// ListAnchors returns all anchors declared in a note, ordered by line ASC.
+	ListAnchors(ctx context.Context, noteURN string) ([]AnchorRecord, error)
+
+	// ── Backlinks ─────────────────────────────────────────────────────────────
+
+	// UpsertBacklink inserts or updates a backlink record.
+	UpsertBacklink(ctx context.Context, b BacklinkRecord) error
+
+	// DeleteBacklink removes a specific backlink record.
+	DeleteBacklink(ctx context.Context, sourceURN, targetURN, targetAnchor string) error
+
+	// ListBacklinks returns all inbound backlinks for a note (all anchors).
+	// If anchorID is non-empty, restricts to backlinks for that anchor only.
+	ListBacklinks(ctx context.Context, targetURN, anchorID string) ([]BacklinkRecord, error)
+
+	// ListOutboundLinks returns all outbound backlink records from a source note.
+	ListOutboundLinks(ctx context.Context, sourceURN string) ([]BacklinkRecord, error)
+
+	// GetReferrers returns the URNs of all notes that link to a specific anchor.
+	// Used by break detection to populate the referrers list.
+	GetReferrers(ctx context.Context, targetURN, anchorID string) ([]string, error)
+
+	// ── External links ────────────────────────────────────────────────────────
+
+	// UpsertExternalLink inserts or updates an external link record.
+	UpsertExternalLink(ctx context.Context, e ExternalLinkRecord) error
+
+	// DeleteExternalLink removes an external link record.
+	DeleteExternalLink(ctx context.Context, sourceURN, uri string) error
+
+	// ListExternalLinks returns all external links from a source note.
+	ListExternalLinks(ctx context.Context, sourceURN string) ([]ExternalLinkRecord, error)
+
+	// RecentBacklinks returns the most recently created backlinks across all notes,
+	// ordered by created_at DESC. All filter fields are optional — omit to browse
+	// all. limit=0 defaults to 50, max 200.
+	RecentBacklinks(ctx context.Context, opts RecentBacklinksOptions) ([]BacklinkRecord, error)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ContextRepository — context bursts and candidate relations
+// ─────────────────────────────────────────────────────────────────────────────
+
+// BurstRecord is the server-side representation of a context burst.
+type BurstRecord struct {
+	ID         string    `json:"id"`
+	NoteURN    string    `json:"note_urn"`
+	ProjectURN string    `json:"project_urn"`
+	FolderURN  string    `json:"folder_urn"`
+	AuthorURN  string    `json:"author_urn"`
+	Sequence   int       `json:"sequence"`
+	LineStart  int       `json:"line_start"`
+	LineEnd    int       `json:"line_end"`
+	Text       string    `json:"text"`
+	Tokens     string    `json:"tokens"` // space-separated normalized token string
+	Truncated  bool      `json:"truncated"`
+	CreatedAt  time.Time `json:"created_at"`
+}
+
+// CandidateRecord is a candidate relation between two bursts.
+type CandidateRecord struct {
+	ID           string     `json:"id"`
+	BurstAID     string     `json:"burst_a_id"`
+	BurstBID     string     `json:"burst_b_id"`
+	NoteURN_A    string     `json:"note_urn_a"`
+	NoteURN_B    string     `json:"note_urn_b"`
+	ProjectURN   string     `json:"project_urn"`
+	OverlapScore float64    `json:"overlap_score"`
+	BM25Score    float64    `json:"bm25_score"`
+	Status       string     `json:"status"` // pending, promoted, dismissed, expired
+	CreatedAt    time.Time  `json:"created_at"`
+	ReviewedAt   *time.Time `json:"reviewed_at,omitempty"`
+	ReviewedBy   string     `json:"reviewed_by,omitempty"`
+	PromotedLink string     `json:"promoted_link,omitempty"`
+}
+
+// CandidateListOptions controls filtering and pagination for ContextRepository.ListCandidates.
+type CandidateListOptions struct {
+	ProjectURN string
+	NoteURN    string  // filter to candidates involving this note (as note_urn_a OR note_urn_b)
+	Status     string  // "pending", "promoted", "dismissed", "expired", or "" for all
+	MinScore   float64 // filter by overlap_score floor
+	PageSize   int
+	PageToken  string
+}
+
+// PromoteOptions carries the parameters for promoting a candidate.
+type PromoteOptions struct {
+	Label       string // optional label for node_links key
+	Direction   string // "both", "a_to_b", "b_to_a"
+	ReviewerURN string
+}
+
+// PromoteResult is the result of a candidate promotion.
+type PromoteResult struct {
+	AnchorAID string `json:"anchor_a_id"`
+	AnchorBID string `json:"anchor_b_id"`
+	LinkAToB  string `json:"link_a_to_b"`
+	LinkBToA  string `json:"link_b_to_a"`
+}
+
+// ProjectContextConfig holds per-project context graph rate limit overrides.
+type ProjectContextConfig struct {
+	ProjectURN               string    `json:"project_urn"`
+	BurstMaxPerNotePerDay    *int      `json:"burst_max_per_note_per_day"`    // nil = use global default
+	BurstMaxPerProjectPerDay *int      `json:"burst_max_per_project_per_day"` // nil = use global default
+	UpdatedAt                time.Time `json:"updated_at"`
+}
+
+// ContextStats holds health and queue statistics for the context graph layer.
+type ContextStats struct {
+	BurstsTotal                 int     `json:"bursts_total"`
+	BurstsToday                 int     `json:"bursts_today"`
+	CandidatesPending           int     `json:"candidates_pending"`
+	CandidatesPendingUnenriched int     `json:"candidates_pending_unenriched"`
+	CandidatesPromoted          int     `json:"candidates_promoted"`
+	CandidatesDismissed         int     `json:"candidates_dismissed"`
+	OldestPendingAgeDays        float64 `json:"oldest_pending_age_days"`
+}
+
+// ContextRepository manages context bursts and candidate relations.
+type ContextRepository interface {
+	// ── Rate limits ──────────────────────────────────────────────────────────
+
+	// BurstCountToday returns the number of bursts created today (UTC) for the
+	// given note and project. Used for rate limit checks on the hot write path.
+	BurstCountToday(ctx context.Context, noteURN, projectURN string) (noteCount, projectCount int, err error)
+
+	// ── Bursts ───────────────────────────────────────────────────────────────
+
+	// MostRecentBurst returns the most recent burst for a note, used for the
+	// consecutive similarity skip check.
+	// Returns (record, true, nil) if found, (zero, false, nil) if none exist.
+	MostRecentBurst(ctx context.Context, noteURN string) (BurstRecord, bool, error)
+
+	// StoreBurst persists a new burst record and its FTS5 row.
+	StoreBurst(ctx context.Context, b BurstRecord) error
+
+	// ListBursts returns bursts for a note ordered by sequence ASC.
+	// sinceSeq=0 means all bursts. Returns (records, nextPageToken, error).
+	ListBursts(ctx context.Context, noteURN string, sinceSeq, pageSize int) ([]BurstRecord, string, error)
+
+	// GetBurst retrieves a single burst by ID.
+	// Returns ErrNotFound if not present.
+	GetBurst(ctx context.Context, id string) (BurstRecord, error)
+
+	// SweepBursts deletes burst rows older than olderThan. Returns the count deleted.
+	SweepBursts(ctx context.Context, olderThan time.Time) (int, error)
+
+	// IndexNoteIntoProject backfills existing bursts for a note with the given
+	// projectURN and runs candidate detection against the project's burst pool.
+	// Call this after assigning a previously project-less (or differently-scoped)
+	// note to a new project so existing content becomes visible to the scorer.
+	// authorURN is stamped on any new candidates created. Returns the number of
+	// new candidates created.
+	IndexNoteIntoProject(ctx context.Context, noteURN, projectURN string) (newCandidates int, err error)
+
+	// RecentBurstsInProject fetches up to limit bursts from different notes in the
+	// same project, created within the last days, ordered by created_at DESC.
+	// Used for candidate detection after a new burst is stored.
+	RecentBurstsInProject(ctx context.Context, projectURN string, days, limit int) ([]BurstRecord, error)
+
+	// ── Candidates ───────────────────────────────────────────────────────────
+
+	// StoreCandidates batch-inserts new candidate relation records.
+	StoreCandidates(ctx context.Context, candidates []CandidateRecord) error
+
+	// UpdateCandidateBM25 updates the bm25_score for a single candidate.
+	UpdateCandidateBM25(ctx context.Context, id string, score float64) error
+
+	// ListCandidates returns a paginated list of candidates matching the options.
+	// Ordered by bm25_score DESC, overlap_score DESC.
+	ListCandidates(ctx context.Context, opts CandidateListOptions) ([]CandidateRecord, string, error)
+
+	// GetCandidate retrieves a single candidate by ID.
+	// Returns ErrNotFound if not present.
+	GetCandidate(ctx context.Context, id string) (CandidateRecord, error)
+
+	// PromoteCandidate converts a pending candidate to a promoted link.
+	// Creates anchor entries, link tokens, and updates the candidate status.
+	// Returns the created anchor IDs and link tokens.
+	PromoteCandidate(ctx context.Context, id string, opts PromoteOptions) (PromoteResult, error)
+
+	// DismissCandidate marks a candidate as dismissed.
+	DismissCandidate(ctx context.Context, id, reviewerURN string) error
+
+	// ── Per-project config ────────────────────────────────────────────────────
+
+	// GetProjectContextConfig retrieves per-project rate limit overrides.
+	// Returns ErrNotFound if no override exists for the project.
+	GetProjectContextConfig(ctx context.Context, projectURN string) (ProjectContextConfig, error)
+
+	// UpsertProjectContextConfig sets per-project rate limit overrides.
+	UpsertProjectContextConfig(ctx context.Context, cfg ProjectContextConfig) error
+
+	// ── Stats ─────────────────────────────────────────────────────────────────
+
+	// GetContextStats returns queue health statistics.
+	// If projectURN is non-empty, scopes stats to that project.
+	GetContextStats(ctx context.Context, projectURN string) (ContextStats, error)
+}

@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"golang.org/x/crypto/bcrypt"
 	_ "modernc.org/sqlite"
 
@@ -25,6 +26,21 @@ const (
 	indexFile       = "index.db"
 	defaultPageSize = 50
 )
+
+// normalizeBurstPair returns (aID, aNoteURN, bID, bNoteURN, pairKey) with
+// aID <= bID lexicographically, so the same physical burst pair always maps
+// to the same row regardless of which note triggered candidate detection.
+// pairKey is used as the UNIQUE deduplication key in candidate_relations.
+func normalizeBurstPair(
+	burstAID, noteURN_A, burstBID, noteURN_B string,
+) (normAID, normNoteA, normBID, normNoteB, pairKey string) {
+	if burstAID <= burstBID {
+		return burstAID, noteURN_A, burstBID, noteURN_B,
+			burstAID + ":" + burstBID
+	}
+	return burstBID, noteURN_B, burstAID, noteURN_A,
+		burstBID + ":" + burstAID
+}
 
 // walPragmas are applied immediately after opening the database connection.
 const walPragmas = `
@@ -50,13 +66,16 @@ type writeRequest struct {
 
 // Provider is a SQLite-backed implementation of all repository interfaces.
 type Provider struct {
-	dataDir   string
-	notesDir  string
-	db        *sql.DB
-	writeCh   chan writeRequest
-	wg        sync.WaitGroup
-	closeOnce sync.Once
-	closeErr  error
+	dataDir         string
+	notesDir        string
+	db              *sql.DB
+	writeCh         chan writeRequest
+	wg              sync.WaitGroup
+	closeOnce       sync.Once
+	closeErr        error
+	scorerCh        chan<- string      // channel to send candidate IDs for BM25 enrichment
+	scorerCtxCancel context.CancelFunc // cancels the scorer goroutine
+	burstCfg        core.BurstConfig   // burst extraction config
 }
 
 // New opens (or creates) the SQLite index and starts the writer goroutine.
@@ -79,12 +98,22 @@ func New(dataDir string, rebuild func(ctx context.Context, notesDir string, db *
 	}
 	p.wg.Add(1)
 	go p.writerLoop()
+
+	// Start the background BM25 scorer goroutine.
+	scorerCtx, scorerCancel := context.WithCancel(context.Background())
+	p.scorerCtxCancel = scorerCancel
+	p.scorerCh = StartScorer(scorerCtx, p.db, p.write, DefaultScorerConfig())
+	p.burstCfg = core.DefaultBurstConfig()
+
 	return p, nil
 }
 
 // Close shuts down the writer goroutine and closes the database connection.
 func (p *Provider) Close() error {
 	p.closeOnce.Do(func() {
+		if p.scorerCtxCancel != nil {
+			p.scorerCtxCancel()
+		}
 		close(p.writeCh)
 		p.wg.Wait()
 		if p.db != nil {
@@ -473,7 +502,12 @@ func (p *Provider) AppendEvent(ctx context.Context, event *core.Event, opts repo
 				 ON CONFLICT(urn) DO UPDATE SET body=excluded.body`,
 				noteURN, event.Label, newContent,
 			)
+			// ── Context graph: burst extraction and candidate detection ────────
+			// This runs inside the write goroutine, after FTS update, before commit.
+			// Errors are logged and suppressed — never propagate to the caller.
+			p.extractBurstsForEvent(db, event, newContent)
 		}
+
 		_, err = db.Exec(
 			`UPDATE notes SET head_seq=?, updated_at=? WHERE urn=?`,
 			newSeq, toMs(event.CreatedAt), noteURN,
@@ -483,6 +517,196 @@ func (p *Provider) AppendEvent(ctx context.Context, event *core.Event, opts repo
 		}
 		return nil
 	})
+}
+
+// extractBurstsForEvent runs context burst extraction for a single event.
+// MUST be called from inside the writer goroutine — it uses db directly and
+// never calls p.write(), avoiding write-channel re-entrancy deadlock.
+// All errors are logged and suppressed — the write path must not be blocked.
+func (p *Provider) extractBurstsForEvent(db *sql.DB, event *core.Event, content string) {
+	noteURN := event.NoteURN.String()
+
+	// ── 1. Read project / folder URN directly from the already-open db ───────
+	var projURN, fldURN string
+	_ = db.QueryRow(`SELECT project_urn, folder_urn FROM notes WHERE urn=?`, noteURN).
+		Scan(&projURN, &fldURN)
+
+	cfg := p.burstCfg
+
+	// ── 2. Rate limit check (raw SQL, no p.write) ─────────────────────────────
+	startOfDayMs := toMs(time.Now().UTC().Truncate(24 * time.Hour))
+
+	var noteCount, projectCount int
+	if err := db.QueryRow(
+		`SELECT COUNT(*) FROM context_bursts WHERE note_urn=? AND created_at>=?`,
+		noteURN, startOfDayMs,
+	).Scan(&noteCount); err != nil {
+		fmt.Printf("context: WARN: burst note count: %v\n", err)
+		return
+	}
+	if noteCount >= cfg.MaxPerNotePerDay {
+		return
+	}
+	if projURN != "" {
+		if err := db.QueryRow(
+			`SELECT COUNT(*) FROM context_bursts WHERE project_urn=? AND created_at>=?`,
+			projURN, startOfDayMs,
+		).Scan(&projectCount); err != nil {
+			fmt.Printf("context: WARN: burst project count: %v\n", err)
+			return
+		}
+		if projectCount >= cfg.MaxPerProjectPerDay {
+			return
+		}
+	}
+
+	// ── 3. Build a minimal core.Note for ExtractBursts ───────────────────────
+	noteURNParsed, err := core.ParseURN(noteURN)
+	if err != nil {
+		return
+	}
+	note := &core.Note{URN: noteURNParsed}
+	if projURN != "" {
+		if u, err2 := core.ParseURN(projURN); err2 == nil {
+			note.ProjectURN = &u
+		}
+	}
+	if fldURN != "" {
+		if u, err2 := core.ParseURN(fldURN); err2 == nil {
+			note.FolderURN = &u
+		}
+	}
+
+	// ── 4. Extract bursts (pure in-memory) ────────────────────────────────────
+	noteLines := splitContentLines(content)
+	bursts := core.ExtractBursts(note, event, noteLines, cfg)
+	if len(bursts) == 0 {
+		return
+	}
+
+	// ── 5. Consecutive similarity skip check (raw SQL) ────────────────────────
+	var recentTokensStr string
+	var recentCreatedMs int64
+	err = db.QueryRow(
+		`SELECT tokens, created_at FROM context_bursts WHERE note_urn=? ORDER BY created_at DESC LIMIT 1`,
+		noteURN,
+	).Scan(&recentTokensStr, &recentCreatedMs)
+	if err == nil && recentTokensStr != "" {
+		recentTokens := strings.Fields(recentTokensStr)
+		cutoff := event.CreatedAt.Add(-time.Duration(cfg.SkipWindowSeconds) * time.Second)
+		recentTime := fromMs(recentCreatedMs)
+		if recentTime.After(cutoff) && core.SimilaritySkip(recentTokens, bursts[0].Tokens, cfg.SkipThreshold) {
+			return
+		}
+	}
+
+	// ── 6. Store each burst and detect candidates — all raw SQL ───────────────
+	var newCandidateIDs []string
+
+	for _, b := range bursts {
+		tokensStr := strings.Join(b.Tokens, " ")
+		truncatedInt := 0
+		if b.Truncated {
+			truncatedInt = 1
+		}
+		createdMs := toMs(b.CreatedAt)
+
+		// Insert burst row
+		_, err := db.Exec(
+			`INSERT INTO context_bursts
+			   (id, note_urn, project_urn, folder_urn, author_urn,
+			    sequence, line_start, line_end, text, tokens, truncated, created_at)
+			 VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+			b.ID, b.NoteURN, b.ProjectURN, b.FolderURN, b.AuthorURN,
+			b.Sequence, b.LineStart, b.LineEnd, b.Text, tokensStr,
+			truncatedInt, createdMs,
+		)
+		if err != nil {
+			fmt.Printf("context: WARN: insert burst: %v\n", err)
+			continue
+		}
+
+		// Insert FTS5 row (best-effort — ignore errors)
+		_, _ = db.Exec(
+			`INSERT INTO context_bursts_fts(id, note_urn, project_urn, tokens) VALUES(?,?,?,?)`,
+			b.ID, b.NoteURN, b.ProjectURN, tokensStr,
+		)
+
+		// Skip candidate detection for project-less notes
+		if projURN == "" {
+			continue
+		}
+
+		// Fetch recent bursts in project for candidate detection (raw SQL)
+		cutoffMs := toMs(time.Now().UTC().Add(-time.Duration(cfg.CandidateLookbackDays) * 24 * time.Hour))
+		rows, err2 := db.Query(
+			`SELECT id, note_urn, project_urn, tokens
+			 FROM context_bursts
+			 WHERE project_urn=? AND created_at>=? AND note_urn!=?
+			 ORDER BY created_at DESC LIMIT ?`,
+			projURN, cutoffMs, noteURN, cfg.CandidateLookbackN,
+		)
+		if err2 != nil {
+			fmt.Printf("context: WARN: fetch recent bursts: %v\n", err2)
+			continue
+		}
+
+		var recentCore []core.Burst
+		for rows.Next() {
+			var rID, rNoteURN, rProjectURN, rTokens string
+			if scanErr := rows.Scan(&rID, &rNoteURN, &rProjectURN, &rTokens); scanErr != nil {
+				continue
+			}
+			recentCore = append(recentCore, core.Burst{
+				ID:         rID,
+				NoteURN:    rNoteURN,
+				ProjectURN: rProjectURN,
+				Tokens:     strings.Fields(rTokens),
+			})
+		}
+		rows.Close()
+
+		// Detect candidates (in-memory Jaccard)
+		pairs := core.DetectCandidates(b, recentCore, cfg.OverlapThreshold)
+		for _, pair := range pairs {
+			candID, err3 := uuid.NewV7()
+			if err3 != nil {
+				continue
+			}
+			idStr := candID.String()
+			nAID, nNoteA, nBID, nNoteB, pairKey := normalizeBurstPair(
+				pair.BurstA.ID, pair.BurstA.NoteURN,
+				pair.BurstB.ID, pair.BurstB.NoteURN,
+			)
+			_, err4 := db.Exec(
+				`INSERT OR IGNORE INTO candidate_relations
+					   (id, burst_a_id, burst_b_id, note_urn_a, note_urn_b,
+					    project_urn, overlap_score, bm25_score, status, created_at, pair_key)
+					 VALUES(?,?,?,?,?,?,?,0,'pending',?,?)`,
+				idStr,
+				nAID, nBID,
+				nNoteA, nNoteB,
+				pair.ProjectURN,
+				pair.OverlapScore,
+				createdMs,
+				pairKey,
+			)
+			if err4 != nil {
+				fmt.Printf("context: WARN: insert candidate: %v\n", err4)
+				continue
+			}
+			newCandidateIDs = append(newCandidateIDs, idStr)
+		}
+	}
+
+	// ── 7. Send new candidate IDs to scorer (non-blocking) ───────────────────
+	for _, id := range newCandidateIDs {
+		select {
+		case p.scorerCh <- id:
+		default:
+			// Channel full — drop silently
+		}
+	}
 }
 
 func applyEntriesToContent(content string, entries []core.LineEntry) string {

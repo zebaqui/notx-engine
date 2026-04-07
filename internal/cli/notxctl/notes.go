@@ -38,6 +38,7 @@ func init() {
 	notesCmd.AddCommand(notesDeleteCmd)
 	notesCmd.AddCommand(notesSearchCmd)
 	notesCmd.AddCommand(notesEventsCmd)
+	notesCmd.AddCommand(notesUpdateCmd)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -561,6 +562,96 @@ Examples:
 func init() {
 	notesEventsCmd.Flags().Int32Var(&notesEventsFlags.fromSequence, "from", 0,
 		"start streaming from this sequence number (0 = first event)")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// notes update <urn>
+// ─────────────────────────────────────────────────────────────────────────────
+
+var notesUpdateFlags struct {
+	name       string
+	projectURN string
+	folderURN  string
+}
+
+var notesUpdateCmd = &cobra.Command{
+	Use:   "update <urn>",
+	Short: "Update a note's name, project, or folder assignment",
+	Long: `Calls UpdateNote to modify a note's mutable header fields.
+
+Only the flags you supply are applied. Any flag not passed leaves the
+current value unchanged on the server.
+
+Use "CLEAR" as the value for --project or --folder to remove the assignment.
+
+When --project is set and the note has existing content, the server will
+automatically backfill context bursts into the new project and run candidate
+detection — this may take a few seconds in the background.
+
+Examples:
+  notxctl notes update notx:note:… --project notx:proj:…
+  notxctl notes update notx:note:… --name "New title"
+  notxctl notes update notx:note:… --project CLEAR
+  notxctl notes update notx:note:… --project notx:proj:… --folder notx:folder:…`,
+	Args: cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		conn := connFromCtx(cmd)
+		ctx, cancel := rpcCtx(cmd)
+		defer cancel()
+
+		req := &pb.UpdateNoteRequest{
+			Urn:    args[0],
+			Header: &pb.NoteHeader{},
+		}
+		if cmd.Flags().Changed("name") {
+			req.Header.Name = notesUpdateFlags.name
+		}
+		if cmd.Flags().Changed("project") {
+			req.Header.ProjectUrn = notesUpdateFlags.projectURN
+		}
+		if cmd.Flags().Changed("folder") {
+			req.Header.FolderUrn = notesUpdateFlags.folderURN
+		}
+
+		resp, err := conn.Notes().UpdateNote(ctx, req)
+		if err != nil {
+			return fmt.Errorf("UpdateNote: %w", err)
+		}
+
+		h := resp.Header
+
+		switch outputFromCtx(cmd) {
+		case "json":
+			return printJSON(map[string]any{
+				"urn":         h.Urn,
+				"name":        h.Name,
+				"project_urn": orDash(h.ProjectUrn),
+				"folder_urn":  orDash(h.FolderUrn),
+				"updated_at":  h.UpdatedAt.AsTime(),
+			})
+		default:
+			tw := newTabWriter()
+			defer tw.Flush()
+			fmt.Fprintf(tw, "URN\t%s\n", h.Urn)
+			fmt.Fprintf(tw, "Name\t%s\n", h.Name)
+			fmt.Fprintf(tw, "Project\t%s\n", orDash(h.ProjectUrn))
+			fmt.Fprintf(tw, "Folder\t%s\n", orDash(h.FolderUrn))
+			fmt.Fprintf(tw, "Updated\t%s\n", fmtTime(h.UpdatedAt.AsTime()))
+			if cmd.Flags().Changed("project") && notesUpdateFlags.projectURN != "CLEAR" && notesUpdateFlags.projectURN != "" {
+				fmt.Fprintf(tw, "Context\t%s\n", "backfilling bursts into project (background)")
+			}
+		}
+		return nil
+	},
+}
+
+func init() {
+	f := notesUpdateCmd.Flags()
+	f.StringVar(&notesUpdateFlags.name, "name", "", "new note name")
+	f.StringVar(&notesUpdateFlags.projectURN, "project", "",
+		`project URN to assign (use "CLEAR" to remove)`)
+	f.StringVar(&notesUpdateFlags.folderURN, "folder", "",
+		`folder URN to assign (use "CLEAR" to remove)`)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

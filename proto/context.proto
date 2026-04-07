@@ -1,0 +1,312 @@
+syntax = "proto3";
+
+package notx.v1;
+
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/zebaqui/notx-engine/proto;notxpb";
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Shared message types
+// ─────────────────────────────────────────────────────────────────────────────
+
+// BurstRecord is a self-contained excerpt of note content extracted at the
+// moment an event is appended. It captures the changed region plus a few lines
+// of surrounding context so that AI agents and reviewers can understand what
+// changed without reading the entire note.
+message BurstRecord {
+  string id = 1; // UUIDv7
+  string note_urn = 2;
+  string project_urn = 3;
+  string folder_urn = 4;
+  string author_urn = 5;
+  int32 sequence = 6; // event sequence that produced this burst
+  int32 line_start = 7;
+  int32 line_end = 8;
+  string text = 9; // raw extracted window text
+  string tokens = 10; // space-separated normalised token set
+  bool truncated = 11; // true only when the event produced > 10 sub-windows
+  google.protobuf.Timestamp created_at = 12;
+}
+
+// CandidateRecord is a lightweight signal that two bursts from different notes
+// may be meaningfully related. It carries no assertion about *how* they are
+// related — that judgment belongs to the author or an AI agent.
+message CandidateRecord {
+  string id = 1; // UUIDv7
+  string burst_a_id = 2;
+  string burst_b_id = 3;
+  string note_urn_a = 4;
+  string note_urn_b = 5;
+  string project_urn = 6;
+  double overlap_score = 7; // raw Jaccard at detection time
+  double bm25_score = 8; // FTS5 BM25 relevance; 0.0 = unenriched
+  string status = 9; // pending | promoted | dismissed | expired
+  google.protobuf.Timestamp created_at = 10;
+  google.protobuf.Timestamp reviewed_at = 11; // zero when not yet reviewed
+  string reviewed_by = 12; // URN of reviewing user or agent
+  string promoted_link = 13; // notx:lnk:id token if promoted, else empty
+
+  // Embedded burst previews — populated when include_bursts=true on a Get or
+  // List request so the caller does not need a second RPC.
+  BurstRecord burst_a = 14;
+  BurstRecord burst_b = 15;
+}
+
+// ProjectContextConfig holds per-project rate-limit overrides for the context
+// graph layer. A zero value for a cap means "use the global server default."
+message ProjectContextConfig {
+  string project_urn = 1;
+
+  // 0 means "use global default."
+  int32 burst_max_per_note_per_day = 2;
+  int32 burst_max_per_project_per_day = 3;
+
+  google.protobuf.Timestamp updated_at = 4;
+}
+
+// ContextStats exposes queue-health counters for monitoring and agent
+// orchestration. When project_urn is supplied, counters are scoped to that
+// project; otherwise they cover the entire server instance.
+message ContextStats {
+  int64 bursts_total = 1;
+  int64 bursts_today = 2;
+  int64 candidates_pending = 3;
+  int64 candidates_pending_unenriched = 4; // bm25_score=0, scorer not yet run
+  int64 candidates_promoted = 5;
+  int64 candidates_dismissed = 6;
+  double oldest_pending_age_days = 7;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ContextService
+// ─────────────────────────────────────────────────────────────────────────────
+
+service ContextService {
+  // ── Bursts ─────────────────────────────────────────────────────────────────
+
+  // ListBursts returns context bursts for a note, ordered by sequence ASC.
+  // Bursts are produced automatically by AppendEvent and are never written
+  // directly by callers.
+  rpc ListBursts(ListBurstsRequest) returns (ListBurstsResponse);
+
+  // GetBurst retrieves a single burst by ID.
+  rpc GetBurst(GetBurstRequest) returns (GetBurstResponse);
+
+  // ── Candidates ─────────────────────────────────────────────────────────────
+
+  // ListCandidates returns pending (or filtered) candidate relations for a
+  // project, ordered by bm25_score DESC, overlap_score DESC (most confident
+  // first once the background scorer has run).
+  rpc ListCandidates(ListCandidatesRequest) returns (ListCandidatesResponse);
+
+  // GetCandidate retrieves a single candidate by ID with both burst previews
+  // embedded.
+  rpc GetCandidate(GetCandidateRequest) returns (GetCandidateResponse);
+
+  // PromoteCandidate converts a pending candidate into a stable notx:lnk:id
+  // link. The engine generates human-readable anchor slugs for both notes,
+  // writes anchor entries to both note headers, and records the link in the
+  // backlink index.
+  rpc PromoteCandidate(PromoteCandidateRequest) returns (PromoteCandidateResponse);
+
+  // DismissCandidate marks a candidate as dismissed. Dismissed candidates are
+  // never re-surfaced for the same burst pair; new edits that produce fresh
+  // overlapping bursts will generate new candidates independently.
+  rpc DismissCandidate(DismissCandidateRequest) returns (DismissCandidateResponse);
+
+  // ── Stats ──────────────────────────────────────────────────────────────────
+
+  // GetStats returns queue-health statistics, optionally scoped to a project.
+  rpc GetStats(GetStatsRequest) returns (GetStatsResponse);
+
+  // ── Per-project configuration ──────────────────────────────────────────────
+
+  // GetProjectConfig returns the per-project rate-limit overrides, if any.
+  // Returns NOT_FOUND when no project-level override exists (global defaults
+  // apply).
+  rpc GetProjectConfig(GetProjectConfigRequest) returns (GetProjectConfigResponse);
+
+  // SetProjectConfig sets or replaces per-project rate-limit overrides.
+  // Pass 0 for a cap field to reset it to the global server default.
+  rpc SetProjectConfig(SetProjectConfigRequest) returns (SetProjectConfigResponse);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ListBursts
+// ─────────────────────────────────────────────────────────────────────────────
+
+message ListBurstsRequest {
+  // Required. URN of the note whose bursts are returned.
+  string note_urn = 1;
+
+  // When > 0, only bursts from events at or after this sequence are returned.
+  int32 since_sequence = 2;
+
+  // Maximum number of bursts to return. 0 = server default (50).
+  int32 page_size = 3;
+
+  // Opaque continuation token from a previous ListBursts response.
+  string page_token = 4;
+}
+
+message ListBurstsResponse {
+  repeated BurstRecord bursts = 1;
+  string next_page_token = 2; // empty = last page
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GetBurst
+// ─────────────────────────────────────────────────────────────────────────────
+
+message GetBurstRequest {
+  string id = 1; // UUIDv7 of the burst
+}
+
+message GetBurstResponse {
+  BurstRecord burst = 1;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ListCandidates
+// ─────────────────────────────────────────────────────────────────────────────
+
+message ListCandidatesRequest {
+  // When non-empty, restricts results to candidates belonging to this project.
+  string project_urn = 1;
+
+  // When non-empty, restricts results to candidates where this note appears
+  // as either note_urn_a or note_urn_b.
+  string note_urn = 2;
+
+  // Filter by status. One of: pending, promoted, dismissed, expired.
+  // Empty string returns all statuses.
+  string status = 3;
+
+  // Minimum overlap_score (raw Jaccard). 0.0 = no floor.
+  double min_score = 4;
+
+  // When true, BurstRecord previews are embedded in each CandidateRecord.
+  bool include_bursts = 5;
+
+  // Pagination.
+  int32 page_size = 6;
+  string page_token = 7;
+}
+
+message ListCandidatesResponse {
+  repeated CandidateRecord candidates = 1;
+  string next_page_token = 2;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GetCandidate
+// ─────────────────────────────────────────────────────────────────────────────
+
+message GetCandidateRequest {
+  string id = 1; // UUIDv7 of the candidate
+
+  // When true, BurstRecord previews are embedded in the response.
+  // Defaults to true since the caller usually needs them to make a decision.
+  bool include_bursts = 2;
+}
+
+message GetCandidateResponse {
+  CandidateRecord candidate = 1;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PromoteCandidate
+// ─────────────────────────────────────────────────────────────────────────────
+
+message PromoteCandidateRequest {
+  // Required. UUIDv7 of the candidate to promote.
+  string id = 1;
+
+  // Optional label used as the key in the node_links map of both notes.
+  // When empty the engine uses the target anchor ID as the key.
+  string label = 2;
+
+  // Direction of link creation.
+  // One of: "both" (default), "a_to_b", "b_to_a".
+  string direction = 3;
+
+  // URN of the user or agent performing the promotion, for audit.
+  string reviewer_urn = 4;
+}
+
+message PromoteCandidateResponse {
+  // Auto-generated (or reused) anchor ID in note A.
+  string anchor_a_id = 1;
+
+  // Auto-generated (or reused) anchor ID in note B.
+  string anchor_b_id = 2;
+
+  // The notx:lnk:id token written into note A pointing at note B.
+  // Empty when direction=b_to_a.
+  string link_a_to_b = 3;
+
+  // The notx:lnk:id token written into note B pointing at note A.
+  // Empty when direction=a_to_b.
+  string link_b_to_a = 4;
+
+  // The updated candidate record (status=promoted).
+  CandidateRecord candidate = 5;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DismissCandidate
+// ─────────────────────────────────────────────────────────────────────────────
+
+message DismissCandidateRequest {
+  // Required. UUIDv7 of the candidate to dismiss.
+  string id = 1;
+
+  // URN of the user or agent performing the dismissal, for audit.
+  string reviewer_urn = 2;
+}
+
+message DismissCandidateResponse {
+  // The updated candidate record (status=dismissed).
+  CandidateRecord candidate = 1;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GetStats
+// ─────────────────────────────────────────────────────────────────────────────
+
+message GetStatsRequest {
+  // When non-empty, stats are scoped to this project.
+  // When empty, stats cover the entire server instance.
+  string project_urn = 1;
+}
+
+message GetStatsResponse {
+  ContextStats stats = 1;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GetProjectConfig / SetProjectConfig
+// ─────────────────────────────────────────────────────────────────────────────
+
+message GetProjectConfigRequest {
+  string project_urn = 1;
+}
+
+message GetProjectConfigResponse {
+  ProjectContextConfig config = 1;
+}
+
+message SetProjectConfigRequest {
+  string project_urn = 1;
+
+  // New per-note daily burst cap. 0 = reset to global default.
+  int32 burst_max_per_note_per_day = 2;
+
+  // New per-project daily burst cap. 0 = reset to global default.
+  int32 burst_max_per_project_per_day = 3;
+}
+
+message SetProjectConfigResponse {
+  ProjectContextConfig config = 1;
+}

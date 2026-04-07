@@ -10,7 +10,7 @@ import (
 // currentSchemaVersion must match len(migrations).
 // Bump it by 1 every time you add a migration to the slice below.
 // NEVER edit or remove existing migrations — only append new ones.
-const currentSchemaVersion = 2
+const currentSchemaVersion = 7
 
 // currentProjectionVersion is incremented when projection logic changes
 // (i.e. existing rows need recomputing from the event log even though
@@ -135,6 +135,111 @@ CREATE TABLE IF NOT EXISTS pairing_secrets (
     used_at      INTEGER         -- NULL means not yet used
 );
 
+-- ── Link Spec: Anchor index ──────────────────────────────────────────────────
+
+-- Server-side anchor index for fast cross-note lookups.
+CREATE TABLE IF NOT EXISTS anchors (
+    note_urn    TEXT    NOT NULL,
+    anchor_id   TEXT    NOT NULL,
+    line        INTEGER NOT NULL,
+    char_start  INTEGER NOT NULL DEFAULT 0,
+    char_end    INTEGER NOT NULL DEFAULT 0,
+    preview     TEXT    NOT NULL DEFAULT '',
+    status      TEXT    NOT NULL DEFAULT 'ok',
+    updated_at  TEXT    NOT NULL,
+    PRIMARY KEY (note_urn, anchor_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_anchors_note ON anchors(note_urn);
+
+-- Server-side backlink index.
+CREATE TABLE IF NOT EXISTS backlinks (
+    source_urn     TEXT NOT NULL,
+    target_urn     TEXT NOT NULL,
+    target_anchor  TEXT NOT NULL,
+    label          TEXT NOT NULL DEFAULT '',
+    created_at     TEXT NOT NULL,
+    PRIMARY KEY (source_urn, target_urn, target_anchor)
+);
+
+CREATE INDEX IF NOT EXISTS idx_backlinks_target ON backlinks(target_urn, target_anchor);
+CREATE INDEX IF NOT EXISTS idx_backlinks_source ON backlinks(source_urn);
+
+-- External links index.
+CREATE TABLE IF NOT EXISTS external_links (
+    source_urn TEXT NOT NULL,
+    uri        TEXT NOT NULL,
+    label      TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (source_urn, uri)
+);
+
+CREATE INDEX IF NOT EXISTS idx_external_links_source ON external_links(source_urn);
+
+-- ── Context Graph Layer ───────────────────────────────────────────────────────
+
+-- Context bursts: one or more per event, one per contiguous changed-line window.
+CREATE TABLE IF NOT EXISTS context_bursts (
+    id          TEXT    PRIMARY KEY,
+    note_urn    TEXT    NOT NULL,
+    project_urn TEXT    NOT NULL DEFAULT '',
+    folder_urn  TEXT    NOT NULL DEFAULT '',
+    author_urn  TEXT    NOT NULL DEFAULT '',
+    sequence    INTEGER NOT NULL,
+    line_start  INTEGER NOT NULL,
+    line_end    INTEGER NOT NULL,
+    text        TEXT    NOT NULL,
+    tokens      TEXT    NOT NULL DEFAULT '',
+    truncated   INTEGER NOT NULL DEFAULT 0,
+    created_at  INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_bursts_note    ON context_bursts(note_urn, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_bursts_project ON context_bursts(project_urn, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_bursts_created ON context_bursts(created_at DESC);
+
+-- FTS5 over burst tokens (used by background BM25 scorer).
+CREATE VIRTUAL TABLE IF NOT EXISTS context_bursts_fts USING fts5(
+    id          UNINDEXED,
+    note_urn    UNINDEXED,
+    project_urn UNINDEXED,
+    tokens,
+    content='context_bursts',
+    content_rowid='rowid'
+);
+
+-- Candidate relations: burst pairs from different notes that may be connected.
+CREATE TABLE IF NOT EXISTS candidate_relations (
+    id            TEXT    PRIMARY KEY,
+    burst_a_id    TEXT    NOT NULL,
+    burst_b_id    TEXT    NOT NULL,
+    note_urn_a    TEXT    NOT NULL,
+    note_urn_b    TEXT    NOT NULL,
+    project_urn   TEXT    NOT NULL DEFAULT '',
+    overlap_score REAL    NOT NULL,
+    bm25_score    REAL    NOT NULL DEFAULT 0,
+    status        TEXT    NOT NULL DEFAULT 'pending',
+    created_at    INTEGER NOT NULL,
+    reviewed_at   INTEGER,
+    reviewed_by   TEXT    NOT NULL DEFAULT '',
+    promoted_link TEXT    NOT NULL DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_candidates_project_status
+    ON candidate_relations(project_urn, status, bm25_score DESC, overlap_score DESC);
+CREATE INDEX IF NOT EXISTS idx_candidates_notes
+    ON candidate_relations(note_urn_a, note_urn_b, status);
+CREATE INDEX IF NOT EXISTS idx_candidates_burst_a ON candidate_relations(burst_a_id);
+CREATE INDEX IF NOT EXISTS idx_candidates_burst_b ON candidate_relations(burst_b_id);
+
+-- Per-project context graph configuration overrides.
+CREATE TABLE IF NOT EXISTS project_context_config (
+    project_urn                   TEXT    PRIMARY KEY,
+    burst_max_per_note_per_day    INTEGER,
+    burst_max_per_project_per_day INTEGER,
+    updated_at                    INTEGER NOT NULL
+);
+
 -- Schema version tracking.
 CREATE TABLE IF NOT EXISTS schema_version (
     version    INTEGER PRIMARY KEY,
@@ -161,6 +266,9 @@ CREATE TABLE IF NOT EXISTS projection_meta (
 //
 //	v1 — initial schema (tables created via ddl; this is a no-op for existing DBs)
 //	v2 — add events table and replace content-backed notes_fts with standalone FTS5
+//	v3 — add anchors, backlinks tables (link spec)
+//	v4 — add external_links table (link spec)
+//	v5 — add context_bursts, context_bursts_fts, candidate_relations, project_context_config (context graph)
 var migrations = []string{
 	// v1: initial schema — ddl already handles this on new installs.
 	"SELECT 1",
@@ -184,6 +292,134 @@ var migrations = []string{
 		title,
 		body
 	);`,
+
+	// v3: link spec — anchors, backlinks tables
+	`CREATE TABLE IF NOT EXISTS anchors (
+    note_urn    TEXT    NOT NULL,
+    anchor_id   TEXT    NOT NULL,
+    line        INTEGER NOT NULL,
+    char_start  INTEGER NOT NULL DEFAULT 0,
+    char_end    INTEGER NOT NULL DEFAULT 0,
+    preview     TEXT    NOT NULL DEFAULT '',
+    status      TEXT    NOT NULL DEFAULT 'ok',
+    updated_at  TEXT    NOT NULL,
+    PRIMARY KEY (note_urn, anchor_id)
+);
+CREATE INDEX IF NOT EXISTS idx_anchors_note ON anchors(note_urn);
+CREATE TABLE IF NOT EXISTS backlinks (
+    source_urn     TEXT NOT NULL,
+    target_urn     TEXT NOT NULL,
+    target_anchor  TEXT NOT NULL,
+    label          TEXT NOT NULL DEFAULT '',
+    created_at     TEXT NOT NULL,
+    PRIMARY KEY (source_urn, target_urn, target_anchor)
+);
+CREATE INDEX IF NOT EXISTS idx_backlinks_target ON backlinks(target_urn, target_anchor);
+CREATE INDEX IF NOT EXISTS idx_backlinks_source ON backlinks(source_urn);`,
+
+	// v4: link spec — external_links table
+	`CREATE TABLE IF NOT EXISTS external_links (
+    source_urn TEXT NOT NULL,
+    uri        TEXT NOT NULL,
+    label      TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (source_urn, uri)
+);
+CREATE INDEX IF NOT EXISTS idx_external_links_source ON external_links(source_urn);`,
+
+	// v5: context graph layer tables
+	`CREATE TABLE IF NOT EXISTS context_bursts (
+    id          TEXT    PRIMARY KEY,
+    note_urn    TEXT    NOT NULL,
+    project_urn TEXT    NOT NULL DEFAULT '',
+    folder_urn  TEXT    NOT NULL DEFAULT '',
+    author_urn  TEXT    NOT NULL DEFAULT '',
+    sequence    INTEGER NOT NULL,
+    line_start  INTEGER NOT NULL,
+    line_end    INTEGER NOT NULL,
+    text        TEXT    NOT NULL,
+    tokens      TEXT    NOT NULL DEFAULT '',
+    truncated   INTEGER NOT NULL DEFAULT 0,
+    created_at  INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_bursts_note    ON context_bursts(note_urn, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_bursts_project ON context_bursts(project_urn, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_bursts_created ON context_bursts(created_at DESC);
+CREATE VIRTUAL TABLE IF NOT EXISTS context_bursts_fts USING fts5(
+    id          UNINDEXED,
+    note_urn    UNINDEXED,
+    project_urn UNINDEXED,
+    tokens,
+    content='context_bursts',
+    content_rowid='rowid'
+);
+CREATE TABLE IF NOT EXISTS candidate_relations (
+    id            TEXT    PRIMARY KEY,
+    burst_a_id    TEXT    NOT NULL,
+    burst_b_id    TEXT    NOT NULL,
+    note_urn_a    TEXT    NOT NULL,
+    note_urn_b    TEXT    NOT NULL,
+    project_urn   TEXT    NOT NULL DEFAULT '',
+    overlap_score REAL    NOT NULL,
+    bm25_score    REAL    NOT NULL DEFAULT 0,
+    status        TEXT    NOT NULL DEFAULT 'pending',
+    created_at    INTEGER NOT NULL,
+    reviewed_at   INTEGER,
+    reviewed_by   TEXT    NOT NULL DEFAULT '',
+    promoted_link TEXT    NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_candidates_project_status
+    ON candidate_relations(project_urn, status, bm25_score DESC, overlap_score DESC);
+CREATE INDEX IF NOT EXISTS idx_candidates_notes
+    ON candidate_relations(note_urn_a, note_urn_b, status);
+CREATE INDEX IF NOT EXISTS idx_candidates_burst_a ON candidate_relations(burst_a_id);
+CREATE INDEX IF NOT EXISTS idx_candidates_burst_b ON candidate_relations(burst_b_id);
+CREATE TABLE IF NOT EXISTS project_context_config (
+    project_urn                   TEXT    PRIMARY KEY,
+    burst_max_per_note_per_day    INTEGER,
+    burst_max_per_project_per_day INTEGER,
+    updated_at                    INTEGER NOT NULL
+);`,
+
+	// v6: no-op — superseded by v7 which handles idempotent column addition.
+	// Kept as a placeholder so existing DBs that partially applied v6 are
+	// not broken (runMigrations skips versions already recorded).
+	`SELECT 1`,
+
+	// v7: add unique index on normalized burst pair (min,max) so that
+	// INSERT OR IGNORE deduplicates candidates regardless of which note
+	// triggered detection first.  The pair_key column stores
+	// min(burst_a_id,burst_b_id)||':'||max(burst_a_id,burst_b_id) and is
+	// populated by all insertion sites in Go before the INSERT.
+	//
+	// The ALTER TABLE is skipped when pair_key already exists (idempotent).
+	// Steps:
+	//   1. Add pair_key column if it does not already exist.
+	//   2. Populate pair_key for every row where it is still empty.
+	//   3. Delete the lower-priority duplicate within each pair — keep the
+	//      row with the highest overlap_score (or earliest id on a tie).
+	//   4. Create the unique index (IF NOT EXISTS — safe to re-run).
+	`UPDATE candidate_relations
+    SET pair_key = CASE
+        WHEN burst_a_id <= burst_b_id
+            THEN burst_a_id || ':' || burst_b_id
+        ELSE burst_b_id || ':' || burst_a_id
+    END
+    WHERE pair_key = '' OR pair_key IS NULL;
+DELETE FROM candidate_relations
+    WHERE id IN (
+        SELECT r.id
+        FROM candidate_relations r
+        JOIN candidate_relations k
+          ON  k.pair_key = r.pair_key
+          AND k.id != r.id
+          AND (
+                k.overlap_score > r.overlap_score
+             OR (k.overlap_score = r.overlap_score AND k.id < r.id)
+          )
+    );
+CREATE UNIQUE INDEX IF NOT EXISTS idx_candidates_pair_key
+    ON candidate_relations(pair_key);`,
 }
 
 // applySchema creates all tables/indexes on a fresh DB and seeds meta rows.
@@ -239,6 +475,16 @@ func runMigrations(ctx context.Context, db *sql.DB, appliedVersion int) error {
 		if version <= appliedVersion {
 			continue
 		}
+
+		// v7 requires pair_key column to exist before running its SQL.
+		// We add it here with a Go-level existence check so the ALTER is
+		// idempotent even when a previous boot partially applied v6/v7.
+		if version == 7 {
+			if err := ensurePairKeyColumn(ctx, db); err != nil {
+				return fmt.Errorf("sqlite schema: migration %d pre-step: %w", version, err)
+			}
+		}
+
 		if _, err := db.ExecContext(ctx, sqlStmt); err != nil {
 			return fmt.Errorf("sqlite schema: migration %d: %w", version, err)
 		}
@@ -249,6 +495,39 @@ func runMigrations(ctx context.Context, db *sql.DB, appliedVersion int) error {
 		); err != nil {
 			return fmt.Errorf("sqlite schema: record migration %d: %w", version, err)
 		}
+	}
+	return nil
+}
+
+// ensurePairKeyColumn adds the pair_key column to candidate_relations if it
+// does not already exist. Safe to call multiple times.
+func ensurePairKeyColumn(ctx context.Context, db *sql.DB) error {
+	// Check whether the column already exists by inspecting table_info.
+	rows, err := db.QueryContext(ctx, `PRAGMA table_info(candidate_relations)`)
+	if err != nil {
+		return fmt.Errorf("pragma table_info: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var cid int
+		var name, colType, notNull, dfltValue, pk sql.NullString
+		if err := rows.Scan(&cid, &name, &colType, &notNull, &dfltValue, &pk); err != nil {
+			return fmt.Errorf("scan table_info: %w", err)
+		}
+		if name.String == "pair_key" {
+			return nil // already exists
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	// Column does not exist — add it.
+	_, err = db.ExecContext(ctx,
+		`ALTER TABLE candidate_relations ADD COLUMN pair_key TEXT NOT NULL DEFAULT ''`)
+	if err != nil {
+		return fmt.Errorf("alter table add pair_key: %w", err)
 	}
 	return nil
 }

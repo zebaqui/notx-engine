@@ -13,9 +13,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zebaqui/notx-engine/repo/memory"
-	"github.com/zebaqui/notx-engine/internal/server"
 	"github.com/zebaqui/notx-engine/config"
+	"github.com/zebaqui/notx-engine/internal/server"
+	"github.com/zebaqui/notx-engine/repo/memory"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -48,7 +48,7 @@ func startRelayServer(t *testing.T) (baseURL string, stop func()) {
 		Level: slog.LevelError,
 	}))
 
-	srv, err := server.New(cfg, provider, provider, provider, provider, provider, provider, log)
+	srv, err := server.New(cfg, provider, provider, provider, provider, provider, provider, nil, nil, log)
 	if err != nil {
 		t.Fatalf("startRelayServer: server.New: %v", err)
 	}

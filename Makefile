@@ -11,7 +11,9 @@ PROTO_FILES := \
 	$(PROTO_DIR)/folder.proto \
 	$(PROTO_DIR)/user.proto \
 	$(PROTO_DIR)/server.proto \
-	$(PROTO_DIR)/relay.proto
+	$(PROTO_DIR)/relay.proto \
+	$(PROTO_DIR)/context.proto \
+	$(PROTO_DIR)/link.proto
 
 DOCKER_IMAGE := notx:integration-test
 

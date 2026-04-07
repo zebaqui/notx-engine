@@ -36,6 +36,8 @@ type Server struct {
 	userRepo    repo.UserRepository
 	srvRepo     repo.ServerRepository
 	secretStore repo.PairingSecretStore
+	contextRepo repo.ContextRepository
+	linkRepo    repo.LinkRepository
 	log         *slog.Logger
 
 	httpHandler     *httpsvc.Handler
@@ -46,7 +48,7 @@ type Server struct {
 
 // New creates a Server from the given config and repository.
 // It wires all sub-components but does not start any listeners yet.
-func New(cfg *config.Config, r repo.NoteRepository, projRepo repo.ProjectRepository, devRepo repo.DeviceRepository, userRepo repo.UserRepository, srvRepo repo.ServerRepository, secretStore repo.PairingSecretStore, log *slog.Logger) (*Server, error) {
+func New(cfg *config.Config, r repo.NoteRepository, projRepo repo.ProjectRepository, devRepo repo.DeviceRepository, userRepo repo.UserRepository, srvRepo repo.ServerRepository, secretStore repo.PairingSecretStore, contextRepo repo.ContextRepository, linkRepo repo.LinkRepository, log *slog.Logger) (*Server, error) {
 	if log == nil {
 		log = slog.New(slog.NewTextHandler(os.Stderr, nil))
 	}
@@ -59,6 +61,8 @@ func New(cfg *config.Config, r repo.NoteRepository, projRepo repo.ProjectReposit
 		userRepo:    userRepo,
 		srvRepo:     srvRepo,
 		secretStore: secretStore,
+		contextRepo: contextRepo,
+		linkRepo:    linkRepo,
 		log:         log,
 	}
 
@@ -97,7 +101,17 @@ func New(cfg *config.Config, r repo.NoteRepository, projRepo repo.ProjectReposit
 	relaySvc := grpcsvc.NewRelayServer(devRepo, relayPolicy, log, nil)
 
 	// ── Build gRPC service instances (shared by both HTTP and gRPC layers) ───
-	noteSvc := grpcsvc.NewNoteServer(r, cfg.DefaultPageSize, cfg.MaxPageSize)
+	noteSvc := grpcsvc.NewNoteServerWithContext(r, contextRepo, cfg.DefaultPageSize, cfg.MaxPageSize)
+
+	var contextSvc *grpcsvc.ContextServer
+	if contextRepo != nil {
+		contextSvc = grpcsvc.NewContextServer(contextRepo, cfg.DefaultPageSize, cfg.MaxPageSize)
+	}
+
+	var linkSvc *grpcsvc.LinkServer
+	if linkRepo != nil {
+		linkSvc = grpcsvc.NewLinkServer(linkRepo)
+	}
 	projSvc := grpcsvc.NewProjectServer(projRepo, cfg.DefaultPageSize, cfg.MaxPageSize)
 	folderSvc := grpcsvc.NewFolderServer(projRepo, cfg.DefaultPageSize, cfg.MaxPageSize)
 	deviceSvc := grpcsvc.NewDeviceServer(devRepo)
@@ -155,11 +169,13 @@ func New(cfg *config.Config, r repo.NoteRepository, projRepo repo.ProjectReposit
 			s.pairingService,
 			secretStore,
 			relaySvc,
+			contextSvc,
+			linkSvc,
 		)
 	}
 
 	if cfg.EnableGRPC {
-		grpcSrv, err := buildGRPCServer(cfg, noteSvc, projSvc, folderSvc, deviceSvc, deviceAdminSvc, userSvc, s.pairingService, relaySvc, log)
+		grpcSrv, err := buildGRPCServer(cfg, noteSvc, projSvc, folderSvc, deviceSvc, deviceAdminSvc, userSvc, s.pairingService, relaySvc, contextSvc, linkSvc, log)
 		if err != nil {
 			return nil, fmt.Errorf("server: build gRPC server: %w", err)
 		}
@@ -424,6 +440,8 @@ func buildGRPCServer(
 	userSvc *grpcsvc.UserServer,
 	pairingSvc *grpcsvc.PairingServer,
 	relaySvc *grpcsvc.RelayServer,
+	contextSvc *grpcsvc.ContextServer,
+	linkSvc *grpcsvc.LinkServer,
 	log *slog.Logger,
 ) (*googlegrpc.Server, error) {
 	opts := []googlegrpc.ServerOption{
@@ -453,6 +471,14 @@ func buildGRPCServer(
 
 	pb.RegisterUserServiceServer(srv, userSvc)
 	pb.RegisterRelayServiceServer(srv, relaySvc)
+
+	if contextSvc != nil {
+		pb.RegisterContextServiceServer(srv, contextSvc)
+	}
+
+	if linkSvc != nil {
+		pb.RegisterLinkServiceServer(srv, linkSvc)
+	}
 
 	if pairingSvc != nil {
 		pb.RegisterServerPairingServiceServer(srv, pairingSvc.PrimaryService())

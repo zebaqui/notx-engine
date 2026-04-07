@@ -204,6 +204,8 @@ func init() {
 	rootCmd.AddCommand(projectsCmd)
 	rootCmd.AddCommand(foldersCmd)
 	rootCmd.AddCommand(pairingCmd)
+	rootCmd.AddCommand(contextCmd)
+	rootCmd.AddCommand(linksCmd)
 	rootCmd.AddCommand(versionCmd)
 }
 

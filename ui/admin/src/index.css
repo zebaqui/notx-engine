@@ -103,17 +103,56 @@ a:hover {
     height: var(--topbar-h);
     display: flex;
     align-items: center;
-    gap: 10px;
-    padding: 0 18px;
+    justify-content: flex-end;
+    gap: 8px;
+    padding: 12px 16px 0;
     border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+}
+
+.logo-wordmark {
+    display: flex;
+    align-items: center;
+    gap: 8px;
     font-weight: 700;
     font-size: 15px;
     letter-spacing: -0.3px;
     color: var(--text-primary);
-    flex-shrink: 0;
 }
 
-.sidebar-logo .logo-dot {
+.search-hint {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    padding: 4px 8px;
+    border-radius: var(--radius-sm);
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    color: var(--text-muted);
+    font-size: 11px;
+    font-family: var(--font-sans);
+    cursor: pointer;
+    transition:
+        background 0.12s,
+        color 0.12s,
+        border-color 0.12s;
+    margin-right: auto;
+}
+
+.search-hint:hover {
+    background: var(--bg-hover);
+    color: var(--text-secondary);
+    border-color: var(--border-strong);
+}
+
+.search-hint kbd {
+    font-family: var(--font-sans);
+    font-size: 10.5px;
+    font-weight: 500;
+    color: inherit;
+}
+
+.logo-wordmark .logo-dot {
     width: 8px;
     height: 8px;
     background: var(--accent);

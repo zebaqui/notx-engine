@@ -53,10 +53,12 @@ Examples:
 }
 
 var addNoteFlags struct {
-	addr   string // override client.grpc_addr for this invocation
-	urn    string // when set, update an existing note instead of creating
-	delete bool
-	secure bool
+	addr       string // override client.grpc_addr for this invocation
+	urn        string // when set, update an existing note instead of creating
+	delete     bool
+	secure     bool
+	projectURN string // optional project URN for candidate detection
+	folderURN  string // optional folder URN
 }
 
 func init() {
@@ -69,6 +71,10 @@ func init() {
 		"Delete the source file after successfully creating the note")
 	f.BoolVar(&addNoteFlags.secure, "secure", false,
 		"Mark the note as secure (end-to-end encrypted)")
+	f.StringVar(&addNoteFlags.projectURN, "project", "",
+		"Project URN to assign the note to (enables candidate detection)")
+	f.StringVar(&addNoteFlags.folderURN, "folder", "",
+		"Folder URN to assign the note to (optional, requires --project)")
 
 	// Register as both a named sub-command and the default command when
 	// the root receives a bare file argument.
@@ -180,11 +186,13 @@ func runAddNote(cmd *cobra.Command, args []string) error {
 
 	createResp, err := client.CreateNote(ctx, &pb.CreateNoteRequest{
 		Header: &pb.NoteHeader{
-			Urn:       noteURNStr,
-			Name:      noteName,
-			NoteType:  noteType,
-			CreatedAt: now,
-			UpdatedAt: now,
+			Urn:        noteURNStr,
+			Name:       noteName,
+			NoteType:   noteType,
+			ProjectUrn: addNoteFlags.projectURN,
+			FolderUrn:  addNoteFlags.folderURN,
+			CreatedAt:  now,
+			UpdatedAt:  now,
 		},
 	})
 	if err != nil {
@@ -211,7 +219,13 @@ func runAddNote(cmd *cobra.Command, args []string) error {
 		}
 
 		eventURNStr := core.NewURN(core.ObjectTypeEvent).String()
+		// Use the persisted admin owner URN from config so ExtractBursts does
+		// not skip this event via the anon guard. Fall back to anon only when
+		// the config has not been initialised yet.
 		authorURNStr := core.AnonURN().String()
+		if cfg.Admin.AdminOwnerURN != "" {
+			authorURNStr = cfg.Admin.AdminOwnerURN
+		}
 
 		_, err = client.AppendEvent(ctx, &pb.AppendEventRequest{
 			Event: &pb.Event{
@@ -244,6 +258,9 @@ func runAddNote(cmd *cobra.Command, args []string) error {
 	fmt.Printf("     urn    : %s\n", urn)
 	fmt.Printf("     type   : %s\n", typeLabel)
 	fmt.Printf("     lines  : %d\n", len(lines))
+	if addNoteFlags.projectURN != "" {
+		fmt.Printf("     project: %s\n", addNoteFlags.projectURN)
+	}
 	fmt.Printf("     server : %s\n\n", grpcAddr)
 
 	// ── Optionally delete the source file ─────────────────────────────────────
@@ -271,7 +288,13 @@ func runUpdateContent(srcPath, noteURN, content string, cfg *clientconfig.Config
 		httpAddr = "localhost" + httpAddr
 	}
 
+	// Use the persisted admin owner URN from config so burst extraction is not
+	// skipped by the anon guard in core.ExtractBursts. Fall back to anon only
+	// when the config has not been initialised yet.
 	authorURN := core.AnonURN().String()
+	if cfg.Admin.AdminOwnerURN != "" {
+		authorURN = cfg.Admin.AdminOwnerURN
+	}
 
 	body := struct {
 		Content   string `json:"content"`

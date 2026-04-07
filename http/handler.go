@@ -43,6 +43,8 @@ type Handler struct {
 	pairing        *grpcsvc.PairingServer
 	secretStore    repo.PairingSecretStore
 	relaySvc       *grpcsvc.RelayServer
+	contextSvc     *grpcsvc.ContextServer
+	linkSvc        *grpcsvc.LinkServer
 
 	log    *slog.Logger
 	mux    *http.ServeMux
@@ -67,6 +69,8 @@ func New(
 	pairingSvc *grpcsvc.PairingServer,
 	secretStore repo.PairingSecretStore,
 	relaySvc *grpcsvc.RelayServer,
+	contextSvc *grpcsvc.ContextServer,
+	linkSvc *grpcsvc.LinkServer,
 ) *Handler {
 	h := &Handler{
 		cfg:            cfg,
@@ -79,6 +83,8 @@ func New(
 		pairing:        pairingSvc,
 		secretStore:    secretStore,
 		relaySvc:       relaySvc,
+		contextSvc:     contextSvc,
+		linkSvc:        linkSvc,
 		log:            log,
 		mux:            http.NewServeMux(),
 	}
@@ -229,6 +235,23 @@ func (h *Handler) routes() {
 	if h.relaySvc != nil {
 		h.routeRelay(h.relaySvc)
 	}
+
+	// Context graph — bursts, candidates, promote/dismiss, config
+	h.mux.HandleFunc("/v1/context/stats", h.withDeviceAuthMiddleware(h.routeContextStats))
+	h.mux.HandleFunc("/v1/context/candidates", h.withDeviceAuthMiddleware(h.routeContextCandidates))
+	h.mux.HandleFunc("/v1/context/candidates/", h.withDeviceAuthMiddleware(h.routeContextCandidate))
+	h.mux.HandleFunc("/v1/context/bursts", h.withDeviceAuthMiddleware(h.routeContextBursts))
+	h.mux.HandleFunc("/v1/context/bursts/", h.withDeviceAuthMiddleware(h.routeContextBurst))
+	h.mux.HandleFunc("/v1/context/config/", h.withDeviceAuthMiddleware(h.routeContextConfig))
+
+	// Links — anchors, backlinks, external links
+	h.mux.HandleFunc("/v1/links/anchors", h.withDeviceAuthMiddleware(h.routeLinkAnchors))
+	h.mux.HandleFunc("/v1/links/anchors/", h.withDeviceAuthMiddleware(h.routeLinkAnchor))
+	h.mux.HandleFunc("/v1/links/backlinks/recent", h.withDeviceAuthMiddleware(h.handleRecentBacklinks))
+	h.mux.HandleFunc("/v1/links/backlinks", h.withDeviceAuthMiddleware(h.routeLinkBacklinks))
+	h.mux.HandleFunc("/v1/links/outbound", h.withDeviceAuthMiddleware(h.routeLinkOutbound))
+	h.mux.HandleFunc("/v1/links/referrers", h.withDeviceAuthMiddleware(h.routeLinkReferrers))
+	h.mux.HandleFunc("/v1/links/external", h.withDeviceAuthMiddleware(h.routeLinkExternal))
 }
 
 func (h *Handler) withMiddleware(next http.HandlerFunc) http.HandlerFunc {

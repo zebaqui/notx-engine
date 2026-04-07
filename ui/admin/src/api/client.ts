@@ -17,6 +17,14 @@ import type {
   ListServersResponse,
   PairingSecret,
   CACertificateResponse,
+  ContextStats,
+  ListCandidatesResponse,
+  CandidateRecord,
+  PromoteResponse,
+  ListAnchorsResponse,
+  ListBacklinksResponse,
+  ListOutboundLinksResponse,
+  ListExternalLinksResponse,
 } from "./types";
 
 // LOCAL_ADMIN_DEVICE_URN is the well-known built-in sentinel device that the
@@ -414,6 +422,129 @@ export async function pairWithServer(payload: {
   const { data } = await http.post<OutboundPairResponse>(
     "/v1/servers/outbound-pair",
     payload,
+  );
+  return data;
+}
+
+// ─── Context ──────────────────────────────────────────────────────────────────
+
+export async function fetchContextStats(
+  projectUrn?: string,
+): Promise<ContextStats> {
+  const query = new URLSearchParams();
+  if (projectUrn) query.set("project_urn", projectUrn);
+  const qs = query.toString() ? `?${query}` : "";
+  const { data } = await http.get<ContextStats>(`/v1/context/stats${qs}`);
+  return data;
+}
+
+export interface ListCandidatesParams {
+  project_urn?: string;
+  note_urn?: string;
+  status?: string;
+  min_score?: number;
+  include_bursts?: boolean;
+  page_size?: number;
+  page_token?: string;
+}
+
+export async function fetchCandidates(
+  params: ListCandidatesParams = {},
+): Promise<ListCandidatesResponse> {
+  const query = new URLSearchParams();
+  if (params.project_urn) query.set("project_urn", params.project_urn);
+  if (params.note_urn) query.set("note_urn", params.note_urn);
+  if (params.status) query.set("status", params.status);
+  if (params.min_score !== undefined)
+    query.set("min_score", String(params.min_score));
+  if (params.include_bursts) query.set("include_bursts", "true");
+  if (params.page_size) query.set("page_size", String(params.page_size));
+  if (params.page_token) query.set("page_token", params.page_token);
+  const { data } = await http.get<ListCandidatesResponse>(
+    `/v1/context/candidates?${query}`,
+  );
+  return data;
+}
+
+export async function promoteCandidate(
+  id: string,
+  payload: { label: string; direction?: string; reviewer_urn?: string },
+): Promise<PromoteResponse> {
+  const { data } = await http.post<PromoteResponse>(
+    `/v1/context/candidates/${encodeURIComponent(id)}/promote`,
+    { direction: "both", reviewer_urn: "urn:notx:usr:anon", ...payload },
+  );
+  return data;
+}
+
+export async function dismissCandidate(
+  id: string,
+  reviewerUrn?: string,
+): Promise<CandidateRecord> {
+  const { data } = await http.post<{ candidate: CandidateRecord }>(
+    `/v1/context/candidates/${encodeURIComponent(id)}/dismiss`,
+    { reviewer_urn: reviewerUrn ?? "urn:notx:usr:anon" },
+  );
+  return data.candidate;
+}
+
+// ─── Links ────────────────────────────────────────────────────────────────────
+
+export async function fetchAnchors(
+  noteUrn: string,
+): Promise<ListAnchorsResponse> {
+  const { data } = await http.get<ListAnchorsResponse>(
+    `/v1/links/anchors?note_urn=${encodeURIComponent(noteUrn)}`,
+  );
+  return data;
+}
+
+export async function fetchBacklinks(
+  targetUrn: string,
+  anchorId?: string,
+): Promise<ListBacklinksResponse> {
+  const query = new URLSearchParams({ target_urn: targetUrn });
+  if (anchorId) query.set("anchor_id", anchorId);
+  const { data } = await http.get<ListBacklinksResponse>(
+    `/v1/links/backlinks?${query}`,
+  );
+  return data;
+}
+
+export async function fetchOutboundLinks(
+  sourceUrn: string,
+): Promise<ListOutboundLinksResponse> {
+  const { data } = await http.get<ListOutboundLinksResponse>(
+    `/v1/links/outbound?source_urn=${encodeURIComponent(sourceUrn)}`,
+  );
+  return data;
+}
+
+export interface RecentBacklinksParams {
+  note_urn?: string;
+  label?: string;
+  limit?: number;
+}
+
+export async function fetchRecentBacklinks(
+  params: RecentBacklinksParams = {},
+): Promise<ListBacklinksResponse> {
+  const query = new URLSearchParams();
+  if (params.note_urn) query.set("note_urn", params.note_urn);
+  if (params.label) query.set("label", params.label);
+  if (params.limit) query.set("limit", String(params.limit));
+  const qs = query.toString() ? `?${query}` : "";
+  const { data } = await http.get<ListBacklinksResponse>(
+    `/v1/links/backlinks/recent${qs}`,
+  );
+  return data;
+}
+
+export async function fetchExternalLinks(
+  sourceUrn: string,
+): Promise<ListExternalLinksResponse> {
+  const { data } = await http.get<ListExternalLinksResponse>(
+    `/v1/links/external?source_urn=${encodeURIComponent(sourceUrn)}`,
   );
   return data;
 }

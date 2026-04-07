@@ -1,0 +1,237 @@
+syntax = "proto3";
+
+package notx.v1;
+
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/zebaqui/notx-engine/proto;notxpb";
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Shared message types
+// ─────────────────────────────────────────────────────────────────────────────
+
+// AnchorRecord is the server-side representation of a declared anchor in a note.
+// Anchors are the stable link targets that external notes reference.
+message AnchorRecord {
+  string note_urn = 1;
+  string anchor_id = 2;
+  int32 line = 3;
+  int32 char_start = 4;
+  int32 char_end = 5;
+  string preview = 6;
+  string status = 7; // "ok" | "broken" | "deprecated"
+  google.protobuf.Timestamp updated_at = 8;
+}
+
+// BacklinkRecord is a single inbound link entry in the backlink index.
+// It records that source_urn links into target_urn at target_anchor.
+message BacklinkRecord {
+  string source_urn = 1;
+  string target_urn = 2;
+  string target_anchor = 3;
+  string label = 4;
+  google.protobuf.Timestamp created_at = 5;
+}
+
+// ExternalLinkRecord is an outbound link from a note to an external URI.
+message ExternalLinkRecord {
+  string source_urn = 1;
+  string uri = 2;
+  string label = 3;
+  google.protobuf.Timestamp created_at = 4;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// LinkService
+// ─────────────────────────────────────────────────────────────────────────────
+
+service LinkService {
+  // ── Anchors ──────────────────────────────────────────────────────────────
+
+  // UpsertAnchor inserts or updates an anchor in the server-side index.
+  rpc UpsertAnchor(UpsertAnchorRequest) returns (UpsertAnchorResponse);
+
+  // DeleteAnchor removes an anchor. When tombstone=true the anchor is marked
+  // deprecated instead of deleted, preserving referrer awareness.
+  rpc DeleteAnchor(DeleteAnchorRequest) returns (DeleteAnchorResponse);
+
+  // GetAnchor retrieves a single anchor by note URN and anchor ID.
+  rpc GetAnchor(GetAnchorRequest) returns (GetAnchorResponse);
+
+  // ListAnchors returns all anchors declared in a note, ordered by line ASC.
+  rpc ListAnchors(ListAnchorsRequest) returns (ListAnchorsResponse);
+
+  // ── Backlinks ─────────────────────────────────────────────────────────────
+
+  // UpsertBacklink inserts or updates a backlink record.
+  rpc UpsertBacklink(UpsertBacklinkRequest) returns (UpsertBacklinkResponse);
+
+  // DeleteBacklink removes a specific backlink record.
+  rpc DeleteBacklink(DeleteBacklinkRequest) returns (DeleteBacklinkResponse);
+
+  // ListBacklinks returns inbound backlinks for a note (optionally filtered by anchor).
+  rpc ListBacklinks(ListBacklinksRequest) returns (ListBacklinksResponse);
+
+  // ListOutboundLinks returns all outbound backlink records from a source note.
+  rpc ListOutboundLinks(ListOutboundLinksRequest) returns (ListOutboundLinksResponse);
+
+  // GetReferrers returns the URNs of all notes that link to a specific anchor.
+  rpc GetReferrers(GetReferrersRequest) returns (GetReferrersResponse);
+
+  // RecentBacklinks returns the most recently created backlinks across all notes,
+  // with optional filtering. Used for browse/admin views.
+  rpc RecentBacklinks(RecentBacklinksRequest) returns (RecentBacklinksResponse);
+
+  // ── External links ────────────────────────────────────────────────────────
+
+  // UpsertExternalLink inserts or updates an external link record.
+  rpc UpsertExternalLink(UpsertExternalLinkRequest) returns (UpsertExternalLinkResponse);
+
+  // DeleteExternalLink removes an external link record.
+  rpc DeleteExternalLink(DeleteExternalLinkRequest) returns (DeleteExternalLinkResponse);
+
+  // ListExternalLinks returns all external links from a source note.
+  rpc ListExternalLinks(ListExternalLinksRequest) returns (ListExternalLinksResponse);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Anchor request/response messages
+// ─────────────────────────────────────────────────────────────────────────────
+
+message UpsertAnchorRequest {
+  string note_urn = 1;
+  string anchor_id = 2;
+  int32 line = 3;
+  int32 char_start = 4;
+  int32 char_end = 5;
+  string preview = 6;
+  string status = 7; // defaults to "ok" when empty
+}
+
+message UpsertAnchorResponse {
+  AnchorRecord anchor = 1;
+}
+
+message DeleteAnchorRequest {
+  string note_urn = 1;
+  string anchor_id = 2;
+  bool tombstone = 3; // when true: mark deprecated instead of deleting
+}
+
+message DeleteAnchorResponse {
+  bool deleted = 1;
+}
+
+message GetAnchorRequest {
+  string note_urn = 1;
+  string anchor_id = 2;
+}
+
+message GetAnchorResponse {
+  AnchorRecord anchor = 1;
+}
+
+message ListAnchorsRequest {
+  string note_urn = 1;
+}
+
+message ListAnchorsResponse {
+  repeated AnchorRecord anchors = 1;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Backlink request/response messages
+// ─────────────────────────────────────────────────────────────────────────────
+
+message UpsertBacklinkRequest {
+  string source_urn = 1;
+  string target_urn = 2;
+  string target_anchor = 3;
+  string label = 4;
+}
+
+message UpsertBacklinkResponse {
+  BacklinkRecord backlink = 1;
+}
+
+message DeleteBacklinkRequest {
+  string source_urn = 1;
+  string target_urn = 2;
+  string target_anchor = 3;
+}
+
+message DeleteBacklinkResponse {
+  bool deleted = 1;
+}
+
+message ListBacklinksRequest {
+  string target_urn = 1; // required
+  string anchor_id = 2; // optional filter
+}
+
+message ListBacklinksResponse {
+  repeated BacklinkRecord backlinks = 1;
+}
+
+message ListOutboundLinksRequest {
+  string source_urn = 1; // required
+}
+
+message ListOutboundLinksResponse {
+  repeated BacklinkRecord links = 1;
+}
+
+message GetReferrersRequest {
+  string target_urn = 1;
+  string anchor_id = 2;
+}
+
+message GetReferrersResponse {
+  repeated string source_urns = 1;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// External link request/response messages
+// ─────────────────────────────────────────────────────────────────────────────
+
+message UpsertExternalLinkRequest {
+  string source_urn = 1;
+  string uri = 2;
+  string label = 3;
+}
+
+message UpsertExternalLinkResponse {
+  ExternalLinkRecord link = 1;
+}
+
+message DeleteExternalLinkRequest {
+  string source_urn = 1;
+  string uri = 2;
+}
+
+message DeleteExternalLinkResponse {
+  bool deleted = 1;
+}
+
+message ListExternalLinksRequest {
+  string source_urn = 1; // required
+}
+
+message ListExternalLinksResponse {
+  repeated ExternalLinkRecord links = 1;
+}
+
+message RecentBacklinksRequest {
+  // Optional. Filter where source_urn OR target_urn matches this value.
+  string note_urn = 1;
+
+  // Optional. Substring filter on label (case-insensitive).
+  string label = 2;
+
+  // Max results to return. 0 = server default (50). Max 200.
+  int32 limit = 3;
+}
+
+message RecentBacklinksResponse {
+  repeated BacklinkRecord backlinks = 1;
+}

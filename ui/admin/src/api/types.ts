@@ -180,3 +180,112 @@ export interface PairingSecret {
 export interface CACertificateResponse {
   ca_certificate: string; // PEM-encoded CA cert
 }
+
+// ─── Context Graph ────────────────────────────────────────────────────────────
+
+export interface ContextStats {
+  bursts_total: number;
+  bursts_today: number;
+  candidates_pending: number;
+  candidates_pending_unenriched: number;
+  candidates_promoted: number;
+  candidates_dismissed: number;
+  oldest_pending_age_days: number;
+}
+
+export interface BurstRecord {
+  id: string;
+  note_urn: string;
+  project_urn?: string;
+  folder_urn?: string;
+  author_urn?: string;
+  sequence: number;
+  line_start: number;
+  line_end: number;
+  text: string;
+  tokens?: string;
+  truncated?: boolean;
+  created_at?: string;
+}
+
+export interface CandidateRecord {
+  id: string;
+  burst_a_id: string;
+  burst_b_id: string;
+  note_urn_a: string;
+  note_urn_b: string;
+  project_urn?: string;
+  overlap_score: number;
+  bm25_score: number;
+  status: "pending" | "promoted" | "dismissed" | "expired";
+  created_at?: string;
+  reviewed_at?: string;
+  reviewed_by?: string;
+  promoted_link?: string;
+  burst_a?: BurstRecord;
+  burst_b?: BurstRecord;
+}
+
+export interface ListCandidatesResponse {
+  candidates: CandidateRecord[];
+  next_page_token?: string;
+}
+
+export interface PromoteResponse {
+  anchor_a_id: string;
+  anchor_b_id: string;
+  link_a_to_b?: string;
+  link_b_to_a?: string;
+  candidate?: CandidateRecord;
+}
+
+export interface ProjectContextConfig {
+  project_urn: string;
+  burst_max_per_note_per_day: number;
+  burst_max_per_project_per_day: number;
+  updated_at?: string;
+}
+
+// ─── Links ────────────────────────────────────────────────────────────────────
+
+export interface AnchorRecord {
+  note_urn: string;
+  anchor_id: string;
+  line: number;
+  char_start: number;
+  char_end?: number;
+  preview?: string;
+  status: "ok" | "broken" | "deprecated";
+  updated_at?: string;
+}
+
+export interface BacklinkRecord {
+  source_urn: string;
+  target_urn: string;
+  target_anchor: string;
+  label?: string;
+  created_at?: string;
+}
+
+export interface ExternalLinkRecord {
+  source_urn: string;
+  uri: string;
+  label?: string;
+  created_at?: string;
+}
+
+export interface ListAnchorsResponse {
+  anchors: AnchorRecord[];
+}
+
+export interface ListBacklinksResponse {
+  backlinks: BacklinkRecord[];
+}
+
+export interface ListOutboundLinksResponse {
+  links: BacklinkRecord[];
+}
+
+export interface ListExternalLinksResponse {
+  links: ExternalLinkRecord[];
+}

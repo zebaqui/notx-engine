@@ -15,6 +15,8 @@ import Shell from "./Shell";
 import OverviewPage from "./pages/OverviewPage";
 import NotesPage from "./pages/NotesPage";
 import ProjectsPage from "./pages/ProjectsPage";
+import ContextPage from "./pages/ContextPage";
+import LinksPage from "./pages/LinksPage";
 import DevicesPage from "./pages/DevicesPage";
 import UsersPage from "./pages/UsersPage";
 import ConfigPage from "./pages/ConfigPage";
@@ -70,6 +72,18 @@ const projectsRoute = createRoute({
   component: ProjectsPage,
 });
 
+const contextRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/context",
+  component: ContextPage,
+});
+
+const linksRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/links",
+  component: LinksPage,
+});
+
 const devicesRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/devices",
@@ -99,6 +113,8 @@ const routeTree = rootRoute.addChildren([
   overviewRoute,
   notesRoute,
   projectsRoute,
+  contextRoute,
+  linksRoute,
   devicesRoute,
   serversRoute,
   usersRoute,

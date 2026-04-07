@@ -116,6 +116,17 @@ type Conn struct {
 	cc *grpc.ClientConn
 }
 
+// WrapConn wraps an existing *grpc.ClientConn in a typed Conn. This is useful
+// in tests where the caller dials manually (e.g. with insecure credentials via
+// grpc.NewClient) and wants access to the typed service accessors without going
+// through the Dial helper.
+//
+// The caller retains ownership of cc and must still call Conn.Close() (which
+// delegates to cc.Close()) when done.
+func WrapConn(cc *grpc.ClientConn) *Conn {
+	return &Conn{cc: cc}
+}
+
 // Close tears down the underlying connection and releases all resources.
 // It implements io.Closer.
 func (c *Conn) Close() error {
@@ -151,9 +162,19 @@ func (c *Conn) Folders() pb.FolderServiceClient {
 	return pb.NewFolderServiceClient(c.cc)
 }
 
+// Context returns a client for ContextService.
+func (c *Conn) Context() pb.ContextServiceClient {
+	return pb.NewContextServiceClient(c.cc)
+}
+
 // Pairing returns a client for ServerPairingService.
 func (c *Conn) Pairing() pb.ServerPairingServiceClient {
 	return pb.NewServerPairingServiceClient(c.cc)
+}
+
+// Links returns a client for LinkService.
+func (c *Conn) Links() pb.LinkServiceClient {
+	return pb.NewLinkServiceClient(c.cc)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

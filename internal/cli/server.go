@@ -22,7 +22,7 @@ import (
 	"github.com/zebaqui/notx-engine/internal/clientconfig"
 	pairingsecret "github.com/zebaqui/notx-engine/internal/pairing"
 	"github.com/zebaqui/notx-engine/internal/server"
-	"github.com/zebaqui/notx-engine/repo/file"
+	"github.com/zebaqui/notx-engine/repo/sqlite"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -375,9 +375,9 @@ func runDaemonWorker(cmd *cobra.Command, args []string) error {
 		"device_auto_approve", cfg.DeviceOnboarding.AutoApprove,
 	)
 
-	provider, err := file.New(cfg.DataDir)
+	provider, err := sqlite.New(cfg.DataDir, nil)
 	if err != nil {
-		return fmt.Errorf("open file provider at %q: %w", cfg.DataDir, err)
+		return fmt.Errorf("open sqlite provider at %q: %w", cfg.DataDir, err)
 	}
 	defer func() {
 		if err := provider.Close(); err != nil {
@@ -385,7 +385,7 @@ func runDaemonWorker(cmd *cobra.Command, args []string) error {
 		}
 	}()
 
-	srv, err := server.New(cfg, provider, provider, provider, provider, provider, provider, log)
+	srv, err := server.New(cfg, provider, provider, provider, provider, provider, provider, provider, provider, log)
 	if err != nil {
 		return fmt.Errorf("build server: %w", err)
 	}

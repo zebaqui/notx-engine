@@ -21,6 +21,7 @@ import (
 type NoteServer struct {
 	pb.UnimplementedNoteServiceServer
 	repo        repo.NoteRepository
+	contextRepo repo.ContextRepository // may be nil when context layer is disabled
 	defaultPage int
 	maxPage     int
 }
@@ -34,6 +35,14 @@ func NewNoteServer(r repo.NoteRepository, defaultPage, maxPage int) *NoteServer 
 		maxPage = 200
 	}
 	return &NoteServer{repo: r, defaultPage: defaultPage, maxPage: maxPage}
+}
+
+// NewNoteServerWithContext is like NewNoteServer but also wires the context
+// repository so UpdateNote can trigger IndexNoteIntoProject on project changes.
+func NewNoteServerWithContext(r repo.NoteRepository, contextRepo repo.ContextRepository, defaultPage, maxPage int) *NoteServer {
+	s := NewNoteServer(r, defaultPage, maxPage)
+	s.contextRepo = contextRepo
+	return s
 }
 
 // ── GetNote ──────────────────────────────────────────────────────────────────
@@ -412,6 +421,12 @@ func (s *NoteServer) UpdateNote(ctx context.Context, req *pb.UpdateNoteRequest) 
 		return nil, repoErrToStatus(err, req.Urn)
 	}
 
+	// Capture the project URN before any mutations so we can detect changes.
+	oldProjectURN := ""
+	if note.ProjectURN != nil {
+		oldProjectURN = note.ProjectURN.String()
+	}
+
 	if req.Header != nil {
 		if req.Header.Name != "" {
 			note.Name = req.Header.Name
@@ -448,6 +463,27 @@ func (s *NoteServer) UpdateNote(ctx context.Context, req *pb.UpdateNoteRequest) 
 
 	if err := s.repo.Update(ctx, note); err != nil {
 		return nil, repoErrToStatus(err, req.Urn)
+	}
+
+	// Determine the final project URN after the update.
+	newProjectURN := ""
+	if note.ProjectURN != nil {
+		newProjectURN = note.ProjectURN.String()
+	}
+
+	// If the project assignment changed and the context repo is wired,
+	// backfill bursts into the new project asynchronously.
+	if s.contextRepo != nil && newProjectURN != "" && newProjectURN != oldProjectURN {
+		go func(noteURN, projectURN string) {
+			bgCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer cancel()
+			n, err := s.contextRepo.IndexNoteIntoProject(bgCtx, noteURN, projectURN)
+			if err != nil {
+				// Non-fatal — log but don't surface to caller
+				_ = err
+			}
+			_ = n
+		}(req.Urn, newProjectURN)
 	}
 
 	return &pb.UpdateNoteResponse{Header: coreNoteToHeader(note)}, nil
