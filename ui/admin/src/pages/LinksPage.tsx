@@ -1,6 +1,11 @@
 import { useState, useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { AlertCircle, Link2, ExternalLink, RefreshCw, X } from "lucide-react";
+import { HugeiconsIcon } from "@hugeicons/react";
+import {
+  Link01Icon,
+  Refresh01Icon,
+  AlertCircleIcon,
+} from "@hugeicons/core-free-icons";
 import {
   fetchAnchors,
   fetchExternalLinks,
@@ -130,7 +135,12 @@ function AnchorsTab() {
       {/* States */}
       {!loadedUrn && (
         <div className="empty-state">
-          <Link2 size={26} style={{ opacity: 0.3, marginBottom: 8 }} />
+          <HugeiconsIcon
+            icon={Link01Icon}
+            size={26}
+            strokeWidth={1.5}
+            style={{ opacity: 0.3, marginBottom: 8 }}
+          />
           Enter a note URN to inspect its anchors
         </div>
       )}
@@ -143,7 +153,7 @@ function AnchorsTab() {
 
       {loadedUrn && query.isError && (
         <div className="error-banner">
-          <AlertCircle size={15} />
+          <HugeiconsIcon icon={AlertCircleIcon} size={15} strokeWidth={1.5} />
           {query.error instanceof Error
             ? query.error.message
             : "Failed to load anchors"}
@@ -282,7 +292,7 @@ function BacklinksTab() {
         />
         {hasFilters && (
           <button className="btn btn-ghost" onClick={clearFilters}>
-            <X size={13} /> Clear
+            <span style={{ fontSize: 14 }}>×</span> Clear
           </button>
         )}
         <button
@@ -290,8 +300,10 @@ function BacklinksTab() {
           onClick={() => query.refetch()}
           disabled={query.isFetching}
         >
-          <RefreshCw
+          <HugeiconsIcon
+            icon={Refresh01Icon}
             size={13}
+            strokeWidth={1.5}
             className={query.isFetching ? "spin-icon" : ""}
           />
           Refresh
@@ -324,7 +336,7 @@ function BacklinksTab() {
       {/* Error */}
       {query.isError && (
         <div className="error-banner">
-          <AlertCircle size={15} />
+          <HugeiconsIcon icon={AlertCircleIcon} size={15} strokeWidth={1.5} />
           {query.error instanceof Error
             ? query.error.message
             : "Failed to load backlinks"}
@@ -433,7 +445,12 @@ function ExternalLinksTab() {
       {/* States */}
       {!loadedUrn && (
         <div className="empty-state">
-          <ExternalLink size={26} style={{ opacity: 0.3, marginBottom: 8 }} />
+          <HugeiconsIcon
+            icon={Link01Icon}
+            size={26}
+            strokeWidth={1.5}
+            style={{ opacity: 0.3, marginBottom: 8 }}
+          />
           Enter a note URN to inspect its external links
         </div>
       )}
@@ -446,7 +463,7 @@ function ExternalLinksTab() {
 
       {loadedUrn && query.isError && (
         <div className="error-banner">
-          <AlertCircle size={15} />
+          <HugeiconsIcon icon={AlertCircleIcon} size={15} strokeWidth={1.5} />
           {query.error instanceof Error
             ? query.error.message
             : "Failed to load external links"}

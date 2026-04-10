@@ -8,6 +8,8 @@ import (
 	"time"
 )
 
+const scorerReconcileInterval = 2 * time.Minute
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Scorer configuration
 // ─────────────────────────────────────────────────────────────────────────────
@@ -15,7 +17,7 @@ import (
 // ScorerConfig holds configuration for the background BM25 scorer.
 type ScorerConfig struct {
 	// MinOverlapToScore is the overlap_score threshold below which candidates
-	// are not enriched. Default: 0.20
+	// are not enriched. Must be <= the insertion OverlapThreshold (default: 0.12).
 	MinOverlapToScore float64
 	// BufferSize is the scorerCh channel capacity. Default: 512
 	BufferSize int
@@ -24,7 +26,7 @@ type ScorerConfig struct {
 // DefaultScorerConfig returns the spec-recommended scorer defaults.
 func DefaultScorerConfig() ScorerConfig {
 	return ScorerConfig{
-		MinOverlapToScore: 0.20,
+		MinOverlapToScore: 0.12,
 		BufferSize:        512,
 	}
 }
@@ -50,7 +52,7 @@ func StartScorer(
 	cfg ScorerConfig,
 ) chan<- string {
 	ch := make(chan string, cfg.BufferSize)
-	go runScorer(ctx, db, writeFn, ch, cfg)
+	go runScorer(ctx, db, writeFn, ch, ch, cfg)
 	return ch
 }
 
@@ -63,8 +65,12 @@ func runScorer(
 	db *sql.DB,
 	writeFn func(writeOp) error,
 	ch <-chan string,
+	sendCh chan<- string,
 	cfg ScorerConfig,
 ) {
+	reconcileTicker := time.NewTicker(scorerReconcileInterval)
+	defer reconcileTicker.Stop()
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -76,6 +82,12 @@ func runScorer(
 			if err := scoreCandidate(ctx, db, writeFn, id, cfg); err != nil {
 				// Log WARN and continue — never block on a single failure.
 				fmt.Printf("scorer: WARN: failed to score candidate %s: %v\n", id, err)
+			}
+		case <-reconcileTicker.C:
+			// Re-enqueue any candidates still at bm25_score=0 that the scorer
+			// missed (channel overflow, server restart, or threshold mismatch).
+			if err := ReconcileUnenrichedCandidates(ctx, db, sendCh); err != nil {
+				fmt.Printf("scorer: WARN: reconcile failed: %v\n", err)
 			}
 		}
 	}

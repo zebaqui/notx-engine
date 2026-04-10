@@ -369,6 +369,8 @@ func runDaemonWorker(cmd *cobra.Command, args []string) error {
 		"http_addr", cfg.HTTPAddr(),
 		"grpc", cfg.EnableGRPC,
 		"grpc_addr", cfg.GRPCAddr(),
+		"authority_mode", cfg.Pairing.Enabled,
+		"pairing_bootstrap_addr", cfg.PairingBootstrapAddr(),
 		"data_dir", cfg.DataDir,
 		"tls", cfg.TLSEnabled(),
 		"mtls", cfg.MTLSEnabled(),

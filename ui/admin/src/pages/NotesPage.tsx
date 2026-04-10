@@ -1,15 +1,13 @@
 import { useState, useEffect, useRef } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { HugeiconsIcon } from "@hugeicons/react";
 import {
-  Search,
-  RefreshCw,
-  AlertCircle,
-  FileText,
-  Lock,
-  ChevronLeft,
-  ChevronRight,
-  X,
-} from "lucide-react";
+  Search01Icon,
+  Refresh01Icon,
+  AlertCircleIcon,
+  Note01Icon,
+  LockIcon,
+} from "@hugeicons/core-free-icons";
 import { fetchNotes, searchNotes } from "../api/client";
 import type { NoteHeader } from "../api/types";
 import NoteDrawer from "../components/NoteDrawer";
@@ -143,7 +141,12 @@ export default function NotesPage() {
             onClick={handleRefresh}
             disabled={isLoading}
           >
-            <RefreshCw size={14} />
+            <HugeiconsIcon
+              icon={Refresh01Icon}
+              size={13}
+              strokeWidth={1.5}
+              className={isLoading ? "spin-icon" : ""}
+            />
             Refresh
           </button>
         </div>
@@ -158,8 +161,10 @@ export default function NotesPage() {
             alignItems: "center",
           }}
         >
-          <Search
-            size={14}
+          <HugeiconsIcon
+            icon={Search01Icon}
+            size={13}
+            strokeWidth={1.5}
             style={{
               position: "absolute",
               left: 10,
@@ -190,7 +195,7 @@ export default function NotesPage() {
                 padding: 2,
               }}
             >
-              <X size={12} />
+              <span style={{ fontSize: 14, lineHeight: 1 }}>×</span>
             </button>
           )}
         </div>
@@ -222,7 +227,7 @@ export default function NotesPage() {
       {/* ── Error ─────────────────────────────────────────────────────────── */}
       {isError && (
         <div className="error-banner">
-          <AlertCircle size={15} />
+          <HugeiconsIcon icon={AlertCircleIcon} size={14} strokeWidth={1.5} />
           {isSearching
             ? "Search failed. Make sure the server is running."
             : "Could not load notes. Make sure the server is running on :4060."}
@@ -238,7 +243,12 @@ export default function NotesPage() {
           </div>
         ) : notes.length === 0 ? (
           <div className="empty-state">
-            <FileText size={28} style={{ opacity: 0.3 }} />
+            <HugeiconsIcon
+              icon={Note01Icon}
+              size={26}
+              strokeWidth={1.5}
+              style={{ opacity: 0.3 }}
+            />
             <span>{isSearching ? "No results found." : "No notes found."}</span>
             {!includeDeleted && (
               <span style={{ fontSize: 12 }}>
@@ -281,7 +291,7 @@ export default function NotesPage() {
             disabled={!hasPrevPage}
             style={{ padding: "6px 10px" }}
           >
-            <ChevronLeft size={14} />
+            <span style={{ fontSize: 15, lineHeight: 1 }}>‹</span>
             Prev
           </button>
           <button
@@ -291,7 +301,7 @@ export default function NotesPage() {
             style={{ padding: "6px 10px" }}
           >
             Next
-            <ChevronRight size={14} />
+            <span style={{ fontSize: 15, lineHeight: 1 }}>›</span>
           </button>
         </div>
       )}
@@ -316,10 +326,17 @@ function NoteRow({ note, onClick }: { note: NoteHeader; onClick: () => void }) {
       <td className="name-cell" style={{ paddingLeft: 20 }}>
         <span style={{ display: "flex", alignItems: "center", gap: 7 }}>
           {note.note_type === "secure" ? (
-            <Lock size={12} style={{ color: "var(--yellow)", flexShrink: 0 }} />
-          ) : (
-            <FileText
+            <HugeiconsIcon
+              icon={LockIcon}
               size={12}
+              strokeWidth={1.5}
+              style={{ color: "var(--yellow)", flexShrink: 0 }}
+            />
+          ) : (
+            <HugeiconsIcon
+              icon={Note01Icon}
+              size={12}
+              strokeWidth={1.5}
               style={{ color: "var(--accent)", flexShrink: 0 }}
             />
           )}

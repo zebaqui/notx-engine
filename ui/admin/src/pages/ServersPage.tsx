@@ -1,17 +1,18 @@
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { HugeiconsIcon } from "@hugeicons/react";
 import {
-  Server,
-  RefreshCw,
-  Key,
-  Trash2,
-  Copy,
-  AlertCircle,
-  Shield,
-  CheckCircle2,
-  Clock,
-  Link2,
-} from "lucide-react";
+  ServerStack01Icon,
+  Refresh01Icon,
+  AlertCircleIcon,
+  Link01Icon,
+  ShieldUserIcon,
+  Delete01Icon,
+  Copy01Icon,
+  CheckmarkCircle01Icon,
+  LockIcon,
+  Clock01Icon,
+} from "@hugeicons/core-free-icons";
 import {
   fetchServers,
   revokeServer,
@@ -142,7 +143,12 @@ function ConfirmRevokeModal({
     >
       <div style={boxStyle}>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <Trash2 size={16} style={{ color: "var(--red)", flexShrink: 0 }} />
+          <HugeiconsIcon
+            icon={Delete01Icon}
+            size={16}
+            strokeWidth={1.5}
+            style={{ color: "var(--red)", flexShrink: 0 }}
+          />
           <span
             style={{
               fontWeight: 700,
@@ -216,7 +222,7 @@ function ConfirmRevokeModal({
             {isPending ? (
               <div className="spinner" style={{ width: 14, height: 14 }} />
             ) : (
-              <Trash2 size={14} />
+              <HugeiconsIcon icon={Delete01Icon} size={14} strokeWidth={1.5} />
             )}
             Revoke
           </button>
@@ -297,7 +303,12 @@ function GenerateSecretModal({ onClose }: { onClose: () => void }) {
       <div style={boxStyle}>
         {/* Header */}
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <Key size={16} style={{ color: "var(--accent)", flexShrink: 0 }} />
+          <HugeiconsIcon
+            icon={LockIcon}
+            size={16}
+            strokeWidth={1.5}
+            style={{ color: "var(--accent)", flexShrink: 0 }}
+          />
           <span
             style={{
               fontWeight: 700,
@@ -323,7 +334,12 @@ function GenerateSecretModal({ onClose }: { onClose: () => void }) {
             className="error-banner"
             style={{ display: "flex", alignItems: "center", gap: 8 }}
           >
-            <AlertCircle size={14} style={{ flexShrink: 0 }} />
+            <HugeiconsIcon
+              icon={AlertCircleIcon}
+              size={14}
+              strokeWidth={1.5}
+              style={{ flexShrink: 0 }}
+            />
             {error}
           </div>
         )}
@@ -375,7 +391,7 @@ function GenerateSecretModal({ onClose }: { onClose: () => void }) {
                 {createMut.isPending ? (
                   <div className="spinner" style={{ width: 14, height: 14 }} />
                 ) : (
-                  <Key size={14} />
+                  <HugeiconsIcon icon={LockIcon} size={14} strokeWidth={1.5} />
                 )}
                 Generate
               </button>
@@ -398,8 +414,10 @@ function GenerateSecretModal({ onClose }: { onClose: () => void }) {
                 gap: 10,
               }}
             >
-              <AlertCircle
+              <HugeiconsIcon
+                icon={AlertCircleIcon}
                 size={15}
+                strokeWidth={1.5}
                 style={{
                   color: "var(--yellow, #ca8a04)",
                   flexShrink: 0,
@@ -488,7 +506,19 @@ function GenerateSecretModal({ onClose }: { onClose: () => void }) {
                   }}
                   title="Copy secret to clipboard"
                 >
-                  {copied ? <CheckCircle2 size={14} /> : <Copy size={14} />}
+                  {copied ? (
+                    <HugeiconsIcon
+                      icon={CheckmarkCircle01Icon}
+                      size={14}
+                      strokeWidth={1.5}
+                    />
+                  ) : (
+                    <HugeiconsIcon
+                      icon={Copy01Icon}
+                      size={14}
+                      strokeWidth={1.5}
+                    />
+                  )}
                   {copied ? "Copied!" : "Copy"}
                 </button>
               </div>
@@ -578,8 +608,10 @@ function PairWithServerModal({ onClose }: { onClose: () => void }) {
         {/* Header */}
         <div>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <Link2
+            <HugeiconsIcon
+              icon={Link01Icon}
               size={16}
+              strokeWidth={1.5}
               style={{ color: "var(--accent)", flexShrink: 0 }}
             />
             <span
@@ -620,8 +652,10 @@ function PairWithServerModal({ onClose }: { onClose: () => void }) {
                 gap: 10,
               }}
             >
-              <CheckCircle2
+              <HugeiconsIcon
+                icon={CheckmarkCircle01Icon}
                 size={16}
+                strokeWidth={1.5}
                 style={{ color: "#22c55e", flexShrink: 0, marginTop: 1 }}
               />
               <div>
@@ -726,8 +760,10 @@ function PairWithServerModal({ onClose }: { onClose: () => void }) {
                   color: "var(--red)",
                 }}
               >
-                <AlertCircle
+                <HugeiconsIcon
+                  icon={AlertCircleIcon}
                   size={14}
+                  strokeWidth={1.5}
                   style={{ flexShrink: 0, marginTop: 1 }}
                 />
                 {error}
@@ -760,7 +796,11 @@ function PairWithServerModal({ onClose }: { onClose: () => void }) {
                   </>
                 ) : (
                   <>
-                    <Link2 size={13} />
+                    <HugeiconsIcon
+                      icon={Link01Icon}
+                      size={13}
+                      strokeWidth={1.5}
+                    />
                     Pair
                   </>
                 )}
@@ -804,7 +844,12 @@ function CACertPanel() {
         }}
       >
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <Shield size={15} style={{ color: "var(--accent)", flexShrink: 0 }} />
+          <HugeiconsIcon
+            icon={ShieldUserIcon}
+            size={15}
+            strokeWidth={1.5}
+            style={{ color: "var(--accent)", flexShrink: 0 }}
+          />
           <span className="card-title" style={{ marginBottom: 0 }}>
             CA Certificate
           </span>
@@ -820,7 +865,15 @@ function CACertPanel() {
             }}
             onClick={handleCopy}
           >
-            {copied ? <CheckCircle2 size={13} /> : <Copy size={13} />}
+            {copied ? (
+              <HugeiconsIcon
+                icon={CheckmarkCircle01Icon}
+                size={13}
+                strokeWidth={1.5}
+              />
+            ) : (
+              <HugeiconsIcon icon={Copy01Icon} size={13} strokeWidth={1.5} />
+            )}
             {copied ? "Copied!" : "Copy PEM"}
           </button>
         )}
@@ -861,7 +914,12 @@ function CACertPanel() {
           className="error-banner"
           style={{ display: "flex", alignItems: "center", gap: 8 }}
         >
-          <AlertCircle size={14} style={{ flexShrink: 0 }} />
+          <HugeiconsIcon
+            icon={AlertCircleIcon}
+            size={14}
+            strokeWidth={1.5}
+            style={{ flexShrink: 0 }}
+          />
           Failed to load CA certificate — {(caQuery.error as Error).message}
         </div>
       )}
@@ -938,7 +996,12 @@ export default function ServersPage() {
             className="section-title"
             style={{ display: "flex", alignItems: "center", gap: 8 }}
           >
-            <Server size={18} style={{ color: "var(--accent)" }} />
+            <HugeiconsIcon
+              icon={ServerStack01Icon}
+              size={18}
+              strokeWidth={1.5}
+              style={{ color: "var(--accent)" }}
+            />
             Peer Servers
           </div>
           <div className="section-sub">
@@ -951,7 +1014,7 @@ export default function ServersPage() {
             onClick={() => setShowPairWithServer(true)}
             disabled={isPairingOff}
           >
-            <Link2 size={14} />
+            <HugeiconsIcon icon={Link01Icon} size={14} strokeWidth={1.5} />
             Pair with Server
           </button>
           <button
@@ -959,7 +1022,7 @@ export default function ServersPage() {
             onClick={() => setShowGenerateSecret(true)}
             disabled={isPairingOff}
           >
-            <Key size={14} />
+            <HugeiconsIcon icon={LockIcon} size={14} strokeWidth={1.5} />
             Generate Secret
           </button>
           <button
@@ -967,8 +1030,10 @@ export default function ServersPage() {
             onClick={() => qc.invalidateQueries({ queryKey: ["servers"] })}
             disabled={serversQuery.isFetching}
           >
-            <RefreshCw
+            <HugeiconsIcon
+              icon={Refresh01Icon}
               size={14}
+              strokeWidth={1.5}
               className={serversQuery.isFetching ? "spin-icon" : ""}
             />
             Refresh
@@ -989,8 +1054,10 @@ export default function ServersPage() {
             gap: 14,
           }}
         >
-          <Shield
+          <HugeiconsIcon
+            icon={ShieldUserIcon}
             size={20}
+            strokeWidth={1.5}
             style={{ color: "var(--text-muted)", flexShrink: 0 }}
           />
           <div>
@@ -1015,7 +1082,7 @@ export default function ServersPage() {
       {/* ── Generic error banner ──────────────────────────────────────────── */}
       {serversQuery.isError && !isPairingOff && (
         <div className="error-banner">
-          <AlertCircle size={15} />
+          <HugeiconsIcon icon={AlertCircleIcon} size={15} strokeWidth={1.5} />
           Failed to load servers — {(serversQuery.error as Error).message}
         </div>
       )}
@@ -1074,7 +1141,11 @@ export default function ServersPage() {
             onClick={() => setIncludeRevoked((v) => !v)}
           >
             {includeRevoked ? (
-              <CheckCircle2 size={13} />
+              <HugeiconsIcon
+                icon={CheckmarkCircle01Icon}
+                size={13}
+                strokeWidth={1.5}
+              />
             ) : (
               <span
                 style={{
@@ -1104,7 +1175,12 @@ export default function ServersPage() {
             <div className="card" style={{ overflow: "hidden", padding: 0 }}>
               {servers.length === 0 ? (
                 <div className="empty-state" style={{ padding: "56px 0" }}>
-                  <Server size={28} style={{ opacity: 0.3 }} />
+                  <HugeiconsIcon
+                    icon={ServerStack01Icon}
+                    size={28}
+                    strokeWidth={1.5}
+                    style={{ opacity: 0.3 }}
+                  />
                   <div style={{ marginTop: 8 }}>
                     No peer servers registered yet.
                   </div>
@@ -1185,8 +1261,10 @@ export default function ServersPage() {
                               gap: 8,
                             }}
                           >
-                            <Server
+                            <HugeiconsIcon
+                              icon={ServerStack01Icon}
                               size={14}
+                              strokeWidth={1.5}
                               style={{
                                 color: s.revoked
                                   ? "var(--text-muted)"
@@ -1260,7 +1338,12 @@ export default function ServersPage() {
                               color: "var(--text-secondary)",
                             }}
                           >
-                            <Clock size={11} style={{ opacity: 0.5 }} />
+                            <HugeiconsIcon
+                              icon={Clock01Icon}
+                              size={11}
+                              strokeWidth={1.5}
+                              style={{ opacity: 0.5 }}
+                            />
                             {fmtDate(s.registered_at)}
                           </div>
                         </td>
@@ -1319,7 +1402,11 @@ export default function ServersPage() {
                                   style={{ width: 11, height: 11 }}
                                 />
                               ) : (
-                                <Trash2 size={12} />
+                                <HugeiconsIcon
+                                  icon={Delete01Icon}
+                                  size={12}
+                                  strokeWidth={1.5}
+                                />
                               )}
                               Revoke
                             </button>

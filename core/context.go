@@ -26,11 +26,8 @@ type LineRange struct {
 type BurstConfig struct {
 	WindowLines           int     // ±N context lines around each changed line (default: 2)
 	ChunkSize             int     // max lines per window before splitting (default: 20)
-	MaxWindows            int     // max sub-windows produced by one event (default: 10)
 	SkipWindowSeconds     int     // look-back window for skip check in seconds (default: 300)
 	SkipThreshold         float64 // Jaccard threshold to trigger consecutive skip (default: 0.80)
-	MaxPerNotePerDay      int     // burst cap per note per day (default: 50)
-	MaxPerProjectPerDay   int     // burst cap per project per day (default: 500)
 	BurstRetentionDays    int     // days to retain bursts (default: 90)
 	OverlapThreshold      float64 // Jaccard gate for candidate insertion (default: 0.12)
 	CandidateLookbackDays int     // days to look back for candidates (default: 30)
@@ -42,11 +39,8 @@ func DefaultBurstConfig() BurstConfig {
 	return BurstConfig{
 		WindowLines:           2,
 		ChunkSize:             20,
-		MaxWindows:            10,
 		SkipWindowSeconds:     300,
 		SkipThreshold:         0.80,
-		MaxPerNotePerDay:      50,
-		MaxPerProjectPerDay:   500,
 		BurstRetentionDays:    90,
 		OverlapThreshold:      0.12,
 		CandidateLookbackDays: 30,
@@ -312,19 +306,12 @@ func ExtractBursts(note *Note, event *Event, noteLines []string, cfg BurstConfig
 
 	// Step 2: split oversized windows.
 	var windows []LineRange
-	truncated := false
 	for _, g := range groups {
 		split := SplitRange(g, cfg.ChunkSize)
 		windows = append(windows, split...)
 	}
 
-	// Step 3: cap at MaxWindows.
-	if len(windows) > cfg.MaxWindows {
-		windows = windows[:cfg.MaxWindows]
-		truncated = true
-	}
-
-	// Step 4: extract text, tokenize, build bursts.
+	// Step 3: extract text, tokenize, build bursts.
 	var bursts []Burst
 	now := time.Now().UTC()
 
@@ -337,7 +324,7 @@ func ExtractBursts(note *Note, event *Event, noteLines []string, cfg BurstConfig
 		folderURN = note.FolderURN.String()
 	}
 
-	for i, w := range windows {
+	for _, w := range windows {
 		// Extract lines for this window (0-based slice indexing).
 		startIdx := w.Start - 1 // convert 1-based to 0-based
 		endIdx := w.End         // exclusive upper bound for slice
@@ -374,8 +361,6 @@ func ExtractBursts(note *Note, event *Event, noteLines []string, cfg BurstConfig
 			continue
 		}
 
-		isTruncated := truncated && i == len(windows)-1
-
 		burst := Burst{
 			ID:         burstID.String(),
 			NoteURN:    note.URN.String(),
@@ -387,7 +372,7 @@ func ExtractBursts(note *Note, event *Event, noteLines []string, cfg BurstConfig
 			LineEnd:    w.End,
 			Text:       text,
 			Tokens:     tokens,
-			Truncated:  isTruncated,
+			Truncated:  false,
 			CreatedAt:  now,
 		}
 
@@ -450,4 +435,164 @@ func DetectCandidates(newBurst Burst, recent []Burst, threshold float64) []Candi
 	}
 
 	return pairs
+}
+
+// ---------------------------------------------------------------------------
+// ProjectBurstHint
+// ---------------------------------------------------------------------------
+
+// ProjectBurstHint is a lightweight burst reference used for project suggestion.
+// It carries only the fields needed for Jaccard scoring against a note's bursts.
+type ProjectBurstHint struct {
+	ProjectURN string
+	Tokens     []string
+}
+
+// ---------------------------------------------------------------------------
+// ProjectSuggestion
+// ---------------------------------------------------------------------------
+
+// ProjectSuggestion is a ranked suggestion for which project a note without a
+// project assignment should belong to, based on content similarity of existing
+// bursts.
+type ProjectSuggestion struct {
+	ProjectURN string
+	Score      float64 // average Jaccard similarity across matched bursts
+	MatchCount int     // number of project bursts that scored above the threshold
+}
+
+// ---------------------------------------------------------------------------
+// SuggestProjectForNote
+// ---------------------------------------------------------------------------
+
+// SuggestProjectForNote scores the note's existing bursts (noteTokenSets)
+// against projectBursts (bursts from various notes that already have a project
+// assigned) and returns ranked project suggestions ordered by descending score.
+//
+// noteTokenSets is the list of token sets from the note's own bursts.
+// projectBursts is a flat list of hints from other notes that already have a
+// project assigned; each must carry a non-empty ProjectURN and Tokens slice.
+//
+// Only project/burst pairs with Jaccard score >= threshold are counted.
+// Projects are de-duplicated across burst pairs: for each project burst the
+// best score against any of the note's bursts is used before accumulating.
+// The threshold value from BurstConfig.OverlapThreshold is a good default.
+func SuggestProjectForNote(noteTokenSets [][]string, projectBursts []ProjectBurstHint, threshold float64) []ProjectSuggestion {
+	if len(noteTokenSets) == 0 || len(projectBursts) == 0 {
+		return nil
+	}
+
+	type accumulator struct {
+		totalScore float64
+		count      int
+	}
+	byProject := make(map[string]*accumulator)
+
+	for _, pb := range projectBursts {
+		if pb.ProjectURN == "" || len(pb.Tokens) == 0 {
+			continue
+		}
+		bestScore := 0.0
+		for _, noteToks := range noteTokenSets {
+			if s := JaccardScore(noteToks, pb.Tokens); s > bestScore {
+				bestScore = s
+			}
+		}
+		if bestScore < threshold {
+			continue
+		}
+		acc, ok := byProject[pb.ProjectURN]
+		if !ok {
+			acc = &accumulator{}
+			byProject[pb.ProjectURN] = acc
+		}
+		acc.totalScore += bestScore
+		acc.count++
+	}
+
+	suggestions := make([]ProjectSuggestion, 0, len(byProject))
+	for projURN, acc := range byProject {
+		suggestions = append(suggestions, ProjectSuggestion{
+			ProjectURN: projURN,
+			Score:      acc.totalScore / float64(acc.count),
+			MatchCount: acc.count,
+		})
+	}
+
+	sort.Slice(suggestions, func(i, j int) bool {
+		if suggestions[i].Score != suggestions[j].Score {
+			return suggestions[i].Score > suggestions[j].Score
+		}
+		return suggestions[i].MatchCount > suggestions[j].MatchCount
+	})
+
+	return suggestions
+}
+
+// ---------------------------------------------------------------------------
+// InferTitle
+// ---------------------------------------------------------------------------
+
+// InferTitle derives a human-readable title from note content lines.
+// It scans the first 6 non-blank lines looking for one that yields at least
+// 2 significant tokens (non-stop-word, length >= 2).
+//
+// Returns:
+//   - title:      title-cased space-joined significant tokens (empty if inconclusive)
+//   - confidence: float in [0.0, 1.0]; values < 0.4 indicate low confidence
+//   - basisLine:  the raw content line the title was derived from
+func InferTitle(lines []string) (title string, confidence float64, basisLine string) {
+	for i, line := range lines {
+		if i >= 6 {
+			break
+		}
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+
+		// Tokenize: lowercase + split on non-alphanumeric.
+		var sb strings.Builder
+		for _, r := range strings.ToLower(trimmed) {
+			if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+				sb.WriteRune(r)
+			} else {
+				sb.WriteRune(' ')
+			}
+		}
+		rawTokens := strings.Fields(sb.String())
+
+		// Filter: discard single-char tokens, then stop words.
+		var significant []string
+		for _, t := range rawTokens {
+			if len(t) < 2 {
+				continue
+			}
+			if _, isStop := slugStopWords[t]; isStop {
+				continue
+			}
+			significant = append(significant, t)
+		}
+		if len(significant) < 2 {
+			continue // not enough signal on this line; try the next
+		}
+
+		// Take up to 4 significant tokens.
+		if len(significant) > 4 {
+			significant = significant[:4]
+		}
+
+		// Title-case each token.
+		parts := make([]string, len(significant))
+		for j, t := range significant {
+			parts[j] = strings.ToUpper(t[:1]) + t[1:]
+		}
+
+		conf := float64(len(significant)) / 5.0
+		if conf > 1.0 {
+			conf = 1.0
+		}
+		return strings.Join(parts, " "), conf, trimmed
+	}
+	return "", 0.0, ""
 }

@@ -10,7 +10,7 @@ import (
 // currentSchemaVersion must match len(migrations).
 // Bump it by 1 every time you add a migration to the slice below.
 // NEVER edit or remove existing migrations — only append new ones.
-const currentSchemaVersion = 7
+const currentSchemaVersion = 8
 
 // currentProjectionVersion is incremented when projection logic changes
 // (i.e. existing rows need recomputing from the event log even though
@@ -240,6 +240,31 @@ CREATE TABLE IF NOT EXISTS project_context_config (
     updated_at                    INTEGER NOT NULL
 );
 
+-- Note metadata inferences (context graph — async title/project suggestions).
+-- One active (pending) record per note at a time (enforced by partial unique index).
+CREATE TABLE IF NOT EXISTS note_context_inferences (
+    id                    TEXT    PRIMARY KEY,         -- UUIDv7
+    note_urn              TEXT    NOT NULL,
+    inferred_title        TEXT    NOT NULL DEFAULT '', -- '' if title inference inconclusive
+    inferred_project_urn  TEXT    NOT NULL DEFAULT '', -- '' if project inference inconclusive
+    title_confidence      REAL    NOT NULL DEFAULT 0.0,
+    project_confidence    REAL    NOT NULL DEFAULT 0.0,
+    project_evidence      TEXT    NOT NULL DEFAULT '', -- JSON: [{project_urn,match_count,score}]
+    title_basis_burst_id  TEXT    NOT NULL DEFAULT '', -- burst ID from which title was derived
+    status                TEXT    NOT NULL DEFAULT 'pending', -- pending|accepted|rejected
+    created_at            INTEGER NOT NULL,
+    reviewed_at           INTEGER,
+    reviewed_by           TEXT    NOT NULL DEFAULT '',
+    rejected_token_hash   TEXT    NOT NULL DEFAULT ''  -- for re-enable gate after rejection
+);
+
+-- Only one pending inference per note at a time.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_inferences_note_pending
+    ON note_context_inferences(note_urn)
+    WHERE status = 'pending';
+CREATE INDEX IF NOT EXISTS idx_inferences_status
+    ON note_context_inferences(status, created_at DESC);
+
 -- Schema version tracking.
 CREATE TABLE IF NOT EXISTS schema_version (
     version    INTEGER PRIMARY KEY,
@@ -420,6 +445,28 @@ DELETE FROM candidate_relations
     );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_candidates_pair_key
     ON candidate_relations(pair_key);`,
+
+	// v8: note metadata inference table (context graph — async title/project suggestions)
+	`CREATE TABLE IF NOT EXISTS note_context_inferences (
+    id                    TEXT    PRIMARY KEY,
+    note_urn              TEXT    NOT NULL,
+    inferred_title        TEXT    NOT NULL DEFAULT '',
+    inferred_project_urn  TEXT    NOT NULL DEFAULT '',
+    title_confidence      REAL    NOT NULL DEFAULT 0.0,
+    project_confidence    REAL    NOT NULL DEFAULT 0.0,
+    project_evidence      TEXT    NOT NULL DEFAULT '',
+    title_basis_burst_id  TEXT    NOT NULL DEFAULT '',
+    status                TEXT    NOT NULL DEFAULT 'pending',
+    created_at            INTEGER NOT NULL,
+    reviewed_at           INTEGER,
+    reviewed_by           TEXT    NOT NULL DEFAULT '',
+    rejected_token_hash   TEXT    NOT NULL DEFAULT ''
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_inferences_note_pending
+    ON note_context_inferences(note_urn)
+    WHERE status = 'pending';
+CREATE INDEX IF NOT EXISTS idx_inferences_status
+    ON note_context_inferences(status, created_at DESC);`,
 }
 
 // applySchema creates all tables/indexes on a fresh DB and seeds meta rows.

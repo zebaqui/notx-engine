@@ -5,16 +5,15 @@ import {
   useQueryClient,
   keepPreviousData,
 } from "@tanstack/react-query";
+import { HugeiconsIcon } from "@hugeicons/react";
 import {
-  Users,
-  RefreshCw,
-  AlertCircle,
-  Trash2,
-  Pencil,
-  X,
-  Check,
-  UserPlus,
-} from "lucide-react";
+  UserGroupIcon,
+  Refresh01Icon,
+  AlertCircleIcon,
+  Delete01Icon,
+  PencilEdit01Icon,
+  UserAdd01Icon,
+} from "@hugeicons/core-free-icons";
 import { fetchUsers, createUser, updateUser, deleteUser } from "../api/client";
 import type { User } from "../api/types";
 
@@ -102,7 +101,7 @@ function Modal({
             {title}
           </span>
           <button className="close-btn" onClick={onClose}>
-            <X size={16} />
+            <span style={{ fontSize: 14 }}>×</span>
           </button>
         </div>
         {children}
@@ -243,7 +242,7 @@ function UserCreateModal({ onClose }: { onClose: () => void }) {
 
       {error && (
         <div className="error-banner" style={{ padding: "10px 14px" }}>
-          <AlertCircle size={13} />
+          <HugeiconsIcon icon={AlertCircleIcon} size={13} strokeWidth={1.5} />
           {error}
         </div>
       )}
@@ -264,7 +263,7 @@ function UserCreateModal({ onClose }: { onClose: () => void }) {
           {createMut.isPending ? (
             <div className="spinner" style={{ width: 14, height: 14 }} />
           ) : (
-            <Check size={14} />
+            <span style={{ fontSize: 13 }}>✓</span>
           )}
           Create user
         </button>
@@ -323,7 +322,7 @@ function ConfirmDeleteModal({
           {isPending ? (
             <div className="spinner" style={{ width: 14, height: 14 }} />
           ) : (
-            <Trash2 size={13} />
+            <HugeiconsIcon icon={Delete01Icon} size={13} strokeWidth={1.5} />
           )}
           Delete
         </button>
@@ -450,8 +449,10 @@ function UserPanel({
             }}
           >
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <Users
+              <HugeiconsIcon
+                icon={UserGroupIcon}
                 size={15}
+                strokeWidth={1.5}
                 style={{ color: "var(--accent)", flexShrink: 0 }}
               />
               <span
@@ -465,7 +466,7 @@ function UserPanel({
               </span>
             </div>
             <button className="close-btn" onClick={onClose}>
-              <X size={16} />
+              <span style={{ fontSize: 14 }}>×</span>
             </button>
           </div>
 
@@ -525,7 +526,11 @@ function UserPanel({
                     className="error-banner"
                     style={{ padding: "10px 14px" }}
                   >
-                    <AlertCircle size={13} />
+                    <HugeiconsIcon
+                      icon={AlertCircleIcon}
+                      size={13}
+                      strokeWidth={1.5}
+                    />
                     {editError}
                   </div>
                 )}
@@ -543,7 +548,7 @@ function UserPanel({
                         style={{ width: 14, height: 14 }}
                       />
                     ) : (
-                      <Check size={14} />
+                      <span style={{ fontSize: 13 }}>✓</span>
                     )}
                     Save changes
                   </button>
@@ -600,7 +605,11 @@ function UserPanel({
                 onClick={() => setEditing(true)}
                 style={{ flex: 1 }}
               >
-                <Pencil size={13} />
+                <HugeiconsIcon
+                  icon={PencilEdit01Icon}
+                  size={13}
+                  strokeWidth={1.5}
+                />
                 Edit
               </button>
               {!user.deleted && (
@@ -609,7 +618,11 @@ function UserPanel({
                   onClick={() => setConfirmDelete(true)}
                   style={{ color: "var(--red)" }}
                 >
-                  <Trash2 size={13} />
+                  <HugeiconsIcon
+                    icon={Delete01Icon}
+                    size={13}
+                    strokeWidth={1.5}
+                  />
                   Delete
                 </button>
               )}
@@ -718,7 +731,12 @@ export default function UsersPage() {
             className="section-title"
             style={{ display: "flex", alignItems: "center", gap: 8 }}
           >
-            <Users size={16} style={{ color: "var(--accent)" }} />
+            <HugeiconsIcon
+              icon={UserGroupIcon}
+              size={16}
+              strokeWidth={1.5}
+              style={{ color: "var(--accent)" }}
+            />
             Users
           </div>
           <div className="section-sub">Manage user accounts</div>
@@ -750,8 +768,10 @@ export default function UsersPage() {
             onClick={() => query.refetch()}
             disabled={query.isLoading}
           >
-            <RefreshCw
+            <HugeiconsIcon
+              icon={Refresh01Icon}
               size={14}
+              strokeWidth={1.5}
               className={query.isLoading ? "spin-icon" : ""}
             />
             Refresh
@@ -761,7 +781,7 @@ export default function UsersPage() {
             className="btn btn-primary"
             onClick={() => setShowCreate(true)}
           >
-            <UserPlus size={14} />
+            <HugeiconsIcon icon={UserAdd01Icon} size={14} strokeWidth={1.5} />
             New user
           </button>
         </div>
@@ -781,7 +801,7 @@ export default function UsersPage() {
       {/* ── Error banner ─────────────────────────────────────────────── */}
       {query.isError && (
         <div className="error-banner" style={{ marginBottom: 16 }}>
-          <AlertCircle size={14} />
+          <HugeiconsIcon icon={AlertCircleIcon} size={14} strokeWidth={1.5} />
           Could not load users. Make sure the server is running.
         </div>
       )}
@@ -795,7 +815,12 @@ export default function UsersPage() {
           </div>
         ) : filtered.length === 0 ? (
           <div className="empty-state">
-            <Users size={28} style={{ opacity: 0.3 }} />
+            <HugeiconsIcon
+              icon={UserGroupIcon}
+              size={28}
+              strokeWidth={1.5}
+              style={{ opacity: 0.3 }}
+            />
             <span>
               {search ? "No users match your filter." : "No users found."}
             </span>
@@ -837,8 +862,10 @@ export default function UsersPage() {
                         gap: 7,
                       }}
                     >
-                      <Users
+                      <HugeiconsIcon
+                        icon={UserGroupIcon}
                         size={12}
+                        strokeWidth={1.5}
                         style={{
                           color: "var(--accent)",
                           flexShrink: 0,
@@ -896,7 +923,11 @@ export default function UsersPage() {
                         title="Edit"
                         onClick={() => setSelected(u)}
                       >
-                        <Pencil size={12} />
+                        <HugeiconsIcon
+                          icon={PencilEdit01Icon}
+                          size={12}
+                          strokeWidth={1.5}
+                        />
                       </button>
                     </div>
                   </td>

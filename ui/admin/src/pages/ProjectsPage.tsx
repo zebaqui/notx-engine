@@ -1,19 +1,18 @@
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { HugeiconsIcon } from "@hugeicons/react";
 import {
-  FolderOpen,
-  Folder,
-  Plus,
-  RefreshCw,
-  AlertCircle,
-  ChevronRight,
-  ChevronLeft,
-  Trash2,
-  Pencil,
-  X,
-  Check,
-  FolderPlus,
-} from "lucide-react";
+  FolderOpenIcon,
+  Folder01Icon,
+  Refresh01Icon,
+  AlertCircleIcon,
+  PlusSignIcon,
+  Delete01Icon,
+  PencilIcon,
+  Tick01Icon,
+  FolderAddIcon,
+  ArrowLeft01Icon,
+} from "@hugeicons/core-free-icons";
 import {
   fetchProjects,
   fetchFolders,
@@ -94,7 +93,7 @@ function Modal({
             {title}
           </span>
           <button className="close-btn" onClick={onClose}>
-            <X size={16} />
+            <span style={{ fontSize: 14 }}>×</span>
           </button>
         </div>
         {children}
@@ -187,8 +186,13 @@ function ProjectModal({
   });
 
   const updateMut = useMutation({
-    mutationFn: ({ u, patch }: { u: string; patch: Parameters<typeof updateProject>[1] }) =>
-      updateProject(u, patch),
+    mutationFn: ({
+      u,
+      patch,
+    }: {
+      u: string;
+      patch: Parameters<typeof updateProject>[1];
+    }) => updateProject(u, patch),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["projects"] });
       onClose();
@@ -200,8 +204,14 @@ function ProjectModal({
 
   function handleSubmit() {
     setError("");
-    if (!name.trim()) { setError("Name is required."); return; }
-    if (!urn.trim()) { setError("URN is required."); return; }
+    if (!name.trim()) {
+      setError("Name is required.");
+      return;
+    }
+    if (!urn.trim()) {
+      setError("URN is required.");
+      return;
+    }
 
     if (isEdit && initial) {
       updateMut.mutate({ u: initial.urn, patch: { name, description } });
@@ -214,8 +224,15 @@ function ProjectModal({
     <Modal title={isEdit ? "Edit project" : "New project"} onClose={onClose}>
       {!isEdit && (
         <Field label="URN" required>
-          <TextInput value={urn} onChange={setUrn} placeholder="notx:proj:…" mono />
-          <span style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 3 }}>
+          <TextInput
+            value={urn}
+            onChange={setUrn}
+            placeholder="notx:proj:…"
+            mono
+          />
+          <span
+            style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 3 }}
+          >
             Auto-generated — you can customise it before saving.
           </span>
         </Field>
@@ -224,22 +241,38 @@ function ProjectModal({
         <TextInput value={name} onChange={setName} placeholder="My project" />
       </Field>
       <Field label="Description">
-        <TextInput value={description} onChange={setDescription} placeholder="Optional description" />
+        <TextInput
+          value={description}
+          onChange={setDescription}
+          placeholder="Optional description"
+        />
       </Field>
 
       {error && (
         <div className="error-banner" style={{ padding: "10px 14px" }}>
-          <AlertCircle size={13} />
+          <HugeiconsIcon icon={AlertCircleIcon} size={13} strokeWidth={1.5} />
           {error}
         </div>
       )}
 
       <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
-        <button className="btn btn-ghost" onClick={onClose} disabled={isPending}>
+        <button
+          className="btn btn-ghost"
+          onClick={onClose}
+          disabled={isPending}
+        >
           Cancel
         </button>
-        <button className="btn btn-primary" onClick={handleSubmit} disabled={isPending}>
-          {isPending ? <div className="spinner" style={{ width: 14, height: 14 }} /> : <Check size={14} />}
+        <button
+          className="btn btn-primary"
+          onClick={handleSubmit}
+          disabled={isPending}
+        >
+          {isPending ? (
+            <div className="spinner" style={{ width: 14, height: 14 }} />
+          ) : (
+            <HugeiconsIcon icon={Tick01Icon} size={14} strokeWidth={1.5} />
+          )}
           {isEdit ? "Save changes" : "Create project"}
         </button>
       </div>
@@ -265,7 +298,7 @@ function FolderModal({
 
   const [urn, setUrn] = useState(initial?.urn ?? makeUrn("folder"));
   const [projectUrn, setProjectUrn] = useState(
-    initial?.project_urn ?? defaultProjectUrn ?? (projects[0]?.urn ?? ""),
+    initial?.project_urn ?? defaultProjectUrn ?? projects[0]?.urn ?? "",
   );
   const [name, setName] = useState(initial?.name ?? "");
   const [description, setDescription] = useState(initial?.description ?? "");
@@ -282,8 +315,13 @@ function FolderModal({
   });
 
   const updateMut = useMutation({
-    mutationFn: ({ u, patch }: { u: string; patch: Parameters<typeof updateFolder>[1] }) =>
-      updateFolder(u, patch),
+    mutationFn: ({
+      u,
+      patch,
+    }: {
+      u: string;
+      patch: Parameters<typeof updateFolder>[1];
+    }) => updateFolder(u, patch),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["folders"] });
       onClose();
@@ -295,9 +333,18 @@ function FolderModal({
 
   function handleSubmit() {
     setError("");
-    if (!name.trim()) { setError("Name is required."); return; }
-    if (!urn.trim()) { setError("URN is required."); return; }
-    if (!projectUrn.trim()) { setError("A project must be selected."); return; }
+    if (!name.trim()) {
+      setError("Name is required.");
+      return;
+    }
+    if (!urn.trim()) {
+      setError("URN is required.");
+      return;
+    }
+    if (!projectUrn.trim()) {
+      setError("A project must be selected.");
+      return;
+    }
 
     if (isEdit && initial) {
       updateMut.mutate({ u: initial.urn, patch: { name, description } });
@@ -310,8 +357,15 @@ function FolderModal({
     <Modal title={isEdit ? "Edit folder" : "New folder"} onClose={onClose}>
       {!isEdit && (
         <Field label="URN" required>
-          <TextInput value={urn} onChange={setUrn} placeholder="notx:folder:…" mono />
-          <span style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 3 }}>
+          <TextInput
+            value={urn}
+            onChange={setUrn}
+            placeholder="notx:folder:…"
+            mono
+          />
+          <span
+            style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 3 }}
+          >
             Auto-generated — you can customise it before saving.
           </span>
         </Field>
@@ -324,11 +378,13 @@ function FolderModal({
             className="search-input"
             style={{ width: "100%", cursor: "pointer" }}
           >
-            {projects.filter((p) => !p.deleted).map((p) => (
-              <option key={p.urn} value={p.urn}>
-                {p.name}
-              </option>
-            ))}
+            {projects
+              .filter((p) => !p.deleted)
+              .map((p) => (
+                <option key={p.urn} value={p.urn}>
+                  {p.name}
+                </option>
+              ))}
           </select>
         </Field>
       )}
@@ -336,22 +392,38 @@ function FolderModal({
         <TextInput value={name} onChange={setName} placeholder="My folder" />
       </Field>
       <Field label="Description">
-        <TextInput value={description} onChange={setDescription} placeholder="Optional description" />
+        <TextInput
+          value={description}
+          onChange={setDescription}
+          placeholder="Optional description"
+        />
       </Field>
 
       {error && (
         <div className="error-banner" style={{ padding: "10px 14px" }}>
-          <AlertCircle size={13} />
+          <HugeiconsIcon icon={AlertCircleIcon} size={13} strokeWidth={1.5} />
           {error}
         </div>
       )}
 
       <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
-        <button className="btn btn-ghost" onClick={onClose} disabled={isPending}>
+        <button
+          className="btn btn-ghost"
+          onClick={onClose}
+          disabled={isPending}
+        >
           Cancel
         </button>
-        <button className="btn btn-primary" onClick={handleSubmit} disabled={isPending}>
-          {isPending ? <div className="spinner" style={{ width: 14, height: 14 }} /> : <Check size={14} />}
+        <button
+          className="btn btn-primary"
+          onClick={handleSubmit}
+          disabled={isPending}
+        >
+          {isPending ? (
+            <div className="spinner" style={{ width: 14, height: 14 }} />
+          ) : (
+            <HugeiconsIcon icon={Tick01Icon} size={14} strokeWidth={1.5} />
+          )}
           {isEdit ? "Save changes" : "Create folder"}
         </button>
       </div>
@@ -376,13 +448,23 @@ function ConfirmDeleteModal({
 }) {
   return (
     <Modal title={`Delete ${label}`} onClose={onClose}>
-      <p style={{ fontSize: 13, color: "var(--text-secondary)", lineHeight: 1.7 }}>
+      <p
+        style={{
+          fontSize: 13,
+          color: "var(--text-secondary)",
+          lineHeight: 1.7,
+        }}
+      >
         Are you sure you want to soft-delete{" "}
         <strong style={{ color: "var(--text-primary)" }}>{name}</strong>? It can
         be restored later via the API.
       </p>
       <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
-        <button className="btn btn-ghost" onClick={onClose} disabled={isPending}>
+        <button
+          className="btn btn-ghost"
+          onClick={onClose}
+          disabled={isPending}
+        >
           Cancel
         </button>
         <button
@@ -398,7 +480,7 @@ function ConfirmDeleteModal({
           {isPending ? (
             <div className="spinner" style={{ width: 14, height: 14 }} />
           ) : (
-            <Trash2 size={13} />
+            <HugeiconsIcon icon={Delete01Icon} size={13} strokeWidth={1.5} />
           )}
           Delete
         </button>
@@ -428,7 +510,11 @@ function ProjectsSection({
   const query = useQuery({
     queryKey: ["projects", "list", pageToken, includeDeleted],
     queryFn: () =>
-      fetchProjects({ page_size: PAGE_SIZE, page_token: pageToken, include_deleted: includeDeleted }),
+      fetchProjects({
+        page_size: PAGE_SIZE,
+        page_token: pageToken,
+        include_deleted: includeDeleted,
+      }),
     placeholderData: (prev: any) => prev,
   });
 
@@ -464,8 +550,16 @@ function ProjectsSection({
       {/* Header */}
       <div className="section-header">
         <div>
-          <div className="section-title" style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <FolderOpen size={16} style={{ color: "var(--accent)" }} />
+          <div
+            className="section-title"
+            style={{ display: "flex", alignItems: "center", gap: 8 }}
+          >
+            <HugeiconsIcon
+              icon={FolderOpenIcon}
+              size={16}
+              strokeWidth={1.5}
+              style={{ color: "var(--accent)" }}
+            />
             Projects
           </div>
           <div className="section-sub">Logical groupings for notes</div>
@@ -495,11 +589,19 @@ function ProjectsSection({
             onClick={() => query.refetch()}
             disabled={query.isLoading}
           >
-            <RefreshCw size={14} className={query.isLoading ? "spin-icon" : ""} />
+            <HugeiconsIcon
+              icon={Refresh01Icon}
+              size={14}
+              strokeWidth={1.5}
+              className={query.isLoading ? "spin-icon" : ""}
+            />
             Refresh
           </button>
-          <button className="btn btn-primary" onClick={() => setShowCreate(true)}>
-            <Plus size={14} />
+          <button
+            className="btn btn-primary"
+            onClick={() => setShowCreate(true)}
+          >
+            <HugeiconsIcon icon={PlusSignIcon} size={14} strokeWidth={1.5} />
             New project
           </button>
         </div>
@@ -507,7 +609,7 @@ function ProjectsSection({
 
       {query.isError && (
         <div className="error-banner" style={{ marginBottom: 16 }}>
-          <AlertCircle size={14} />
+          <HugeiconsIcon icon={AlertCircleIcon} size={14} strokeWidth={1.5} />
           Could not load projects. Make sure the server is running.
         </div>
       )}
@@ -521,9 +623,16 @@ function ProjectsSection({
           </div>
         ) : projects.length === 0 ? (
           <div className="empty-state">
-            <FolderOpen size={28} style={{ opacity: 0.3 }} />
+            <HugeiconsIcon
+              icon={FolderOpenIcon}
+              size={28}
+              strokeWidth={1.5}
+              style={{ opacity: 0.3 }}
+            />
             <span>No projects found.</span>
-            <span style={{ fontSize: 12 }}>Create your first project to get started.</span>
+            <span style={{ fontSize: 12 }}>
+              Create your first project to get started.
+            </span>
           </div>
         ) : (
           <table className="data-table">
@@ -546,8 +655,15 @@ function ProjectsSection({
                   title="Click to view folders"
                 >
                   <td className="name-cell" style={{ paddingLeft: 20 }}>
-                    <span style={{ display: "flex", alignItems: "center", gap: 7 }}>
-                      <FolderOpen size={12} style={{ color: "var(--accent)", flexShrink: 0 }} />
+                    <span
+                      style={{ display: "flex", alignItems: "center", gap: 7 }}
+                    >
+                      <HugeiconsIcon
+                        icon={FolderOpenIcon}
+                        size={12}
+                        strokeWidth={1.5}
+                        style={{ color: "var(--accent)", flexShrink: 0 }}
+                      />
                       {p.name}
                     </span>
                   </td>
@@ -577,7 +693,9 @@ function ProjectsSection({
                       </span>
                     )}
                   </td>
-                  <td style={{ whiteSpace: "nowrap" }}>{fmtDate(p.created_at)}</td>
+                  <td style={{ whiteSpace: "nowrap" }}>
+                    {fmtDate(p.created_at)}
+                  </td>
                   <td onClick={(e) => e.stopPropagation()}>
                     <div style={{ display: "flex", gap: 4 }}>
                       <button
@@ -586,7 +704,11 @@ function ProjectsSection({
                         title="Edit"
                         onClick={() => setEditing(p)}
                       >
-                        <Pencil size={12} />
+                        <HugeiconsIcon
+                          icon={PencilIcon}
+                          size={12}
+                          strokeWidth={1.5}
+                        />
                       </button>
                       {!p.deleted && (
                         <button
@@ -595,7 +717,11 @@ function ProjectsSection({
                           title="Delete"
                           onClick={() => setDeleting(p)}
                         >
-                          <Trash2 size={12} />
+                          <HugeiconsIcon
+                            icon={Delete01Icon}
+                            size={12}
+                            strokeWidth={1.5}
+                          />
                         </button>
                       )}
                     </div>
@@ -617,7 +743,7 @@ function ProjectsSection({
             disabled={pageIndex === 0}
             style={{ padding: "6px 10px" }}
           >
-            <ChevronLeft size={14} /> Prev
+            <span style={{ fontSize: 13 }}>‹</span> Prev
           </button>
           <button
             className="btn btn-ghost"
@@ -625,14 +751,16 @@ function ProjectsSection({
             disabled={!nextToken}
             style={{ padding: "6px 10px" }}
           >
-            Next <ChevronRight size={14} />
+            Next <span style={{ fontSize: 13 }}>›</span>
           </button>
         </div>
       )}
 
       {/* Modals */}
       {showCreate && <ProjectModal onClose={() => setShowCreate(false)} />}
-      {editing && <ProjectModal initial={editing} onClose={() => setEditing(null)} />}
+      {editing && (
+        <ProjectModal initial={editing} onClose={() => setEditing(null)} />
+      )}
       {deleting && (
         <ConfirmDeleteModal
           label="project"
@@ -667,7 +795,13 @@ function FoldersSection({
   const [deleting, setDeleting] = useState<FolderType | null>(null);
 
   const query = useQuery({
-    queryKey: ["folders", "list", selectedProject.urn, pageToken, includeDeleted],
+    queryKey: [
+      "folders",
+      "list",
+      selectedProject.urn,
+      pageToken,
+      includeDeleted,
+    ],
     queryFn: () =>
       fetchFolders({
         project_urn: selectedProject.urn,
@@ -722,14 +856,19 @@ function FoldersSection({
             }}
             onClick={onBack}
           >
-            <ChevronLeft size={13} />
+            <HugeiconsIcon icon={ArrowLeft01Icon} size={13} strokeWidth={1.5} />
             <span style={{ color: "var(--accent)" }}>Projects</span>
           </div>
           <div
             className="section-title"
             style={{ display: "flex", alignItems: "center", gap: 8 }}
           >
-            <Folder size={16} style={{ color: "var(--accent)" }} />
+            <HugeiconsIcon
+              icon={Folder01Icon}
+              size={16}
+              strokeWidth={1.5}
+              style={{ color: "var(--accent)" }}
+            />
             {selectedProject.name}
           </div>
           <div className="section-sub">
@@ -764,11 +903,19 @@ function FoldersSection({
             onClick={() => query.refetch()}
             disabled={query.isLoading}
           >
-            <RefreshCw size={14} className={query.isLoading ? "spin-icon" : ""} />
+            <HugeiconsIcon
+              icon={Refresh01Icon}
+              size={14}
+              strokeWidth={1.5}
+              className={query.isLoading ? "spin-icon" : ""}
+            />
             Refresh
           </button>
-          <button className="btn btn-primary" onClick={() => setShowCreate(true)}>
-            <FolderPlus size={14} />
+          <button
+            className="btn btn-primary"
+            onClick={() => setShowCreate(true)}
+          >
+            <HugeiconsIcon icon={FolderAddIcon} size={14} strokeWidth={1.5} />
             New folder
           </button>
         </div>
@@ -776,7 +923,7 @@ function FoldersSection({
 
       {query.isError && (
         <div className="error-banner" style={{ marginBottom: 16 }}>
-          <AlertCircle size={14} />
+          <HugeiconsIcon icon={AlertCircleIcon} size={14} strokeWidth={1.5} />
           Could not load folders.
         </div>
       )}
@@ -790,7 +937,12 @@ function FoldersSection({
           </div>
         ) : folders.length === 0 ? (
           <div className="empty-state">
-            <Folder size={28} style={{ opacity: 0.3 }} />
+            <HugeiconsIcon
+              icon={Folder01Icon}
+              size={28}
+              strokeWidth={1.5}
+              style={{ opacity: 0.3 }}
+            />
             <span>No folders in this project.</span>
             <span style={{ fontSize: 12 }}>
               Create a folder to organise notes.
@@ -812,8 +964,15 @@ function FoldersSection({
               {folders.map((f) => (
                 <tr key={f.urn}>
                   <td className="name-cell" style={{ paddingLeft: 20 }}>
-                    <span style={{ display: "flex", alignItems: "center", gap: 7 }}>
-                      <Folder size={12} style={{ color: "var(--accent)", flexShrink: 0 }} />
+                    <span
+                      style={{ display: "flex", alignItems: "center", gap: 7 }}
+                    >
+                      <HugeiconsIcon
+                        icon={Folder01Icon}
+                        size={12}
+                        strokeWidth={1.5}
+                        style={{ color: "var(--accent)", flexShrink: 0 }}
+                      />
                       {f.name}
                     </span>
                   </td>
@@ -843,7 +1002,9 @@ function FoldersSection({
                       </span>
                     )}
                   </td>
-                  <td style={{ whiteSpace: "nowrap" }}>{fmtDate(f.created_at)}</td>
+                  <td style={{ whiteSpace: "nowrap" }}>
+                    {fmtDate(f.created_at)}
+                  </td>
                   <td>
                     <div style={{ display: "flex", gap: 4 }}>
                       <button
@@ -852,7 +1013,11 @@ function FoldersSection({
                         title="Edit"
                         onClick={() => setEditing(f)}
                       >
-                        <Pencil size={12} />
+                        <HugeiconsIcon
+                          icon={PencilIcon}
+                          size={12}
+                          strokeWidth={1.5}
+                        />
                       </button>
                       {!f.deleted && (
                         <button
@@ -861,7 +1026,11 @@ function FoldersSection({
                           title="Delete"
                           onClick={() => setDeleting(f)}
                         >
-                          <Trash2 size={12} />
+                          <HugeiconsIcon
+                            icon={Delete01Icon}
+                            size={12}
+                            strokeWidth={1.5}
+                          />
                         </button>
                       )}
                     </div>
@@ -883,7 +1052,7 @@ function FoldersSection({
             disabled={pageIndex === 0}
             style={{ padding: "6px 10px" }}
           >
-            <ChevronLeft size={14} /> Prev
+            <span style={{ fontSize: 13 }}>‹</span> Prev
           </button>
           <button
             className="btn btn-ghost"
@@ -891,7 +1060,7 @@ function FoldersSection({
             disabled={!nextToken}
             style={{ padding: "6px 10px" }}
           >
-            Next <ChevronRight size={14} />
+            Next <span style={{ fontSize: 13 }}>›</span>
           </button>
         </div>
       )}

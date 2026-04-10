@@ -683,6 +683,374 @@ Confirm by calling GetProjectConfig and verifying the stored values.
 
 ---
 
+### Operation 9 — `InspectInferences`
+
+**Purpose:** Review metadata inferences the engine has generated for notes that
+were created without a title or project URN. The engine derives these from burst
+content (title) and from the distribution of candidate partner project URNs
+(project). Accepting an inference emits a real event that writes the metadata
+to the note header permanently.
+
+**RPC**
+
+```
+ContextService/ListInferences
+```
+
+**Request**
+
+```json
+{
+  "status": "pending",
+  "page_size": 20
+}
+```
+
+**Response fields to read**
+
+| Field                               | What it tells you                                              |
+| ----------------------------------- | -------------------------------------------------------------- |
+| `inferences[].id`                   | ID to pass to `AcceptInference` or `RejectInference`           |
+| `inferences[].note_urn`             | Which note this inference applies to                           |
+| `inferences[].inferred_title`       | Proposed title (empty if title inference inconclusive)         |
+| `inferences[].title_confidence`     | Float 0–1; < 0.4 = low confidence                              |
+| `inferences[].inferred_project_urn` | Proposed project URN (empty if project inference inconclusive) |
+| `inferences[].project_confidence`   | Float 0–1                                                      |
+| `inferences[].project_evidence`     | Evidence array: `[{project_urn, candidate_count, fraction}]`   |
+| `inferences[].title_basis_burst_id` | Which burst the title was derived from                         |
+| `inferences[].created_at`           | When the inference was generated                               |
+
+---
+
+**Prompt — human**
+
+```
+Call ListInferences with status="pending".
+
+For each inference:
+  Read inferred_title and title_confidence.
+    - If title looks right and confidence >= 0.6: accept title.
+    - If title looks wrong or confidence < 0.4: reject or skip.
+
+  Read inferred_project_urn and project_evidence.
+    - Look at project_evidence[0].fraction and candidate_count.
+    - If the project looks right: accept project.
+    - If evidence is weak or the project is wrong: reject or skip.
+
+Proceed to AcceptInference or RejectInference for each decision.
+```
+
+---
+
+**Prompt — agent**
+
+```
+Call ContextService/ListInferences with status="pending", page_size=20.
+
+For each inference:
+  1. Read inferred_title and title_confidence.
+     If title_confidence >= 0.6 and the title makes sense for a note in this
+     project: set accept_title=true.
+     If title_confidence < 0.4 or the title is nonsensical: set accept_title=false.
+
+  2. Read inferred_project_urn and project_evidence.
+     Look at project_evidence[0].fraction and candidate_count.
+     If fraction >= 0.60 and candidate_count >= 3: set accept_project=true.
+     Otherwise: set accept_project=false.
+
+  3. If accept_title=false AND accept_project=false: call RejectInference.
+     If accept_title=true OR accept_project=true: call AcceptInference with
+       the appropriate flags.
+
+Proceed through all pages before returning a summary.
+```
+
+---
+
+### Operation 10 — `AcceptInference` / `RejectInference`
+
+**Purpose:** Accept or reject the engine's metadata suggestion for a note.
+Acceptance emits an `AppendEvent` that writes the accepted fields to the note's
+`.notx` header permanently. Rejection suppresses re-inference until the note's
+content changes substantially (burst Jaccard < 0.50 vs rejected state).
+
+**RPC — accept**
+
+```
+ContextService/AcceptInference
+```
+
+**Request**
+
+```json
+{
+  "id": "<inference-id>",
+  "accept_title": true,
+  "accept_project": true,
+  "reviewer_urn": "<urn:notx:usr:...>"
+}
+```
+
+Set `accept_title` or `accept_project` to `false` to accept only one of the two
+fields. At least one must be `true`.
+
+**Response fields to read**
+
+| Field                | What it tells you                                               |
+| -------------------- | --------------------------------------------------------------- |
+| `inference.status`   | Should be `"accepted"`                                          |
+| `inference.note_urn` | The note that was updated                                       |
+| `written_fields`     | List of fields written: `["title"]`, `["project_urn"]`, or both |
+
+---
+
+**RPC — reject**
+
+```
+ContextService/RejectInference
+```
+
+**Request**
+
+```json
+{
+  "id": "<inference-id>",
+  "reviewer_urn": "<urn:notx:usr:...>"
+}
+```
+
+**Response fields to read**
+
+| Field              | What it tells you      |
+| ------------------ | ---------------------- |
+| `inference.status` | Should be `"rejected"` |
+
+---
+
+**Prompt — human**
+
+```
+To accept:
+  Call AcceptInference with the inference ID.
+  Set accept_title=true and/or accept_project=true depending on which fields
+  you want to apply. Set reviewer_urn to your user URN.
+  On success, the note header now contains the accepted metadata.
+
+To reject:
+  Call RejectInference with the inference ID and your reviewer URN.
+  The engine will not re-infer for this note until its content changes
+  substantially.
+```
+
+---
+
+**Prompt — agent**
+
+```
+To accept:
+  Call ContextService/AcceptInference with:
+    id = <inference_id>
+    accept_title   = <true|false>
+    accept_project = <true|false>
+    reviewer_urn   = <reviewer_urn>
+
+  Log: "Accepted inference <id> for note <note_urn>: written_fields=<written_fields>"
+  If NOT_FOUND: already acted on. Skip.
+
+To reject:
+  Call ContextService/RejectInference with:
+    id = <inference_id>
+    reviewer_urn = <reviewer_urn>
+
+  Log: "Rejected inference <id> for note <note_urn>"
+  If NOT_FOUND: already acted on. Skip.
+```
+
+---
+
+### Operation 11 — `InspectDeepConnections`
+
+**Purpose:** List note pairs the engine has flagged as deeply connected —
+pairs where the accumulated number and quality of candidates signals a
+structural, ongoing relationship rather than a single coincidental overlap.
+Use this to identify notes that likely deserve a permanent synthesis link or
+a dedicated connecting document.
+
+A pair is flagged deep when any of the following thresholds is crossed:
+
+- 5 or more total candidates detected (configurable)
+- 2 or more promoted candidates (configurable)
+- connection_score ≥ 1.5 (weighted overlap sum with 14-day decay; configurable)
+
+**RPC**
+
+```
+ContextService/ListDeepConnections
+```
+
+**Request**
+
+```json
+{
+  "project_urn": "<urn:notx:proj:...>",
+  "only_unreviewed": true,
+  "page_size": 10
+}
+```
+
+Set `only_unreviewed=true` to see only pairs that still have pending candidates.
+Set `only_unreviewed=false` to see all deep pairs regardless of queue state.
+
+**Response fields to read**
+
+| Field                            | What it tells you                                     |
+| -------------------------------- | ----------------------------------------------------- |
+| `connections[].note_urn_a`       | First note in the pair                                |
+| `connections[].note_urn_b`       | Second note in the pair                               |
+| `connections[].note_name_a`      | Human-readable name of note A                         |
+| `connections[].note_name_b`      | Human-readable name of note B                         |
+| `connections[].candidate_count`  | Total candidates ever generated for this pair         |
+| `connections[].promoted_count`   | Candidates already promoted to permanent links        |
+| `connections[].pending_count`    | Candidates still awaiting review                      |
+| `connections[].dismissed_count`  | Candidates dismissed as noise                         |
+| `connections[].connection_score` | Weighted overlap sum (higher = stronger, more recent) |
+| `connections[].deep_flagged_at`  | When the pair first crossed a deep threshold          |
+
+---
+
+**Prompt — human**
+
+```
+Call ListDeepConnections with only_unreviewed=true.
+
+For each pair:
+  Read note_name_a and note_name_b.
+  Read candidate_count, promoted_count, pending_count.
+  Read connection_score.
+
+  Ask: are these two notes covering the same ongoing subject or
+  dependency in a way that warrants a structural link beyond individual
+  burst connections?
+
+  If yes → proceed to ReviewDeepConnection (Operation 12) to work through
+    all pending candidates for this pair at once.
+  If no  → note it for later review or call clear-deep on the pair via the CLI.
+```
+
+---
+
+**Prompt — agent**
+
+```
+Call ContextService/ListDeepConnections with:
+  project_urn = <project_urn>
+  only_unreviewed = true
+  page_size = 10
+
+For each connection in connections[]:
+  Read note_name_a, note_name_b, candidate_count, promoted_count,
+  pending_count, connection_score.
+
+  Reason: "Do these two notes cover the same ongoing concept or system
+  that warrants a strong structural link between them?"
+
+  If yes: proceed to ReviewDeepConnection for this pair.
+  If no: log the pair for manual review. Do not clear-deep automatically.
+
+Report: "Found N deep connections. Proceeding to review M pairs."
+```
+
+---
+
+### Operation 12 — `ReviewDeepConnection`
+
+**Purpose:** Fetch all pending candidates for a specific deep-connected note
+pair in one call and decide on each holistically. This is the preferred way
+to review a deeply connected pair — seeing all overlapping regions together
+gives better context for whether to promote each one than reviewing them in
+isolation through the normal `FetchBatch` flow.
+
+**RPC**
+
+```
+ContextService/GetDeepConnection
+```
+
+**Request**
+
+```json
+{
+  "note_urn_a": "<urn:notx:note:...>",
+  "note_urn_b": "<urn:notx:note:...>",
+  "include_bursts": true
+}
+```
+
+**Response fields to read**
+
+| Field                           | What it tells you                                               |
+| ------------------------------- | --------------------------------------------------------------- |
+| `connection.note_name_a`        | Human-readable name of note A                                   |
+| `connection.note_name_b`        | Human-readable name of note B                                   |
+| `connection.connection_score`   | Current weighted overlap score for the pair                     |
+| `connection.promoted_count`     | How many connections from this pair are already permanent links |
+| `connection.pending_candidates` | All pending candidates for this pair, with burst text embedded  |
+
+Each item in `pending_candidates` has the same shape as a regular candidate
+from `FetchBatch` (including `burst_a.text`, `burst_b.text`, `overlap_score`,
+`bm25_score`, and `connection_depth`).
+
+---
+
+**Prompt — human**
+
+```
+Call GetDeepConnection with the two note URNs and include_bursts=true.
+
+Read note_name_a and note_name_b to orient yourself.
+Read connection.promoted_count — these are already confirmed links between
+the pair; you can use them as context for what kind of relationship exists.
+
+For each candidate in pending_candidates:
+  Read burst_a.text and burst_b.text.
+  Decide: PROMOTE or DISMISS — using the established relationship context
+  from the already-promoted links to inform borderline cases.
+
+Then call Promote or Dismiss (Operations 4 and 5) for each decision.
+```
+
+---
+
+**Prompt — agent**
+
+```
+Call ContextService/GetDeepConnection with:
+  note_urn_a = <note_urn_a>
+  note_urn_b = <note_urn_b>
+  include_bursts = true
+
+Read connection.note_name_a, connection.note_name_b, connection.promoted_count.
+Build context: "Notes '<note_name_a>' and '<note_name_b>' already have
+<promoted_count> confirmed links. This is a deep connection with
+connection_score=<connection_score>."
+
+For each candidate in connection.pending_candidates:
+  Read burst_a.text and burst_b.text.
+  Use the established relationship context to inform your decision:
+    - For a deeply connected pair, lean toward PROMOTE unless the individual
+      burst is clearly noise (boilerplate, structural markup, unrelated section).
+    - DISMISS only when the specific excerpt is demonstrably unrelated to the
+      established relationship between the notes.
+
+  Collect decisions. Then call PromoteCandidate or DismissCandidate for each.
+
+After all decisions: call GetDeepConnection again to confirm pending_count
+has dropped. Report: "Reviewed deep connection <note_name_a> ↔ <note_name_b>.
+Promoted N. Dismissed N. Remaining pending: N."
+```
+
+---
+
 ## Standard review session — full sequence
 
 This is the complete operation chain for a review session, whether run by a
@@ -690,11 +1058,14 @@ human or an AI agent. Each step feeds directly into the next.
 
 ```
 1. CheckQueue      → confirm candidates_pending > 0 and scorer is ready
+                     also note inferences_pending for Step 8
          ↓
 2. FetchBatch      → retrieve up to 20 candidates with burst previews
+                     (candidates from deep connections show connection_depth.is_deep=true)
          ↓
 3. For each candidate:
      read burst_a.text + burst_b.text
+     if connection_depth.is_deep=true: use established relationship as context
      decide PROMOTE or DISMISS
      (if ambiguous → InspectCandidate for full detail)
          ↓
@@ -704,6 +1075,16 @@ human or an AI agent. Each step feeds directly into the next.
          ↓
 6. CheckQueue      → confirm pending count has dropped
                      report: N promoted, N dismissed, N remaining
+         ↓
+7. InspectDeepConnections (if any unreviewed deep pairs remain)
+   → ReviewDeepConnection for each unreviewed deep pair
+         ↓
+8. InspectInferences (if inferences_pending > 0 from step 1)
+   → AcceptInference / RejectInference for each pending inference
+         ↓
+9. CheckQueue      → confirm all queues drained
+                     report: N promoted, N dismissed, N inferences accepted,
+                             N inferences rejected, N remaining
 ```
 
 ---
@@ -743,6 +1124,21 @@ You have access to the following operations:
   DismissCandidate(id, reviewer_urn)
     → removes the candidate from the pending queue permanently.
 
+  ListDeepConnections(project_urn, only_unreviewed, page_size)
+    → returns note pairs flagged as deeply connected (multiple candidates across sessions).
+
+  GetDeepConnection(note_urn_a, note_urn_b, include_bursts=true)
+    → returns all pending candidates for a specific deep note pair.
+
+  ListInferences(status, page_size)
+    → returns pending metadata inferences (title/project) for untitled or unprojectd notes.
+
+  AcceptInference(id, accept_title, accept_project, reviewer_urn)
+    → writes accepted metadata to note header. At least one accept flag must be true.
+
+  RejectInference(id, reviewer_urn)
+    → suppresses re-inference until note content changes substantially.
+
 Decision rules:
   PROMOTE when: the two excerpts discuss the same concept, system, decision,
     or dependency in a way that a reader navigating from one note to the other
@@ -757,6 +1153,21 @@ Label rules (for PROMOTE):
   - Examples: "sod-gateway-dependency", "auth-retry-policy", "rate-limit-config",
     "schema-migration-reference", "api-error-handling".
 
+Deep connection rules:
+  When a candidate shows connection_depth.is_deep=true, that pair has exceeded
+  the depth threshold. Use the already-promoted links from the pair as context.
+  Lean toward PROMOTE for pending candidates in a deep pair unless the specific
+  excerpt is demonstrably unrelated to the established relationship.
+  After draining the candidate queue, call ListDeepConnections to find any
+  unreviewed deep pairs. For each, call GetDeepConnection and review holistically.
+
+Inference rules:
+  After completing the candidate review, call ListInferences with status="pending".
+  For each inference:
+    Accept title if title_confidence >= 0.6 and the title makes sense.
+    Accept project if project_evidence[0].fraction >= 0.60 and candidate_count >= 3.
+    Reject if neither field is acceptable.
+
 Run the full review loop:
   1. Call GetStats. If candidates_pending == 0, report and stop.
   2. Call ListCandidates to fetch the first batch.
@@ -764,6 +1175,12 @@ Run the full review loop:
   4. Call PromoteCandidate or DismissCandidate for each decision.
   5. If next_page_token is non-empty, fetch the next batch.
   6. When all pages are exhausted, call GetStats and report the final counts.
+  7. Call ListDeepConnections with only_unreviewed=true. For each deep pair,
+     call GetDeepConnection and review all pending candidates holistically.
+  8. Call ListInferences with status="pending". For each inference, call
+     AcceptInference or RejectInference based on confidence and evidence.
+  9. Call GetStats and report: N promoted, N dismissed, N inferences accepted,
+     N inferences rejected, N deep connections reviewed, N remaining.
 ```
 
 ---

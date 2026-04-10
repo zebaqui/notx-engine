@@ -66,16 +66,18 @@ type writeRequest struct {
 
 // Provider is a SQLite-backed implementation of all repository interfaces.
 type Provider struct {
-	dataDir         string
-	notesDir        string
-	db              *sql.DB
-	writeCh         chan writeRequest
-	wg              sync.WaitGroup
-	closeOnce       sync.Once
-	closeErr        error
-	scorerCh        chan<- string      // channel to send candidate IDs for BM25 enrichment
-	scorerCtxCancel context.CancelFunc // cancels the scorer goroutine
-	burstCfg        core.BurstConfig   // burst extraction config
+	dataDir            string
+	notesDir           string
+	db                 *sql.DB
+	writeCh            chan writeRequest
+	wg                 sync.WaitGroup
+	closeOnce          sync.Once
+	closeErr           error
+	scorerCh           chan<- string      // channel to send candidate IDs for BM25 enrichment
+	scorerCtxCancel    context.CancelFunc // cancels the scorer goroutine
+	inferenceCh        chan<- string      // channel to send note URNs for metadata inference
+	inferenceCtxCancel context.CancelFunc // cancels the inference runner goroutine
+	burstCfg           core.BurstConfig   // burst extraction config
 }
 
 // New opens (or creates) the SQLite index and starts the writer goroutine.
@@ -105,6 +107,11 @@ func New(dataDir string, rebuild func(ctx context.Context, notesDir string, db *
 	p.scorerCh = StartScorer(scorerCtx, p.db, p.write, DefaultScorerConfig())
 	p.burstCfg = core.DefaultBurstConfig()
 
+	// Start the background inference runner goroutine.
+	inferenceCtx, inferenceCancel := context.WithCancel(context.Background())
+	p.inferenceCtxCancel = inferenceCancel
+	p.inferenceCh = StartInferenceRunner(inferenceCtx, p.db, p.write, p.burstCfg, DefaultInferenceConfig())
+
 	return p, nil
 }
 
@@ -113,6 +120,9 @@ func (p *Provider) Close() error {
 	p.closeOnce.Do(func() {
 		if p.scorerCtxCancel != nil {
 			p.scorerCtxCancel()
+		}
+		if p.inferenceCtxCancel != nil {
+			p.inferenceCtxCancel()
 		}
 		close(p.writeCh)
 		p.wg.Wait()
@@ -527,40 +537,13 @@ func (p *Provider) extractBurstsForEvent(db *sql.DB, event *core.Event, content 
 	noteURN := event.NoteURN.String()
 
 	// ── 1. Read project / folder URN directly from the already-open db ───────
-	var projURN, fldURN string
-	_ = db.QueryRow(`SELECT project_urn, folder_urn FROM notes WHERE urn=?`, noteURN).
-		Scan(&projURN, &fldURN)
+	var projURN, fldURN, noteTitle string
+	_ = db.QueryRow(`SELECT project_urn, folder_urn, title FROM notes WHERE urn=?`, noteURN).
+		Scan(&projURN, &fldURN, &noteTitle)
 
 	cfg := p.burstCfg
 
-	// ── 2. Rate limit check (raw SQL, no p.write) ─────────────────────────────
-	startOfDayMs := toMs(time.Now().UTC().Truncate(24 * time.Hour))
-
-	var noteCount, projectCount int
-	if err := db.QueryRow(
-		`SELECT COUNT(*) FROM context_bursts WHERE note_urn=? AND created_at>=?`,
-		noteURN, startOfDayMs,
-	).Scan(&noteCount); err != nil {
-		fmt.Printf("context: WARN: burst note count: %v\n", err)
-		return
-	}
-	if noteCount >= cfg.MaxPerNotePerDay {
-		return
-	}
-	if projURN != "" {
-		if err := db.QueryRow(
-			`SELECT COUNT(*) FROM context_bursts WHERE project_urn=? AND created_at>=?`,
-			projURN, startOfDayMs,
-		).Scan(&projectCount); err != nil {
-			fmt.Printf("context: WARN: burst project count: %v\n", err)
-			return
-		}
-		if projectCount >= cfg.MaxPerProjectPerDay {
-			return
-		}
-	}
-
-	// ── 3. Build a minimal core.Note for ExtractBursts ───────────────────────
+	// ── 2. Build a minimal core.Note for ExtractBursts ───────────────────────
 	noteURNParsed, err := core.ParseURN(noteURN)
 	if err != nil {
 		return
@@ -705,6 +688,16 @@ func (p *Provider) extractBurstsForEvent(db *sql.DB, event *core.Event, content 
 		case p.scorerCh <- id:
 		default:
 			// Channel full — drop silently
+		}
+	}
+
+	// ── 8. Queue for inference if the note lacks a title or project ──────────
+	// The inference runner is advisory: if the channel is full, we drop silently.
+	if noteTitle == "" || projURN == "" {
+		select {
+		case p.inferenceCh <- noteURN:
+		default:
+			// Channel full — drop silently.
 		}
 	}
 }

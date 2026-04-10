@@ -3,10 +3,12 @@ package http
 import (
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
 	pb "github.com/zebaqui/notx-engine/proto"
+	"github.com/zebaqui/notx-engine/repo"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -47,13 +49,15 @@ type candidateRecordJSON struct {
 }
 
 type contextStatsJSON struct {
-	BurstsTotal                 int64   `json:"bursts_total"`
-	BurstsToday                 int64   `json:"bursts_today"`
-	CandidatesPending           int64   `json:"candidates_pending"`
-	CandidatesPendingUnenriched int64   `json:"candidates_pending_unenriched"`
-	CandidatesPromoted          int64   `json:"candidates_promoted"`
-	CandidatesDismissed         int64   `json:"candidates_dismissed"`
+	BurstsTotal                 int     `json:"bursts_total"`
+	BurstsToday                 int     `json:"bursts_today"`
+	CandidatesPending           int     `json:"candidates_pending"`
+	CandidatesPendingUnenriched int     `json:"candidates_pending_unenriched"`
+	CandidatesPromoted          int     `json:"candidates_promoted"`
+	CandidatesDismissed         int     `json:"candidates_dismissed"`
 	OldestPendingAgeDays        float64 `json:"oldest_pending_age_days"`
+	InferencesPending           int     `json:"inferences_pending"`
+	InferencesAccepted          int     `json:"inferences_accepted"`
 }
 
 type projectContextConfigJSON struct {
@@ -94,6 +98,37 @@ type listCandidatesResponse struct {
 type listBurstsResponse struct {
 	Bursts        []*burstRecordJSON `json:"bursts"`
 	NextPageToken string             `json:"next_page_token,omitempty"`
+}
+
+// inferenceRecordJSON is the HTTP JSON representation of a metadata inference.
+type inferenceRecordJSON struct {
+	ID                 string  `json:"id"`
+	NoteURN            string  `json:"note_urn"`
+	InferredTitle      string  `json:"inferred_title"`
+	InferredProjectURN string  `json:"inferred_project_urn"`
+	TitleConfidence    float64 `json:"title_confidence"`
+	ProjectConfidence  float64 `json:"project_confidence"`
+	ProjectEvidence    string  `json:"project_evidence"`
+	TitleBasisBurstID  string  `json:"title_basis_burst_id"`
+	Status             string  `json:"status"`
+	CreatedAt          string  `json:"created_at"`
+	ReviewedAt         *string `json:"reviewed_at,omitempty"`
+	ReviewedBy         string  `json:"reviewed_by,omitempty"`
+}
+
+type listInferencesResponse struct {
+	Inferences    []*inferenceRecordJSON `json:"inferences"`
+	NextPageToken string                 `json:"next_page_token,omitempty"`
+}
+
+type acceptInferenceRequest struct {
+	AcceptTitle   bool   `json:"accept_title"`
+	AcceptProject bool   `json:"accept_project"`
+	ReviewerURN   string `json:"reviewer_urn"`
+}
+
+type rejectInferenceRequest struct {
+	ReviewerURN string `json:"reviewer_urn"`
 }
 
 type promoteResponse struct {
@@ -168,12 +203,12 @@ func statsProtoToJSON(s *pb.ContextStats) *contextStatsJSON {
 		return nil
 	}
 	return &contextStatsJSON{
-		BurstsTotal:                 s.BurstsTotal,
-		BurstsToday:                 s.BurstsToday,
-		CandidatesPending:           s.CandidatesPending,
-		CandidatesPendingUnenriched: s.CandidatesPendingUnenriched,
-		CandidatesPromoted:          s.CandidatesPromoted,
-		CandidatesDismissed:         s.CandidatesDismissed,
+		BurstsTotal:                 int(s.BurstsTotal),
+		BurstsToday:                 int(s.BurstsToday),
+		CandidatesPending:           int(s.CandidatesPending),
+		CandidatesPendingUnenriched: int(s.CandidatesPendingUnenriched),
+		CandidatesPromoted:          int(s.CandidatesPromoted),
+		CandidatesDismissed:         int(s.CandidatesDismissed),
 		OldestPendingAgeDays:        s.OldestPendingAgeDays,
 	}
 }
@@ -189,6 +224,27 @@ func projectConfigProtoToJSON(c *pb.ProjectContextConfig) *projectContextConfigJ
 	}
 	if c.UpdatedAt != nil {
 		j.UpdatedAt = c.UpdatedAt.AsTime().UTC().Format(time.RFC3339)
+	}
+	return j
+}
+
+func inferenceToJSON(inf *repo.InferenceRecord) *inferenceRecordJSON {
+	j := &inferenceRecordJSON{
+		ID:                 inf.ID,
+		NoteURN:            inf.NoteURN,
+		InferredTitle:      inf.InferredTitle,
+		InferredProjectURN: inf.InferredProjectURN,
+		TitleConfidence:    inf.TitleConfidence,
+		ProjectConfidence:  inf.ProjectConfidence,
+		ProjectEvidence:    inf.ProjectEvidence,
+		TitleBasisBurstID:  inf.TitleBasisBurstID,
+		Status:             inf.Status,
+		CreatedAt:          inf.CreatedAt.UTC().Format(time.RFC3339),
+		ReviewedBy:         inf.ReviewedBy,
+	}
+	if inf.ReviewedAt != nil {
+		s := inf.ReviewedAt.UTC().Format(time.RFC3339)
+		j.ReviewedAt = &s
 	}
 	return j
 }
@@ -342,15 +398,23 @@ func (h *Handler) routeContextConfig(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) handleGetContextStats(w http.ResponseWriter, r *http.Request) {
 	projectURN := r.URL.Query().Get("project_urn")
 
-	resp, err := h.contextSvc.GetStats(r.Context(), &pb.GetStatsRequest{
-		ProjectUrn: projectURN,
-	})
+	stats, err := h.contextSvc.GetFullStats(r.Context(), projectURN)
 	if err != nil {
-		grpcErrToHTTP(w, r, h, err, "get context stats")
+		h.internalError(w, r, "get context stats", err)
 		return
 	}
 
-	writeJSON(w, http.StatusOK, statsProtoToJSON(resp.Stats))
+	writeJSON(w, http.StatusOK, &contextStatsJSON{
+		BurstsTotal:                 stats.BurstsTotal,
+		BurstsToday:                 stats.BurstsToday,
+		CandidatesPending:           stats.CandidatesPending,
+		CandidatesPendingUnenriched: stats.CandidatesPendingUnenriched,
+		CandidatesPromoted:          stats.CandidatesPromoted,
+		CandidatesDismissed:         stats.CandidatesDismissed,
+		OldestPendingAgeDays:        stats.OldestPendingAgeDays,
+		InferencesPending:           stats.InferencesPending,
+		InferencesAccepted:          stats.InferencesAccepted,
+	})
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -579,4 +643,259 @@ func (h *Handler) handleSetProjectConfig(w http.ResponseWriter, r *http.Request,
 	}
 
 	writeJSON(w, http.StatusOK, projectConfigProtoToJSON(resp.Config))
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Route dispatchers — inferences
+// ─────────────────────────────────────────────────────────────────────────────
+
+// routeContextInferences — GET /v1/context/inferences
+func (h *Handler) routeContextInferences(w http.ResponseWriter, r *http.Request) {
+	if h.contextSvc == nil {
+		writeError(w, http.StatusServiceUnavailable, "context service not available")
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		h.handleListInferences(w, r)
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+// routeContextInference handles:
+//
+//	GET  /v1/context/inferences/{id}
+//	POST /v1/context/inferences/{id}/accept
+//	POST /v1/context/inferences/{id}/reject
+func (h *Handler) routeContextInference(w http.ResponseWriter, r *http.Request) {
+	if h.contextSvc == nil {
+		writeError(w, http.StatusServiceUnavailable, "context service not available")
+		return
+	}
+
+	trimmed := strings.TrimPrefix(r.URL.Path, "/v1/context/inferences/")
+	if trimmed == "" {
+		writeError(w, http.StatusBadRequest, "inference id is required")
+		return
+	}
+
+	id, sub, hasSub := strings.Cut(trimmed, "/")
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "inference id is required")
+		return
+	}
+
+	if hasSub {
+		switch sub {
+		case "accept":
+			if r.Method != http.MethodPost {
+				writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+				return
+			}
+			h.handleAcceptInference(w, r, id)
+		case "reject":
+			if r.Method != http.MethodPost {
+				writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+				return
+			}
+			h.handleRejectInference(w, r, id)
+		default:
+			writeError(w, http.StatusNotFound, "unknown inference sub-resource: "+sub)
+		}
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		h.handleGetInference(w, r, id)
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /v1/context/inferences
+// ─────────────────────────────────────────────────────────────────────────────
+
+func (h *Handler) handleListInferences(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	noteURN := q.Get("note_urn")
+	statusFilter := q.Get("status")
+	pageToken := q.Get("page_token")
+	pageSize := 0
+	if ps := q.Get("page_size"); ps != "" {
+		if n, err := strconv.Atoi(ps); err == nil {
+			pageSize = n
+		}
+	}
+
+	opts := repo.InferenceListOptions{
+		NoteURN:   noteURN,
+		Status:    statusFilter,
+		PageSize:  pageSize,
+		PageToken: pageToken,
+	}
+
+	inferences, nextToken, err := h.contextSvc.ListInferences(r.Context(), opts)
+	if err != nil {
+		h.internalError(w, r, "list inferences", err)
+		return
+	}
+
+	items := make([]*inferenceRecordJSON, 0, len(inferences))
+	for i := range inferences {
+		items = append(items, inferenceToJSON(&inferences[i]))
+	}
+
+	writeJSON(w, http.StatusOK, &listInferencesResponse{
+		Inferences:    items,
+		NextPageToken: nextToken,
+	})
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /v1/context/inferences/{id}
+// ─────────────────────────────────────────────────────────────────────────────
+
+func (h *Handler) handleGetInference(w http.ResponseWriter, r *http.Request, id string) {
+	inf, err := h.contextSvc.GetInference(r.Context(), id)
+	if err != nil {
+		grpcErrToHTTP(w, r, h, err, "get inference")
+		return
+	}
+	writeJSON(w, http.StatusOK, inferenceToJSON(&inf))
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /v1/context/inferences/{id}/accept
+// ─────────────────────────────────────────────────────────────────────────────
+
+func (h *Handler) handleAcceptInference(w http.ResponseWriter, r *http.Request, id string) {
+	var req acceptInferenceRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if !req.AcceptTitle && !req.AcceptProject {
+		writeError(w, http.StatusBadRequest, "at least one of accept_title or accept_project must be true")
+		return
+	}
+	if req.ReviewerURN == "" {
+		req.ReviewerURN = "urn:notx:usr:anon"
+	}
+
+	opts := repo.AcceptInferenceOptions{
+		AcceptTitle:   req.AcceptTitle,
+		AcceptProject: req.AcceptProject,
+		ReviewerURN:   req.ReviewerURN,
+	}
+	if err := h.contextSvc.AcceptInference(r.Context(), id, opts); err != nil {
+		grpcErrToHTTP(w, r, h, err, "accept inference")
+		return
+	}
+
+	inf, err := h.contextSvc.GetInference(r.Context(), id)
+	if err != nil {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "accepted"})
+		return
+	}
+	writeJSON(w, http.StatusOK, inferenceToJSON(&inf))
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /v1/context/inferences/{id}/reject
+// ─────────────────────────────────────────────────────────────────────────────
+
+func (h *Handler) handleRejectInference(w http.ResponseWriter, r *http.Request, id string) {
+	var req rejectInferenceRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if req.ReviewerURN == "" {
+		req.ReviewerURN = "urn:notx:usr:anon"
+	}
+
+	if err := h.contextSvc.RejectInference(r.Context(), id, req.ReviewerURN); err != nil {
+		grpcErrToHTTP(w, r, h, err, "reject inference")
+		return
+	}
+
+	inf, err := h.contextSvc.GetInference(r.Context(), id)
+	if err != nil {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "rejected"})
+		return
+	}
+	writeJSON(w, http.StatusOK, inferenceToJSON(&inf))
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /v1/context/bursts/search
+// ─────────────────────────────────────────────────────────────────────────────
+
+// routeContextBurstSearch — GET /v1/context/bursts/search
+// This exact-path handler is registered before "/v1/context/bursts/" so that
+// Go's ServeMux prefers it (longer match wins) over the {id} prefix pattern.
+func (h *Handler) routeContextBurstSearch(w http.ResponseWriter, r *http.Request) {
+	if h.contextSvc == nil {
+		writeError(w, http.StatusNotImplemented, "context service not available")
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		h.handleSearchBursts(w, r)
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+// GET /v1/context/bursts/search?q=...&page_size=N
+func (h *Handler) handleSearchBursts(w http.ResponseWriter, r *http.Request) {
+	q := strings.TrimSpace(r.URL.Query().Get("q"))
+	if q == "" {
+		writeError(w, http.StatusBadRequest, "q is required")
+		return
+	}
+	pageSize := 20
+	if ps := r.URL.Query().Get("page_size"); ps != "" {
+		fmt.Sscanf(ps, "%d", &pageSize)
+	}
+
+	results, err := h.contextSvc.SearchBursts(r.Context(), q, pageSize)
+	if err != nil {
+		grpcErrToHTTP(w, r, h, err, "search bursts")
+		return
+	}
+
+	type burstSearchResultJSON struct {
+		ID         string  `json:"id"`
+		NoteURN    string  `json:"note_urn"`
+		ProjectURN string  `json:"project_urn,omitempty"`
+		LineStart  int     `json:"line_start"`
+		LineEnd    int     `json:"line_end"`
+		Text       string  `json:"text"`
+		Tokens     string  `json:"tokens,omitempty"`
+		BM25Score  float32 `json:"bm25_score"`
+		CreatedAt  string  `json:"created_at,omitempty"`
+	}
+
+	out := make([]burstSearchResultJSON, 0, len(results))
+	for _, res := range results {
+		j := burstSearchResultJSON{
+			ID:         res.ID,
+			NoteURN:    res.NoteURN,
+			ProjectURN: res.ProjectURN,
+			LineStart:  res.LineStart,
+			LineEnd:    res.LineEnd,
+			Text:       res.Text,
+			Tokens:     res.Tokens,
+			BM25Score:  res.BM25Score,
+		}
+		if !res.CreatedAt.IsZero() {
+			j.CreatedAt = res.CreatedAt.UTC().Format(time.RFC3339)
+		}
+		out = append(out, j)
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"results": out})
 }

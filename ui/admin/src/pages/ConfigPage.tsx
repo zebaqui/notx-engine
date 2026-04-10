@@ -1,5 +1,14 @@
 import { useQuery } from "@tanstack/react-query";
-import { RefreshCw, AlertCircle, Shield, ShieldOff, Server, Database, Sliders } from "lucide-react";
+import { HugeiconsIcon } from "@hugeicons/react";
+import {
+  Refresh01Icon,
+  AlertCircleIcon,
+  Shield01Icon,
+  ShieldBanIcon,
+  ServerStack01Icon,
+  Database01Icon,
+  SlidersHorizontalIcon,
+} from "@hugeicons/core-free-icons";
 import { fetchHealth } from "../api/client";
 import type { ServerConfig } from "../api/types";
 
@@ -90,29 +99,32 @@ export default function ConfigPage() {
           onClick={() => health.refetch()}
           disabled={health.isLoading}
         >
-          <RefreshCw size={14} />
+          <HugeiconsIcon icon={Refresh01Icon} size={14} strokeWidth={1.5} />
           Refresh
         </button>
       </div>
 
       {health.isError && (
         <div className="error-banner">
-          <AlertCircle size={15} />
+          <HugeiconsIcon icon={AlertCircleIcon} size={15} strokeWidth={1.5} />
           Server unreachable — configuration shown below reflects compiled
           defaults.
         </div>
       )}
 
       {/* ── Protocol toggles ─────────────────────────────────────────────── */}
-      <Section icon={<Server size={14} />} title="Protocol servers">
+      <Section
+        icon={
+          <HugeiconsIcon icon={ServerStack01Icon} size={14} strokeWidth={1.5} />
+        }
+        title="Protocol servers"
+      >
         <table className="kv-table">
           <tbody>
             <tr>
               <td>HTTP API</td>
               <td>
-                <div
-                  style={{ display: "flex", alignItems: "center", gap: 10 }}
-                >
+                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
                   <BoolBadge value={cfg.enable_http} />
                   {cfg.enable_http && (
                     <span className="mono">
@@ -125,9 +137,7 @@ export default function ConfigPage() {
             <tr>
               <td>gRPC</td>
               <td>
-                <div
-                  style={{ display: "flex", alignItems: "center", gap: 10 }}
-                >
+                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
                   <BoolBadge value={cfg.enable_grpc} />
                   {cfg.enable_grpc && (
                     <span className="mono">
@@ -140,7 +150,9 @@ export default function ConfigPage() {
             <tr>
               <td>Bind host</td>
               <td>
-                <span className="mono">{cfg.host === "" ? "0.0.0.0 (all interfaces)" : cfg.host}</span>
+                <span className="mono">
+                  {cfg.host === "" ? "0.0.0.0 (all interfaces)" : cfg.host}
+                </span>
               </td>
             </tr>
             <tr>
@@ -163,9 +175,19 @@ export default function ConfigPage() {
       <Section
         icon={
           cfg.tls_enabled ? (
-            <Shield size={14} style={{ color: "var(--green)" }} />
+            <HugeiconsIcon
+              icon={Shield01Icon}
+              size={14}
+              strokeWidth={1.5}
+              style={{ color: "var(--green)" }}
+            />
           ) : (
-            <ShieldOff size={14} style={{ color: "var(--yellow)" }} />
+            <HugeiconsIcon
+              icon={ShieldBanIcon}
+              size={14}
+              strokeWidth={1.5}
+              style={{ color: "var(--yellow)" }}
+            />
           )
         }
         title="TLS / security"
@@ -224,7 +246,12 @@ export default function ConfigPage() {
       </Section>
 
       {/* ── Storage ──────────────────────────────────────────────────────── */}
-      <Section icon={<Database size={14} />} title="Storage">
+      <Section
+        icon={
+          <HugeiconsIcon icon={Database01Icon} size={14} strokeWidth={1.5} />
+        }
+        title="Storage"
+      >
         <table className="kv-table">
           <tbody>
             <tr>
@@ -250,7 +277,16 @@ export default function ConfigPage() {
       </Section>
 
       {/* ── Operational ──────────────────────────────────────────────────── */}
-      <Section icon={<Sliders size={14} />} title="Operational">
+      <Section
+        icon={
+          <HugeiconsIcon
+            icon={SlidersHorizontalIcon}
+            size={14}
+            strokeWidth={1.5}
+          />
+        }
+        title="Operational"
+      >
         <table className="kv-table">
           <tbody>
             <tr>
@@ -261,8 +297,8 @@ export default function ConfigPage() {
                     cfg.log_level === "debug"
                       ? "badge-blue"
                       : cfg.log_level === "warn" || cfg.log_level === "error"
-                      ? "badge-yellow"
-                      : "badge-green"
+                        ? "badge-yellow"
+                        : "badge-green"
                   }`}
                 >
                   {cfg.log_level}
@@ -292,7 +328,12 @@ export default function ConfigPage() {
       </Section>
 
       {/* ── Live health snapshot ──────────────────────────────────────────── */}
-      <Section icon={<Server size={14} />} title="Live probe results">
+      <Section
+        icon={
+          <HugeiconsIcon icon={ServerStack01Icon} size={14} strokeWidth={1.5} />
+        }
+        title="Live probe results"
+      >
         <table className="kv-table">
           <tbody>
             <tr>

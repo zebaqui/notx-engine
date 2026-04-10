@@ -98,6 +98,10 @@ type SearchResult struct {
 	// Excerpt is a short snippet of the matching content with the query terms
 	// highlighted (provider-defined format).
 	Excerpt string
+
+	// BM25Score is the Okapi BM25 relevance score assigned by the search
+	// provider. Zero when the provider does not support BM25 scoring.
+	BM25Score float32
 }
 
 // SearchResults is the return value of NoteRepository.Search.
@@ -545,6 +549,19 @@ type BurstRecord struct {
 	CreatedAt  time.Time `json:"created_at"`
 }
 
+// BurstSearchResult is a single hit returned by SearchBursts.
+type BurstSearchResult struct {
+	ID         string
+	NoteURN    string
+	ProjectURN string
+	LineStart  int
+	LineEnd    int
+	Text       string
+	Tokens     string
+	BM25Score  float32
+	CreatedAt  time.Time
+}
+
 // CandidateRecord is a candidate relation between two bursts.
 type CandidateRecord struct {
 	ID           string     `json:"id"`
@@ -604,6 +621,42 @@ type ContextStats struct {
 	CandidatesPromoted          int     `json:"candidates_promoted"`
 	CandidatesDismissed         int     `json:"candidates_dismissed"`
 	OldestPendingAgeDays        float64 `json:"oldest_pending_age_days"`
+	InferencesPending           int     `json:"inferences_pending"`
+	InferencesAccepted          int     `json:"inferences_accepted"`
+}
+
+// InferenceRecord is an asynchronously derived metadata suggestion for a note
+// that was created without a title or project URN.
+type InferenceRecord struct {
+	ID                 string  `json:"id"`
+	NoteURN            string  `json:"note_urn"`
+	InferredTitle      string  `json:"inferred_title"`
+	InferredProjectURN string  `json:"inferred_project_urn"`
+	TitleConfidence    float64 `json:"title_confidence"`
+	ProjectConfidence  float64 `json:"project_confidence"`
+	// ProjectEvidence is a JSON array: [{project_urn, match_count, score}]
+	ProjectEvidence   string     `json:"project_evidence"`
+	TitleBasisBurstID string     `json:"title_basis_burst_id"`
+	Status            string     `json:"status"` // pending, accepted, rejected
+	CreatedAt         time.Time  `json:"created_at"`
+	ReviewedAt        *time.Time `json:"reviewed_at,omitempty"`
+	ReviewedBy        string     `json:"reviewed_by,omitempty"`
+	RejectedTokenHash string     `json:"rejected_token_hash,omitempty"`
+}
+
+// InferenceListOptions controls filtering and pagination for ListInferences.
+type InferenceListOptions struct {
+	NoteURN   string // filter to a specific note URN (empty = all)
+	Status    string // "pending", "accepted", "rejected", or "" for all
+	PageSize  int
+	PageToken string
+}
+
+// AcceptInferenceOptions carries the parameters for accepting an inference.
+type AcceptInferenceOptions struct {
+	AcceptTitle   bool
+	AcceptProject bool
+	ReviewerURN   string
 }
 
 // ContextRepository manages context bursts and candidate relations.
@@ -642,6 +695,12 @@ type ContextRepository interface {
 	// authorURN is stamped on any new candidates created. Returns the number of
 	// new candidates created.
 	IndexNoteIntoProject(ctx context.Context, noteURN, projectURN string) (newCandidates int, err error)
+
+	// SuggestProjectForNote scores the note's existing bursts against bursts from
+	// other notes that already have a project assigned, and returns ranked project
+	// suggestions. Returns an empty slice (not an error) when no suggestions can
+	// be made. This is a read-only operation; it never mutates state.
+	SuggestProjectForNote(ctx context.Context, noteURN string) ([]core.ProjectSuggestion, error)
 
 	// RecentBurstsInProject fetches up to limit bursts from different notes in the
 	// same project, created within the last days, ordered by created_at DESC.
@@ -686,4 +745,34 @@ type ContextRepository interface {
 	// GetContextStats returns queue health statistics.
 	// If projectURN is non-empty, scopes stats to that project.
 	GetContextStats(ctx context.Context, projectURN string) (ContextStats, error)
+
+	// ── Metadata Inference ────────────────────────────────────────────────────
+
+	// GetInference retrieves a single inference by ID.
+	// Returns ErrNotFound if not present.
+	GetInference(ctx context.Context, id string) (InferenceRecord, error)
+
+	// GetNoteInference retrieves the active pending inference for a note.
+	// Returns (record, true, nil) if found, (zero, false, nil) if none.
+	GetNoteInference(ctx context.Context, noteURN string) (InferenceRecord, bool, error)
+
+	// ListInferences returns a paginated list of inferences matching opts,
+	// ordered by created_at DESC.
+	ListInferences(ctx context.Context, opts InferenceListOptions) ([]InferenceRecord, string, error)
+
+	// AcceptInference marks an inference as accepted and applies the accepted
+	// fields (title and/or project_urn) to the note record directly.
+	// Returns ErrNotFound if the inference does not exist or is not pending.
+	AcceptInference(ctx context.Context, id string, opts AcceptInferenceOptions) error
+
+
+	// SearchBursts performs a full-text search over burst text and tokens,
+	// ordered by relevance score descending.
+	// q is the query string. pageSize <= 0 defaults to 20, capped at 100.
+	// Returns an empty slice (not an error) when no results are found.
+	SearchBursts(ctx context.Context, q string, pageSize int) ([]BurstSearchResult, error)
+	// RejectInference marks an inference as rejected and records the current
+	// burst token hash to gate re-inference until content changes substantially.
+	// Returns ErrNotFound if the inference does not exist or is not pending.
+	RejectInference(ctx context.Context, id, reviewerURN string) error
 }

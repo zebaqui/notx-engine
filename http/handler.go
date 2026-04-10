@@ -214,7 +214,11 @@ func (h *Handler) routes() {
 	// new device can bootstrap itself without a pre-existing identity.
 	// All other device routes (GET, PATCH, DELETE) require a valid device.
 	h.mux.HandleFunc("/v1/devices", h.withMiddleware(h.routeDevicesOpen))
-	h.mux.HandleFunc("/v1/devices/", h.withDeviceAuthMiddleware(h.routeDevice))
+	// /v1/devices/ is a single catch-all. The dispatcher (routeDeviceDispatch)
+	// applies the lighter existence-only auth for status/status/stream sub-paths
+	// (so a pending device can poll its own approval state) and the full
+	// approval-gated auth for every other device sub-path.
+	h.mux.HandleFunc("/v1/devices/", h.withMiddleware(h.routeDeviceDispatch))
 
 	// Users
 	h.mux.HandleFunc("/v1/users", h.withDeviceAuthMiddleware(h.routeUsers))
@@ -231,6 +235,9 @@ func (h *Handler) routes() {
 	// Server info
 	h.mux.HandleFunc("/v1/info", h.withMiddleware(h.routeServerInfo))
 
+	// Ports — public, no auth needed; returns all active service ports
+	h.mux.HandleFunc("/v1/ports", h.withMiddleware(h.handlePorts))
+
 	// Relay
 	if h.relaySvc != nil {
 		h.routeRelay(h.relaySvc)
@@ -241,8 +248,11 @@ func (h *Handler) routes() {
 	h.mux.HandleFunc("/v1/context/candidates", h.withDeviceAuthMiddleware(h.routeContextCandidates))
 	h.mux.HandleFunc("/v1/context/candidates/", h.withDeviceAuthMiddleware(h.routeContextCandidate))
 	h.mux.HandleFunc("/v1/context/bursts", h.withDeviceAuthMiddleware(h.routeContextBursts))
+	h.mux.HandleFunc("/v1/context/bursts/search", h.withDeviceAuthMiddleware(h.routeContextBurstSearch))
 	h.mux.HandleFunc("/v1/context/bursts/", h.withDeviceAuthMiddleware(h.routeContextBurst))
 	h.mux.HandleFunc("/v1/context/config/", h.withDeviceAuthMiddleware(h.routeContextConfig))
+	h.mux.HandleFunc("/v1/context/inferences", h.withDeviceAuthMiddleware(h.routeContextInferences))
+	h.mux.HandleFunc("/v1/context/inferences/", h.withDeviceAuthMiddleware(h.routeContextInference))
 
 	// Links — anchors, backlinks, external links
 	h.mux.HandleFunc("/v1/links/anchors", h.withDeviceAuthMiddleware(h.routeLinkAnchors))
@@ -285,6 +295,43 @@ func (h *Handler) handleHealthz(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) handleReadyz(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
+}
+
+// portsResponse lists every TCP port currently bound by this server instance.
+// Fields are omitted when the corresponding service is disabled.
+type portsResponse struct {
+	HTTP             *int `json:"http,omitempty"`
+	GRPC             *int `json:"grpc,omitempty"`
+	PairingBootstrap *int `json:"pairing_bootstrap,omitempty"`
+}
+
+// handlePorts handles GET /v1/ports.
+// It is intentionally public (no device auth) so clients and operators can
+// discover service addresses without needing a registered device.
+func (h *Handler) handlePorts(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	resp := portsResponse{}
+
+	if h.cfg.EnableHTTP {
+		p := h.cfg.HTTPPort
+		resp.HTTP = &p
+	}
+
+	if h.cfg.EnableGRPC {
+		p := h.cfg.GRPCPort
+		resp.GRPC = &p
+	}
+
+	if h.cfg.Pairing.Enabled {
+		p := h.cfg.Pairing.BootstrapPort
+		resp.PairingBootstrap = &p
+	}
+
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

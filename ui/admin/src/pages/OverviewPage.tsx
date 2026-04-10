@@ -1,13 +1,14 @@
 import { useQuery } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
+import { HugeiconsIcon } from "@hugeicons/react";
 import {
-  RefreshCw,
-  AlertCircle,
-  FolderOpen,
-  Folder,
-  Users,
-  Monitor,
-} from "lucide-react";
+  Refresh01Icon,
+  AlertCircleIcon,
+  FolderOpenIcon,
+  Folder01Icon,
+  UserGroupIcon,
+  MonitorDotIcon,
+} from "@hugeicons/core-free-icons";
 import { fetchHealth, fetchMetrics } from "../api/client";
 
 function fmt(n: number) {
@@ -61,7 +62,12 @@ export default function OverviewPage() {
             }}
             disabled={isLoading}
           >
-            <RefreshCw size={14} className={isLoading ? "spin-icon" : ""} />
+            <HugeiconsIcon
+              icon={Refresh01Icon}
+              size={13}
+              strokeWidth={1.5}
+              className={isLoading ? "spin-icon" : ""}
+            />
             Refresh
           </button>
         </div>
@@ -69,7 +75,7 @@ export default function OverviewPage() {
 
       {hasError && (
         <div className="error-banner">
-          <AlertCircle size={15} />
+          <HugeiconsIcon icon={AlertCircleIcon} size={14} strokeWidth={1.5} />
           Could not reach the notx server. Make sure it is running on{" "}
           <span className="mono">:4060</span>.
         </div>
@@ -77,7 +83,7 @@ export default function OverviewPage() {
 
       {/* ── Health row ─────────────────────────────────────────────────── */}
       <div>
-        <div className="card-title" style={{ marginBottom: 10 }}>
+        <div className="card-title" style={{ marginBottom: 8 }}>
           Server status
         </div>
         <div className="grid-2">
@@ -96,7 +102,7 @@ export default function OverviewPage() {
 
       {/* ── Notes ──────────────────────────────────────────────────────── */}
       <div>
-        <div className="card-title" style={{ marginBottom: 10 }}>
+        <div className="card-title" style={{ marginBottom: 8 }}>
           Notes
         </div>
         {metrics.isLoading ? (
@@ -106,12 +112,12 @@ export default function OverviewPage() {
             <StatTile
               label="Total"
               value={fmt(metrics.data?.total_notes ?? 0)}
-              sub="all time, inc. deleted"
+              sub="all time"
             />
             <StatTile
               label="Active"
               value={fmt(metrics.data?.active_notes ?? 0)}
-              sub="not soft-deleted"
+              sub="not deleted"
               accent
             />
             <StatTile
@@ -122,7 +128,7 @@ export default function OverviewPage() {
             <StatTile
               label="Secure"
               value={fmt(metrics.data?.secure_notes ?? 0)}
-              sub="end-to-end encrypted"
+              sub="encrypted"
             />
           </div>
         )}
@@ -148,9 +154,9 @@ export default function OverviewPage() {
                 : "0.0"}
               <span
                 style={{
-                  fontSize: 16,
-                  fontWeight: 400,
-                  color: "var(--text-secondary)",
+                  fontSize: 14,
+                  color: "var(--text-muted)",
+                  marginLeft: 2,
                 }}
               >
                 %
@@ -163,7 +169,7 @@ export default function OverviewPage() {
 
       {/* ── Organisation ───────────────────────────────────────────────── */}
       <div>
-        <div className="card-title" style={{ marginBottom: 10 }}>
+        <div className="card-title" style={{ marginBottom: 8 }}>
           Organisation
         </div>
         {metrics.isLoading ? (
@@ -171,17 +177,29 @@ export default function OverviewPage() {
         ) : (
           <div className="grid-2">
             <IconTile
-              icon={<FolderOpen size={22} />}
+              icon={
+                <HugeiconsIcon
+                  icon={FolderOpenIcon}
+                  size={20}
+                  strokeWidth={1.5}
+                />
+              }
               label="Projects"
               value={fmt(metrics.data?.total_projects ?? 0)}
               sub="active project groups"
               onClick={() => navigate({ to: "/projects" })}
             />
             <IconTile
-              icon={<Folder size={22} />}
+              icon={
+                <HugeiconsIcon
+                  icon={Folder01Icon}
+                  size={20}
+                  strokeWidth={1.5}
+                />
+              }
               label="Folders"
               value={fmt(metrics.data?.total_folders ?? 0)}
-              sub="folders across all projects"
+              sub="across all projects"
               onClick={() => navigate({ to: "/projects" })}
             />
           </div>
@@ -190,8 +208,8 @@ export default function OverviewPage() {
 
       {/* ── People ─────────────────────────────────────────────────────── */}
       <div>
-        <div className="card-title" style={{ marginBottom: 10 }}>
-          People & Devices
+        <div className="card-title" style={{ marginBottom: 8 }}>
+          People & devices
         </div>
         {metrics.isLoading ? (
           <LoadingRow />
@@ -203,26 +221,27 @@ export default function OverviewPage() {
               onClick={() => navigate({ to: "/users" })}
               style={{ cursor: "pointer" }}
             >
-              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                <Users
-                  size={18}
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <HugeiconsIcon
+                  icon={UserGroupIcon}
+                  size={16}
+                  strokeWidth={1.5}
                   style={{
                     color: "var(--accent)",
+                    opacity: 0.8,
                     flexShrink: 0,
-                    opacity: 0.85,
                   }}
                 />
                 <div className="stat-label" style={{ marginBottom: 0 }}>
                   Users
                 </div>
               </div>
-
               <div
                 style={{
                   display: "flex",
                   alignItems: "baseline",
-                  gap: 10,
-                  marginTop: 4,
+                  gap: 8,
+                  marginTop: 2,
                 }}
               >
                 <div className="stat-value">
@@ -240,7 +259,6 @@ export default function OverviewPage() {
                   </span>
                 )}
               </div>
-
               <div
                 style={{
                   display: "flex",
@@ -252,9 +270,9 @@ export default function OverviewPage() {
                 <div className="stat-sub">active accounts</div>
                 <span
                   style={{
-                    fontSize: 11,
+                    fontSize: 10.5,
                     color: "var(--accent)",
-                    opacity: 0.7,
+                    opacity: 0.6,
                   }}
                 >
                   Manage →
@@ -268,26 +286,27 @@ export default function OverviewPage() {
               onClick={() => navigate({ to: "/devices" })}
               style={{ cursor: "pointer" }}
             >
-              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                <Monitor
-                  size={18}
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <HugeiconsIcon
+                  icon={MonitorDotIcon}
+                  size={16}
+                  strokeWidth={1.5}
                   style={{
                     color: "var(--accent)",
+                    opacity: 0.8,
                     flexShrink: 0,
-                    opacity: 0.85,
                   }}
                 />
                 <div className="stat-label" style={{ marginBottom: 0 }}>
                   Devices
                 </div>
               </div>
-
               <div
                 style={{
                   display: "flex",
                   alignItems: "baseline",
-                  gap: 10,
-                  marginTop: 4,
+                  gap: 8,
+                  marginTop: 2,
                 }}
               >
                 <div className="stat-value">
@@ -305,8 +324,6 @@ export default function OverviewPage() {
                   </span>
                 )}
               </div>
-
-              {/* Pending approval warning */}
               {(metrics.data?.pending_devices ?? 0) > 0 && (
                 <div
                   style={{
@@ -314,19 +331,17 @@ export default function OverviewPage() {
                     alignItems: "center",
                     gap: 5,
                     marginTop: 4,
-                    padding: "3px 8px",
-                    borderRadius: "var(--radius-sm, 4px)",
-                    background: "var(--yellow-dim, rgba(234,179,8,0.1))",
-                    border: "1px solid var(--yellow, #ca8a04)",
-                    fontSize: 11,
-                    color: "var(--yellow, #ca8a04)",
-                    fontWeight: 600,
+                    padding: "2px 8px",
+                    borderRadius: "var(--radius-pill)",
+                    background: "var(--yellow-dim)",
+                    border: "1px solid var(--yellow)",
+                    fontSize: 10.5,
+                    color: "var(--yellow)",
                   }}
                 >
                   ⏳ {metrics.data!.pending_devices} pending approval
                 </div>
               )}
-
               <div
                 style={{
                   display: "flex",
@@ -335,12 +350,12 @@ export default function OverviewPage() {
                   marginTop: 2,
                 }}
               >
-                <div className="stat-sub">approved &amp; active</div>
+                <div className="stat-sub">approved & active</div>
                 <span
                   style={{
-                    fontSize: 11,
+                    fontSize: 10.5,
                     color: "var(--accent)",
-                    opacity: 0.7,
+                    opacity: 0.6,
                   }}
                 >
                   Manage →
@@ -358,7 +373,7 @@ export default function OverviewPage() {
 
 function LoadingRow() {
   return (
-    <div className="loading-center" style={{ padding: "28px 0" }}>
+    <div className="loading-center" style={{ padding: "24px 0" }}>
       <div className="spinner" />
       Loading…
     </div>
@@ -377,31 +392,26 @@ function HealthCard({
   return (
     <div
       className="stat-tile"
-      style={{ flexDirection: "row", alignItems: "center", gap: 14 }}
+      style={{ flexDirection: "row", alignItems: "center", gap: 12 }}
     >
       {loading ? (
         <div className="spinner" />
       ) : (
         <div
           style={{
-            width: 10,
-            height: 10,
+            width: 8,
+            height: 8,
             borderRadius: "50%",
-            background: ok ? "var(--green)" : "var(--red)",
-            boxShadow: ok ? "0 0 8px var(--green)" : "0 0 8px var(--red)",
             flexShrink: 0,
+            background: ok ? "var(--green)" : "var(--red)",
+            boxShadow: ok ? "0 0 6px var(--green)" : "0 0 6px var(--red)",
           }}
         />
       )}
       <div>
         <div className="stat-label">{label}</div>
         <div
-          style={{
-            fontSize: 15,
-            fontWeight: 600,
-            color: "var(--text-primary)",
-            marginTop: 2,
-          }}
+          style={{ fontSize: 14, color: "var(--text-primary)", marginTop: 2 }}
         >
           {loading ? "—" : ok ? "Healthy" : "Unreachable"}
         </div>
@@ -436,7 +446,6 @@ function StatTile({
     : warn
       ? "var(--yellow)"
       : "var(--text-primary)";
-
   return (
     <div className="stat-tile">
       <div className="stat-label">{label}</div>
@@ -467,17 +476,17 @@ function IconTile({
       style={{
         flexDirection: "row",
         alignItems: "center",
-        gap: 14,
+        gap: 12,
         cursor: onClick ? "pointer" : undefined,
       }}
       onClick={onClick}
     >
-      <div style={{ color: "var(--accent)", flexShrink: 0, opacity: 0.8 }}>
+      <div style={{ color: "var(--accent)", flexShrink: 0, opacity: 0.75 }}>
         {icon}
       </div>
       <div style={{ flex: 1, minWidth: 0 }}>
         <div className="stat-label">{label}</div>
-        <div className="stat-value" style={{ fontSize: 22 }}>
+        <div className="stat-value" style={{ fontSize: 20 }}>
           {value}
         </div>
         {sub && <div className="stat-sub">{sub}</div>}
@@ -485,13 +494,13 @@ function IconTile({
       {onClick && (
         <span
           style={{
-            fontSize: 11,
+            fontSize: 10.5,
             color: "var(--accent)",
-            opacity: 0.7,
+            opacity: 0.6,
             flexShrink: 0,
           }}
         >
-          Manage →
+          →
         </span>
       )}
     </div>

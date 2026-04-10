@@ -454,6 +454,59 @@ CREATE INDEX IF NOT EXISTS idx_candidates_notes
     ON candidate_relations(note_urn_a, note_urn_b, status);
 CREATE INDEX IF NOT EXISTS idx_candidates_burst_a ON candidate_relations(burst_a_id);
 CREATE INDEX IF NOT EXISTS idx_candidates_burst_b ON candidate_relations(burst_b_id);
+
+-- Deep connection pairs: materialized aggregate of all candidates between a note pair.
+-- Canonical ordering: note_urn_a < note_urn_b (lexicographic, enforced by caller).
+-- Updated atomically with each candidate insert / status change.
+-- connection_score is recalculated on every upsert (not cached separately).
+CREATE TABLE IF NOT EXISTS note_pair_connections (
+    note_urn_a          TEXT    NOT NULL,
+    note_urn_b          TEXT    NOT NULL,
+    project_urn         TEXT    NOT NULL DEFAULT '',
+    candidate_count     INTEGER NOT NULL DEFAULT 0,    -- all statuses
+    pending_count       INTEGER NOT NULL DEFAULT 0,
+    promoted_count      INTEGER NOT NULL DEFAULT 0,
+    dismissed_count     INTEGER NOT NULL DEFAULT 0,
+    connection_score    REAL    NOT NULL DEFAULT 0.0,  -- weighted overlap sum (see Part 12)
+    first_seen_at       INTEGER NOT NULL,
+    last_activity_at    INTEGER NOT NULL,
+    is_deep             INTEGER NOT NULL DEFAULT 0,    -- 1 once depth threshold crossed
+    deep_flagged_at     INTEGER,                       -- NULL until is_deep first set to 1
+    PRIMARY KEY (note_urn_a, note_urn_b)
+);
+
+CREATE INDEX IF NOT EXISTS idx_pairs_project_score
+    ON note_pair_connections(project_urn, connection_score DESC);
+CREATE INDEX IF NOT EXISTS idx_pairs_deep
+    ON note_pair_connections(project_urn, is_deep, last_activity_at DESC);
+
+-- Note metadata inferences: asynchronously derived title/project suggestions
+-- for notes that were created without a title or project URN.
+-- One active (pending) record per note at most.
+-- Acceptance writes an AppendEvent to the note's event log; rejection records
+-- a token hash so inference is not re-run until content changes substantially.
+CREATE TABLE IF NOT EXISTS note_context_inferences (
+    id                    TEXT    PRIMARY KEY,         -- UUIDv7
+    note_urn              TEXT    NOT NULL,
+    inferred_title        TEXT    NOT NULL DEFAULT '', -- '' if title inference inconclusive
+    inferred_project_urn  TEXT    NOT NULL DEFAULT '', -- '' if project inference inconclusive
+    title_confidence      REAL    NOT NULL DEFAULT 0.0,
+    project_confidence    REAL    NOT NULL DEFAULT 0.0,
+    project_evidence      TEXT    NOT NULL DEFAULT '', -- JSON: [{project_urn,candidate_count,fraction}]
+    title_basis_burst_id  TEXT    NOT NULL DEFAULT '', -- burst ID from which title was derived
+    status                TEXT    NOT NULL DEFAULT 'pending', -- pending|accepted|rejected
+    created_at            INTEGER NOT NULL,
+    reviewed_at           INTEGER,
+    reviewed_by           TEXT    NOT NULL DEFAULT '',
+    rejected_token_hash   TEXT    NOT NULL DEFAULT ''  -- for re-enable gate after rejection
+);
+
+-- Only one pending inference per note at a time.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_inferences_note_pending
+    ON note_context_inferences(note_urn)
+    WHERE status = 'pending';
+CREATE INDEX IF NOT EXISTS idx_inferences_status
+    ON note_context_inferences(status, created_at DESC);
 ```
 
 ### Notes on Schema Design
@@ -669,6 +722,16 @@ context_graph:
   # Background BM25 scorer (async goroutine)
   bm25_min_overlap_to_score: 0.20 # only enrich candidates above this overlap_score
   bm25_scorer_buffer: 512 # scorerCh capacity; drop silently if full
+
+  # Deep connection detection (see Part 12)
+  deep_connection_candidate_threshold: 5    # min total candidates to flag pair as deep
+  deep_connection_promoted_threshold: 2     # min promoted candidates to flag pair as deep
+  deep_connection_score_threshold: 1.5      # min connection_score to flag pair as deep
+
+  # Note metadata inference (see Part 11)
+  inference_project_min_fraction: 0.60      # min candidate fraction for project inference
+  inference_project_min_candidates: 3       # min candidates before project inference runs
+  inference_max_reruns_per_day: 5           # max inference re-runs per note per UTC day
 ```
 
 These values live in the server configuration file alongside the existing
@@ -878,8 +941,52 @@ GET  /v1/context/stats
          candidates_pending_unenriched: N,
          candidates_promoted: N,
          candidates_dismissed: N,
+         deep_connections_total:        N,
+         deep_connections_unreviewed:   N,
+         inferences_pending:            N,
+         inferences_accepted:           N,
          oldest_pending_age_days: N
        }
+
+# Note metadata inferences
+GET  /v1/context/inferences
+     ?status=<pending|accepted|rejected>
+     &page_size=<n>
+     → paginated list ordered by project_confidence DESC, title_confidence DESC
+
+GET  /v1/context/inferences/:id
+     → single inference with full project_evidence array
+
+GET  /v1/notes/:urn/inference
+     → the active pending inference for this note (404 if none)
+
+POST /v1/context/inferences/:id/accept
+     body: {
+       "accept_title":   true,
+       "accept_project": true,
+       "reviewer":       "urn:notx:usr:<id>"
+     }
+     → applies accepted fields to the note header via AppendEvent;
+       marks status='accepted'
+
+POST /v1/context/inferences/:id/reject
+     body: { "reviewer": "urn:notx:usr:<id>" }
+     → marks status='rejected'; records rejection_token_hash to gate re-runs
+
+# Deep connections
+GET  /v1/context/deep-connections
+     ?project_urn=<urn>
+     &only_unreviewed=true      (default false; filters to is_deep=1 AND pending_count>0)
+     &page_size=<n>
+     → list of note pairs ordered by connection_score DESC
+
+GET  /v1/context/deep-connections/<note_urn_a>/<note_urn_b>
+     → full detail: connection aggregate + all candidates for this pair
+       candidates ordered by bm25_score DESC, overlap_score DESC
+
+POST /v1/context/deep-connections/<note_urn_a>/<note_urn_b>/clear-deep
+     body: { "reviewer": "urn:notx:usr:<id>" }
+     → manually clears is_deep=0 when connection is determined to be noise
 ```
 
 ### Response Shape — Candidate List
@@ -893,6 +1000,12 @@ GET  /v1/context/stats
       "overlap_score": 0.31,
       "bm25_score": 4.21,
       "created_at": "2025-06-01T14:55:00Z",
+      "connection_depth": {
+        "candidate_count": 7,
+        "promoted_count": 2,
+        "connection_score": 2.14,
+        "is_deep": true
+      },
       "burst_a": {
         "id": "019063a5-1f67-7a42-afd3-aaa000000001",
         "note_urn": "urn:notx:note:019063a5-1f67-7a42-afd3-111111111111",
@@ -956,6 +1069,22 @@ notx context config reset --project <urn>            # clear overrides (revert t
 notx context sweep                                   # trigger burst expiry sweep
 notx context rebuild --project <urn>                 # drop and rebuild bursts +
                                                      # candidates from event log
+
+# Deep connections
+notx context deep-connections                        # list all deep connection pairs
+notx context deep-connections --project <urn>        # scoped to a project
+notx context deep-connections <note-a> <note-b>      # inspect a specific pair
+notx context deep-connections <note-a> <note-b> \
+    --clear-deep                                     # clear the deep flag manually
+
+# Note metadata inference
+notx context inferences                              # list pending inferences
+notx context inferences --status accepted            # view accepted inferences
+notx context inferences accept <id>                  # accept title and/or project
+notx context inferences accept <id> --title-only     # accept title only
+notx context inferences accept <id> --project-only   # accept project only
+notx context inferences reject <id>                  # reject inference
+notx notes inference <note-urn>                      # show active inference for a note
 ```
 
 All commands support `--json` for machine-readable output.
@@ -1176,6 +1305,322 @@ specification.
 - [ ] `notx context rebuild` drops and rebuilds `context_bursts` and
       `candidate_relations` for a project by replaying the event log
 
+### Note Metadata Inference (`repo/sqlite/inference.go` — new file)
+
+- [ ] `QueueInference(ctx, noteURN string) error`
+      Called by write path when a note's first burst is stored and title/project is missing
+- [ ] `RunTitleInference(ctx, noteURN string) (title string, confidence float64, burstID string, error)`
+      Reads first non-blank content line, applies slug algorithm, scores confidence
+- [ ] `RunProjectInference(ctx, noteURN string) (projectURN string, confidence float64, evidence []ProjectEvidence, error)`
+      Aggregates candidate partner `project_urn` distribution; applies min thresholds
+- [ ] `StoreInference(ctx, Inference) error`
+      Upserts (replaces pending) inference row; enforces unique pending index
+- [ ] `AcceptInference(ctx, id string, acceptTitle, acceptProject bool, reviewerURN string) error`
+      Emits AppendEvent to write `# title:` / `# project:` to note header; marks accepted
+- [ ] `RejectInference(ctx, id, reviewerURN string) error`
+      Computes rejection token hash; marks rejected
+- [ ] `ShouldReEnableInference(ctx, noteURN string, newBurstTokens []string) bool`
+      Reads rejected token hash; returns true if Jaccard < 0.50
+- [ ] `ListInferences(ctx, status string, pageSize int, pageToken string) ([]Inference, string, error)`
+- [ ] `GetInference(ctx, id string) (Inference, error)`
+
+### Deep Connection Tracking (`repo/sqlite/pairs.go` — new file)
+
+- [ ] `UpsertNotePair(ctx, noteURN_A, noteURN_B, projectURN string, candidate CandidateRelation) error`
+      Called after every candidate insert: upserts note_pair_connections, recalculates
+      connection_score, sets is_deep if threshold crossed
+- [ ] `RecalcPairScore(ctx, noteURN_A, noteURN_B string) error`
+      Called after every promote/dismiss: queries all non-dismissed candidates for the
+      pair, recalculates connection_score, updates counts, re-evaluates is_deep
+- [ ] `ListDeepConnections(ctx, projectURN string, onlyUnreviewed bool, pageSize int, pageToken string) ([]NotePairConnection, string, error)`
+- [ ] `GetNotePair(ctx, noteURN_A, noteURN_B string) (NotePairConnection, error)`
+- [ ] `ClearDeep(ctx, noteURN_A, noteURN_B, reviewerURN string) error`
+
+### HTTP API additions
+
+- [ ] `GET  /v1/context/inferences` handler
+- [ ] `GET  /v1/context/inferences/:id` handler
+- [ ] `GET  /v1/notes/:urn/inference` handler
+- [ ] `POST /v1/context/inferences/:id/accept` handler
+- [ ] `POST /v1/context/inferences/:id/reject` handler
+- [ ] `GET  /v1/context/deep-connections` handler
+- [ ] `GET  /v1/context/deep-connections/:urn_a/:urn_b` handler
+- [ ] `POST /v1/context/deep-connections/:urn_a/:urn_b/clear-deep` handler
+- [ ] Update `GET /v1/context/stats` to include new inference and deep connection counts
+- [ ] Update `GET /v1/context/candidates` response shape to include `connection_depth`
+
+---
+
+## Part 11 — Note Metadata Inference
+
+### The Problem
+
+Notes appended without a title or project URN are harder to surface and reason
+about. A project-less note is scoped globally for candidate detection — it
+competes with every other project-less note on the server, diluting the signal.
+An untitled note forces reviewers to open full content to understand the subject.
+
+The engine can derive both fields from the note's own burst content and from
+the candidate relations it accumulates over time. Neither inference is mandatory:
+they are advisory signals that a user or AI agent reviews and explicitly accepts.
+
+---
+
+### Title Inference
+
+Title inference runs asynchronously in the same background goroutine as the
+metadata scorer, triggered when the note's first burst is stored and
+`note.Title == ""`.
+
+**Algorithm**
+
+1. Read the first non-blank line of the note's post-event materialized content.
+2. Apply the slug algorithm (Part 5) to produce a token list. Strip stop words;
+   take the first 2–4 remaining tokens. Join with spaces (not hyphens) and
+   capitalize each word to form a human-readable title candidate.
+3. Score confidence: `title_confidence = min(1.0, significant_token_count / 5.0)`
+   where `significant_token_count` is the token count after stop-word removal.
+4. If fewer than 2 significant tokens survive step 2, scan the next 5 non-blank
+   lines and retry. If still fewer than 2 tokens, store the inference with
+   `title_confidence < 0.4` flagged as low confidence. It will still be surfaced
+   for human review but deprioritized in the queue.
+
+**Examples**
+
+| First content line                              | Inferred title             | Confidence |
+| ----------------------------------------------- | -------------------------- | ---------- |
+| `The SOD process initializes all gateway state` | `SOD Process Gateway`      | 0.80       |
+| `## Sprint 14 Planning`                         | `Sprint Planning`          | 0.60       |
+| `TODO: fix retry logic`                         | `Retry Logic`              | 0.60       |
+| `---` (horizontal rule only)                    | _(scans next 5 lines)_     | —          |
+| `a` (single character)                          | _(low confidence, stored)_ | 0.20       |
+
+---
+
+### Project Inference
+
+Project inference runs after candidate detection, once the note has accumulated
+at least `inference_project_min_candidates` (default: 3) candidates.
+
+**Algorithm**
+
+1. Query all candidates for this note's bursts.
+2. Group partner bursts by their `project_urn`. Exclude candidates whose
+   partner `project_urn` is empty — project-less partners contribute no signal.
+3. Compute `fraction = count(candidates for project X) / total_candidates`.
+4. If the top project's `fraction ≥ inference_project_min_fraction` (default:
+   0.60) AND its candidate count ≥ `inference_project_min_candidates` (default:
+   3), infer that project:
+   - `inferred_project_urn = top_project_urn`
+   - `project_confidence = fraction × min(1.0, candidate_count / 5.0)`
+5. Store the full evidence array as JSON in `project_evidence` for auditing:
+
+```json
+[
+  {
+    "project_urn": "urn:notx:proj:alpha",
+    "candidate_count": 7,
+    "fraction": 0.78
+  },
+  {
+    "project_urn": "urn:notx:proj:beta",
+    "candidate_count": 2,
+    "fraction": 0.22
+  }
+]
+```
+
+With `inference_project_min_fraction=0.60` and `inference_project_min_candidates=3`,
+project `alpha` qualifies; project `beta` does not.
+
+---
+
+### When Inference Runs
+
+Inference is a background operation. It never touches the hot write path.
+
+| Trigger                                                                         | Action                                                        |
+| ------------------------------------------------------------------------------- | ------------------------------------------------------------- |
+| Note's first burst stored AND `title == ""` or `project_urn == ""`              | Queue for title inference immediately after write transaction |
+| New candidate detected for a project-less note, crossing the min threshold      | Re-run project inference                                      |
+| New burst for a note with a `rejected` inference has Jaccard < 0.50 vs rejected | Re-enable inference (content changed substantially); re-queue |
+
+Re-runs are capped at `inference_max_reruns_per_day` (default: 5) per note per
+UTC day. Beyond the cap, inference is silently skipped until the next day.
+
+Inference does **not** run for:
+
+- Notes that already have both `title` and `project_urn` set.
+- Notes authored by `urn:notx:usr:anon`.
+- Notes that are auto-generated sequence entries (snapshot compaction events).
+
+---
+
+### Lifecycle
+
+```
+pending ──► accepted ──► (AppendEvent written: sets # title: and/or # project: in header)
+   │
+   └──► rejected ──► (blocked until burst Jaccard vs rejected tokens < 0.50)
+```
+
+**Acceptance** emits a real `AppendEvent` that writes the inferred metadata to
+the note's `.notx` header. This event enters the event log like any other, making
+the metadata change auditable and rebuildable.
+
+**Rejection** records the SHA-256 hash of the note's current burst token set
+in `rejected_token_hash`. If a future burst for this note yields Jaccard
+similarity < 0.50 against the rejected token hash, inference is re-enabled
+automatically — the content diverged enough to warrant a fresh look.
+
+---
+
+### Review Queue Integration
+
+Pending inferences are a separate queue from candidates. The `CheckQueue`
+operation (Operation 1 in `NOTX_CONTEXT_CLIENT.md`) reports
+`inferences_pending` in the stats response so sessions can also drain the
+inference queue.
+
+The `FetchBatch` operation does not include inferences — they are a distinct
+concern reviewed via `InspectInferences` (Operation 9).
+
+---
+
+## Part 12 — Deep Connection Detection
+
+### Definition
+
+A **deep connection** is a note pair where the accumulated number and quality
+of candidate relations signal a persistent, multi-faceted conceptual overlap.
+Not one passing shared phrase — a structural co-dependency or ongoing shared
+subject that has produced signal across multiple independent editing sessions.
+
+A shallow connection: burst A and burst B share 40% of tokens once, in a single
+edit event.
+
+A deep connection: notes A and B have accumulated 7 candidates across 4
+editing sessions, 3 of which have been promoted. Every time either note is
+edited, new overlapping content appears.
+
+---
+
+### The note_pair_connections Table
+
+After each candidate insert (or status change on promote/dismiss), the engine
+upserts a row in `note_pair_connections`. Canonical ordering is enforced by the
+caller: `note_urn_a` is always the lexicographically smaller of the two URNs.
+
+The upsert recalculates `connection_score` in full each time (not incrementally),
+because the decay formula depends on wall-clock time and could drift if stored
+incrementally.
+
+---
+
+### Connection Score Formula
+
+```
+connection_score = Σ effective_score(c)
+  for c in all_candidates(note_a, note_b)
+  where c.status != 'dismissed'
+
+effective_score(c) =
+  max(c.bm25_score, c.overlap_score)      -- best available confidence signal
+  × promotion_weight(c.status)            -- confirmed links count more
+  × exp(−0.05 × age_days(c.created_at))  -- 14-day half-life decay
+
+  promotion_weight('promoted') = 2.0
+  promotion_weight('pending')  = 1.0
+```
+
+The score is unbounded and grows with each qualifying candidate. The exponential
+decay means old, silent note pairs naturally lose score relative to actively
+evolving ones. Dismissed candidates contribute 0 — noise is not rewarded.
+
+**Example:** Two notes with 3 promoted candidates from 10 days ago and 2 pending
+candidates from yesterday:
+
+```
+3 × (avg_overlap=0.35 × 2.0 × exp(-0.05×10)) = 3 × 0.35 × 2.0 × 0.607 = 1.27
+2 × (avg_overlap=0.28 × 1.0 × exp(-0.05×1))  = 2 × 0.28 × 1.0 × 0.951 = 0.53
+connection_score ≈ 1.80
+```
+
+With `deep_connection_score_threshold=1.5`, this pair is deep.
+
+---
+
+### Deep Connection Threshold
+
+A note pair is flagged `is_deep = 1` on the next upsert when **any** of the
+following conditions is met:
+
+| Condition                                 | Default | Config key                            |
+| ----------------------------------------- | ------- | ------------------------------------- |
+| `candidate_count >= threshold_candidates` | 5       | `deep_connection_candidate_threshold` |
+| `promoted_count >= threshold_promoted`    | 2       | `deep_connection_promoted_threshold`  |
+| `connection_score >= threshold_score`     | 1.5     | `deep_connection_score_threshold`     |
+
+Once set, `is_deep` is never cleared automatically. Reviewers or agents may
+explicitly clear it via `POST .../clear-deep` when a pair turns out to be noise.
+
+`deep_flagged_at` records the timestamp when `is_deep` was first set to 1.
+
+---
+
+### Review Queue Integration
+
+Every candidate response in `ListCandidates` includes a `connection_depth` field
+showing the current state of its note pair:
+
+```json
+{
+  "connection_depth": {
+    "candidate_count": 7,
+    "promoted_count": 2,
+    "connection_score": 2.14,
+    "is_deep": true
+  }
+}
+```
+
+This gives reviewers immediate context: a candidate from a deeply connected pair
+carries stronger prior toward promotion, even if its individual burst text is
+ambiguous.
+
+**Stats:** `GET /v1/context/stats` exposes:
+
+| Field                         | Meaning                                             |
+| ----------------------------- | --------------------------------------------------- |
+| `deep_connections_total`      | Total note pairs with `is_deep=1`                   |
+| `deep_connections_unreviewed` | Deep pairs where `pending_count > 0` (needs review) |
+
+An "unreviewed" deep connection is one where `is_deep=1` AND `pending_count>0`.
+
+---
+
+### Scoring on Status Change
+
+When a candidate is promoted or dismissed, the engine:
+
+1. Recalculates `effective_score` for all non-dismissed candidates in the pair.
+2. Updates `connection_score`, `pending_count`, `promoted_count`, `dismissed_count`.
+3. Re-evaluates the three deep connection conditions. If newly satisfied, sets
+   `is_deep=1` and `deep_flagged_at` (if not already set).
+
+This keeps `note_pair_connections` accurate as reviewers drain the queue.
+
+---
+
+### Design Decisions
+
+| Decision                                         | Rationale                                                                                                                                                                                                                            |
+| ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Recalculate score on every upsert**            | Storing an incremental score that depends on `exp(-λ × age_days)` would drift silently over time as days pass without new candidates. A full recalculation is cheap (typically < 10 candidates per pair) and always accurate.        |
+| **Canonical URN ordering (`a < b`)**             | A single primary key per pair avoids duplicate rows and simplifies deduplication. The caller enforces ordering before the upsert. No trigger or unique constraint on an unordered pair is needed.                                    |
+| **`is_deep` is never auto-cleared**              | A pair that earned deep status (via promotions or high candidate volume) remains notable even if the queue drains. An explicit human or agent action to clear it is the right signal that it was re-evaluated and found to be noise. |
+| **`connection_depth` embedded in candidate API** | Reviewers should not need a separate API call to know they are looking at a candidate from a deeply connected pair. Embedding it in the candidate list response keeps the review loop self-contained.                                |
+
 ---
 
 ## Quick Reference
@@ -1210,6 +1655,28 @@ Existing burst rows are never mutated after insertion.
 # The format contract:
 Zero modifications to the .notx event stream or file format.
 All artifacts live in two SQLite tables, fully rebuildable from the event log.
+
+# The new inference question:
+"This note has no title or project. Based on its content and burst connections,
+ what should it be called and where does it belong?"
+
+# The inference unit:
+Note Metadata Inference — async suggestion of title and/or project_urn for a
+                          note created without them. Derived from first burst
+                          text (title) and candidate project_urn distribution
+                          (project). Reviewed and accepted by user or agent.
+
+# The deep connection question:
+"These two notes have generated N candidates across M editing sessions.
+ Are they structurally related — co-authored, interdependent, or covering
+ the same evolving subject?"
+
+# The deep connection unit:
+note_pair_connections — materialized aggregate of all candidates between two notes.
+                        connection_score = weighted sum of overlap scores with
+                        14-day half-life decay. is_deep=1 when any threshold crossed.
+                        Surfaces in review queue via connection_depth field on
+                        each candidate.
 ```
 
 ---

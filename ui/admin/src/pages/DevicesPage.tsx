@@ -1,20 +1,19 @@
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { HugeiconsIcon } from "@hugeicons/react";
 import {
-  Monitor,
-  RefreshCw,
-  AlertCircle,
-  ShieldOff,
-  ShieldCheck,
-  ShieldX,
-  Key,
-  Clock,
-  Search,
-  ChevronRight,
-  X,
-  Plus,
-  Hourglass,
-} from "lucide-react";
+  MonitorDotIcon,
+  Refresh01Icon,
+  AlertCircleIcon,
+  PlusSignIcon,
+  Cancel01Icon,
+  ShieldUserIcon,
+  LockIcon,
+  Clock01Icon,
+  Search01Icon,
+  ArrowRight01Icon,
+  HourglassIcon,
+} from "@hugeicons/core-free-icons";
 import {
   fetchDevices,
   revokeDevice,
@@ -99,7 +98,12 @@ function ApprovalBadge({
             border: "1px solid var(--yellow, #ca8a04)",
           }}
         >
-          <Hourglass size={dotSize} style={{ flexShrink: 0 }} />
+          <HugeiconsIcon
+            icon={HourglassIcon}
+            size={dotSize}
+            strokeWidth={1.5}
+            style={{ flexShrink: 0 }}
+          />
           pending
         </span>
       );
@@ -174,7 +178,12 @@ function ConfirmRevokeModal({
     >
       <div style={boxStyle}>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <ShieldOff size={16} style={{ color: "var(--red)", flexShrink: 0 }} />
+          <HugeiconsIcon
+            icon={ShieldUserIcon}
+            size={16}
+            strokeWidth={1.5}
+            style={{ color: "var(--red)", flexShrink: 0 }}
+          />
           <span
             style={{
               fontWeight: 700,
@@ -248,7 +257,11 @@ function ConfirmRevokeModal({
             {isPending ? (
               <div className="spinner" style={{ width: 14, height: 14 }} />
             ) : (
-              <ShieldOff size={14} />
+              <HugeiconsIcon
+                icon={ShieldUserIcon}
+                size={14}
+                strokeWidth={1.5}
+              />
             )}
             Revoke
           </button>
@@ -298,8 +311,10 @@ function ConfirmRejectModal({
     >
       <div style={boxStyle}>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <ShieldX
+          <HugeiconsIcon
+            icon={Cancel01Icon}
             size={16}
+            strokeWidth={1.5}
             style={{ color: "var(--orange, #ea580c)", flexShrink: 0 }}
           />
           <span
@@ -372,7 +387,7 @@ function ConfirmRejectModal({
             {isPending ? (
               <div className="spinner" style={{ width: 14, height: 14 }} />
             ) : (
-              <ShieldX size={14} />
+              <HugeiconsIcon icon={Cancel01Icon} size={14} strokeWidth={1.5} />
             )}
             Reject
           </button>
@@ -470,7 +485,12 @@ function RegisterDeviceModal({ onClose }: { onClose: () => void }) {
           }}
         >
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <Plus size={16} style={{ color: "var(--accent)", flexShrink: 0 }} />
+            <HugeiconsIcon
+              icon={PlusSignIcon}
+              size={16}
+              strokeWidth={1.5}
+              style={{ color: "var(--accent)", flexShrink: 0 }}
+            />
             <span
               style={{
                 fontWeight: 700,
@@ -486,7 +506,7 @@ function RegisterDeviceModal({ onClose }: { onClose: () => void }) {
             onClick={onClose}
             style={{ padding: "4px 8px" }}
           >
-            <X size={14} />
+            <HugeiconsIcon icon={Cancel01Icon} size={14} strokeWidth={1.5} />
           </button>
         </div>
 
@@ -582,7 +602,12 @@ function RegisterDeviceModal({ onClose }: { onClose: () => void }) {
                 color: "var(--red)",
               }}
             >
-              <AlertCircle size={13} style={{ flexShrink: 0 }} />
+              <HugeiconsIcon
+                icon={AlertCircleIcon}
+                size={13}
+                strokeWidth={1.5}
+                style={{ flexShrink: 0 }}
+              />
               {error}
             </div>
           )}
@@ -612,7 +637,11 @@ function RegisterDeviceModal({ onClose }: { onClose: () => void }) {
               {registerMut.isPending ? (
                 <div className="spinner" style={{ width: 14, height: 14 }} />
               ) : (
-                <Plus size={14} />
+                <HugeiconsIcon
+                  icon={PlusSignIcon}
+                  size={14}
+                  strokeWidth={1.5}
+                />
               )}
               Register
             </button>
@@ -647,12 +676,17 @@ function DeviceDetailPanel({
       <div className="drawer" onClick={(e) => e.stopPropagation()}>
         <div className="drawer-header">
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            <Monitor size={15} style={{ color: "var(--accent)" }} />
+            <HugeiconsIcon
+              icon={MonitorDotIcon}
+              size={15}
+              strokeWidth={1.5}
+              style={{ color: "var(--accent)" }}
+            />
             <span className="drawer-title">{device.name}</span>
             <ApprovalBadge device={device} />
           </div>
           <button className="close-btn" onClick={onClose}>
-            <X size={16} />
+            <HugeiconsIcon icon={Cancel01Icon} size={16} strokeWidth={1.5} />
           </button>
         </div>
 
@@ -760,7 +794,7 @@ function DeviceDetailPanel({
                   fontSize: 12,
                 }}
               >
-                <Key size={13} />
+                <HugeiconsIcon icon={LockIcon} size={13} strokeWidth={1.5} />
                 Ed25519 public key (base64)
               </div>
               <div
@@ -812,7 +846,11 @@ function DeviceDetailPanel({
                     style={{ flex: 1 }}
                     onClick={() => onApprove(device)}
                   >
-                    <ShieldCheck size={14} />
+                    <HugeiconsIcon
+                      icon={ShieldUserIcon}
+                      size={14}
+                      strokeWidth={1.5}
+                    />
                     Approve access
                   </button>
                   <button
@@ -825,7 +863,11 @@ function DeviceDetailPanel({
                     }}
                     onClick={() => onReject(device)}
                   >
-                    <ShieldX size={14} />
+                    <HugeiconsIcon
+                      icon={Cancel01Icon}
+                      size={14}
+                      strokeWidth={1.5}
+                    />
                     Reject
                   </button>
                 </div>
@@ -916,7 +958,11 @@ function DeviceDetailPanel({
                       }}
                       onClick={() => onReject(device)}
                     >
-                      <ShieldX size={14} />
+                      <HugeiconsIcon
+                        icon={Cancel01Icon}
+                        size={14}
+                        strokeWidth={1.5}
+                      />
                       Reject
                     </button>
                   </div>
@@ -958,7 +1004,11 @@ function DeviceDetailPanel({
                     }}
                     onClick={() => onRevoke(device)}
                   >
-                    <ShieldOff size={14} />
+                    <HugeiconsIcon
+                      icon={ShieldUserIcon}
+                      size={14}
+                      strokeWidth={1.5}
+                    />
                     Revoke
                   </button>
                 </div>
@@ -1135,7 +1185,7 @@ export default function DevicesPage() {
             className="btn btn-primary"
             onClick={() => setShowRegister(true)}
           >
-            <Plus size={14} />
+            <HugeiconsIcon icon={PlusSignIcon} size={14} strokeWidth={1.5} />
             Register device
           </button>
           <button
@@ -1143,8 +1193,10 @@ export default function DevicesPage() {
             onClick={() => qc.invalidateQueries({ queryKey: ["devices"] })}
             disabled={query.isFetching}
           >
-            <RefreshCw
+            <HugeiconsIcon
+              icon={Refresh01Icon}
               size={14}
+              strokeWidth={1.5}
               className={query.isFetching ? "spin-icon" : ""}
             />
             Refresh
@@ -1155,7 +1207,7 @@ export default function DevicesPage() {
       {/* ── Error banner ─────────────────────────────────────────────────── */}
       {query.isError && (
         <div className="error-banner">
-          <AlertCircle size={15} />
+          <HugeiconsIcon icon={AlertCircleIcon} size={15} strokeWidth={1.5} />
           Failed to load devices — {(query.error as Error).message}
         </div>
       )}
@@ -1173,8 +1225,10 @@ export default function DevicesPage() {
             gap: 12,
           }}
         >
-          <Hourglass
+          <HugeiconsIcon
+            icon={HourglassIcon}
             size={16}
+            strokeWidth={1.5}
             style={{ color: "var(--yellow, #ca8a04)", flexShrink: 0 }}
           />
           <div style={{ flex: 1 }}>
@@ -1278,8 +1332,10 @@ export default function DevicesPage() {
             maxWidth: 320,
           }}
         >
-          <Search
+          <HugeiconsIcon
+            icon={Search01Icon}
             size={13}
+            strokeWidth={1.5}
             style={{
               position: "absolute",
               left: 10,
@@ -1330,7 +1386,12 @@ export default function DevicesPage() {
         >
           {filtered.length === 0 ? (
             <div className="empty-state" style={{ padding: "48px 0" }}>
-              <Monitor size={28} style={{ opacity: 0.3 }} />
+              <HugeiconsIcon
+                icon={MonitorDotIcon}
+                size={28}
+                strokeWidth={1.5}
+                style={{ opacity: 0.3 }}
+              />
               <div style={{ marginTop: 4 }}>
                 {search.trim()
                   ? "No devices match your search."
@@ -1381,8 +1442,10 @@ export default function DevicesPage() {
                             gap: 8,
                           }}
                         >
-                          <Monitor
+                          <HugeiconsIcon
+                            icon={MonitorDotIcon}
                             size={14}
+                            strokeWidth={1.5}
                             style={{
                               color:
                                 d.revoked || d.approval_status === "rejected"
@@ -1428,7 +1491,12 @@ export default function DevicesPage() {
                             fontSize: 12,
                           }}
                         >
-                          <Clock size={11} style={{ opacity: 0.5 }} />
+                          <HugeiconsIcon
+                            icon={Clock01Icon}
+                            size={11}
+                            strokeWidth={1.5}
+                            style={{ opacity: 0.5 }}
+                          />
                           {fmtDate(d.registered_at)}
                         </div>
                       </td>
@@ -1461,7 +1529,11 @@ export default function DevicesPage() {
                                   style={{ width: 11, height: 11 }}
                                 />
                               ) : (
-                                <ShieldCheck size={12} />
+                                <HugeiconsIcon
+                                  icon={ShieldUserIcon}
+                                  size={12}
+                                  strokeWidth={1.5}
+                                />
                               )}
                               Approve
                             </button>
@@ -1478,7 +1550,11 @@ export default function DevicesPage() {
                               disabled={rejectMut.isPending}
                               title="Reject this device"
                             >
-                              <ShieldX size={12} />
+                              <HugeiconsIcon
+                                icon={Cancel01Icon}
+                                size={12}
+                                strokeWidth={1.5}
+                              />
                               Reject
                             </button>
                           </div>
@@ -1493,8 +1569,10 @@ export default function DevicesPage() {
 
                       {/* Arrow */}
                       <td style={{ padding: "0 12px 0 0" }}>
-                        <ChevronRight
+                        <HugeiconsIcon
+                          icon={ArrowRight01Icon}
                           size={14}
+                          strokeWidth={1.5}
                           style={{ color: "var(--text-muted)" }}
                         />
                       </td>
@@ -1518,7 +1596,7 @@ export default function DevicesPage() {
             color: "var(--text-secondary)",
           }}
         >
-          <Key size={14} />
+          <HugeiconsIcon icon={LockIcon} size={14} strokeWidth={1.5} />
           <span className="card-title" style={{ marginBottom: 0 }}>
             gRPC DeviceService reference
           </span>

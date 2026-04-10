@@ -1,15 +1,14 @@
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { HugeiconsIcon } from "@hugeicons/react";
 import {
-  RefreshCw,
-  AlertCircle,
-  GitBranch,
-  ChevronLeft,
-  ChevronRight,
-  X,
-  Check,
-  CheckCircle2,
-} from "lucide-react";
+  Refresh01Icon,
+  AlertCircleIcon,
+  GitBranchIcon,
+  ArrowLeft01Icon,
+  ArrowRight01Icon,
+  CheckmarkCircle01Icon,
+} from "@hugeicons/core-free-icons";
 import {
   fetchContextStats,
   fetchCandidates,
@@ -200,8 +199,10 @@ export default function ContextPage() {
               }}
               disabled={statsQuery.isLoading || candidatesQuery.isLoading}
             >
-              <RefreshCw
+              <HugeiconsIcon
+                icon={Refresh01Icon}
                 size={14}
+                strokeWidth={1.5}
                 className={
                   statsQuery.isLoading || candidatesQuery.isLoading
                     ? "spin-icon"
@@ -216,7 +217,7 @@ export default function ContextPage() {
         {/* ── Error ────────────────────────────────────────────────────────── */}
         {(statsQuery.isError || candidatesQuery.isError) && (
           <div className="error-banner">
-            <AlertCircle size={15} />
+            <HugeiconsIcon icon={AlertCircleIcon} size={15} strokeWidth={1.5} />
             {statsQuery.error instanceof Error
               ? statsQuery.error.message
               : candidatesQuery.error instanceof Error
@@ -338,7 +339,12 @@ export default function ContextPage() {
           </div>
         ) : candidates.length === 0 ? (
           <div className="empty-state">
-            <GitBranch size={28} style={{ opacity: 0.3, marginBottom: 8 }} />
+            <HugeiconsIcon
+              icon={GitBranchIcon}
+              size={28}
+              strokeWidth={1.5}
+              style={{ opacity: 0.3, marginBottom: 8 }}
+            />
             No candidates found for the current filters
           </div>
         ) : (
@@ -404,7 +410,7 @@ export default function ContextPage() {
                                 setShowPromoteInput(true);
                               }}
                             >
-                              <Check size={12} />
+                              <span style={{ fontSize: 12 }}>✓</span>
                               Promote
                             </button>
                             <button
@@ -417,7 +423,7 @@ export default function ContextPage() {
                               disabled={isActionPending}
                               onClick={() => dismissMut.mutate(c.id)}
                             >
-                              <X size={12} />
+                              <span style={{ fontSize: 14 }}>×</span>
                               Dismiss
                             </button>
                           </>
@@ -439,7 +445,12 @@ export default function ContextPage() {
               onClick={goPrev}
               disabled={tokenHistory.length === 0}
             >
-              <ChevronLeft size={14} /> Prev
+              <HugeiconsIcon
+                icon={ArrowLeft01Icon}
+                size={14}
+                strokeWidth={1.5}
+              />{" "}
+              Prev
             </button>
             <span style={{ fontSize: 12, color: "var(--text-muted)" }}>
               Page {tokenHistory.length + 1}
@@ -449,7 +460,12 @@ export default function ContextPage() {
               onClick={goNext}
               disabled={!nextToken}
             >
-              Next <ChevronRight size={14} />
+              Next{" "}
+              <HugeiconsIcon
+                icon={ArrowRight01Icon}
+                size={14}
+                strokeWidth={1.5}
+              />
             </button>
           </div>
         )}
@@ -465,7 +481,7 @@ export default function ContextPage() {
             <div className="drawer-header">
               <span className="drawer-title">Candidate Detail</span>
               <button className="close-btn" onClick={closeDrawer}>
-                <X size={16} />
+                <span style={{ fontSize: 14 }}>×</span>
               </button>
             </div>
 
@@ -568,7 +584,11 @@ export default function ContextPage() {
                       marginBottom: 6,
                     }}
                   >
-                    <CheckCircle2 size={14} />
+                    <HugeiconsIcon
+                      icon={CheckmarkCircle01Icon}
+                      size={14}
+                      strokeWidth={1.5}
+                    />
                     Promoted successfully
                   </div>
                   <table className="kv-table">
@@ -609,7 +629,11 @@ export default function ContextPage() {
               {/* ── Mutation errors ──────────────────────────────────────── */}
               {promoteMut.isError && (
                 <div className="error-banner" style={{ marginBottom: 8 }}>
-                  <AlertCircle size={13} />
+                  <HugeiconsIcon
+                    icon={AlertCircleIcon}
+                    size={13}
+                    strokeWidth={1.5}
+                  />
                   {promoteMut.error instanceof Error
                     ? promoteMut.error.message
                     : "Failed to promote candidate"}
@@ -617,7 +641,11 @@ export default function ContextPage() {
               )}
               {dismissMut.isError && (
                 <div className="error-banner" style={{ marginBottom: 8 }}>
-                  <AlertCircle size={13} />
+                  <HugeiconsIcon
+                    icon={AlertCircleIcon}
+                    size={13}
+                    strokeWidth={1.5}
+                  />
                   {dismissMut.error instanceof Error
                     ? dismissMut.error.message
                     : "Failed to dismiss candidate"}
@@ -700,7 +728,7 @@ export default function ContextPage() {
                             </>
                           ) : (
                             <>
-                              <Check size={13} />
+                              <span style={{ fontSize: 12 }}>✓</span>
                               Confirm promote
                             </>
                           )}
@@ -725,7 +753,7 @@ export default function ContextPage() {
                         disabled={isActionPending}
                         onClick={() => setShowPromoteInput(true)}
                       >
-                        <Check size={13} />
+                        <span style={{ fontSize: 12 }}>✓</span>
                         Promote…
                       </button>
                       <button
@@ -744,7 +772,7 @@ export default function ContextPage() {
                           </>
                         ) : (
                           <>
-                            <X size={13} />
+                            <span style={{ fontSize: 14 }}>×</span>
                             Dismiss
                           </>
                         )}

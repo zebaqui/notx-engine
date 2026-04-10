@@ -31,7 +31,7 @@ GOMOBILE          := $(GOPATH)/bin/gomobile
         install-proto-plugins generate-proto \
         admin-install admin-dev admin-build \
         mobile mobile-install \
-        docker-build test-smoke test-integration test-pairing \
+        docker-build docker-authority-server docker-authority-server-stop docker-authority-server-volume docker-authority-server-persist test-smoke test-integration test-pairing \
         clean
 
 all: build
@@ -94,6 +94,68 @@ mobile:
 
 docker-build:
 	docker build --tag $(DOCKER_IMAGE) --file Dockerfile .
+
+# ── Authority Server Recipe ────────────────────────────────────────────────────
+# Runs the notx server as an authority instance in a Docker container.
+# Uses non-standard ports so an authority and a regular server can coexist
+# on the same host without conflicts.
+# Exposes:
+#   - HTTP API:             127.0.0.1:4070 (notx.local:4070)
+#   - Primary gRPC (mTLS):  127.0.0.1:50060 (notx.local:50060)
+#   - Bootstrap gRPC (TLS): 127.0.0.1:50061 (notx.local:50061)
+#
+# Prerequisites:
+#   - Add "127.0.0.1 notx.local" to /etc/hosts
+#
+# Usage:
+#   make docker-authority-server                     # start authority server
+#   make docker-authority-server ADMIN_PASS="secret" # with admin passphrase
+#
+AUTHORITY_HTTP_PORT      := 4070
+AUTHORITY_GRPC_PORT      := 50060
+AUTHORITY_BOOTSTRAP_PORT := 50061
+
+docker-authority-server: docker-build
+	docker run --rm \
+		-p 127.0.0.1:$(AUTHORITY_HTTP_PORT):$(AUTHORITY_HTTP_PORT) \
+		-p 127.0.0.1:$(AUTHORITY_GRPC_PORT):$(AUTHORITY_GRPC_PORT) \
+		-p 127.0.0.1:$(AUTHORITY_BOOTSTRAP_PORT):$(AUTHORITY_BOOTSTRAP_PORT) \
+		--name notx-authority \
+		--hostname notx.local \
+		$(DOCKER_IMAGE) \
+		server --pairing --device-auto-approve --host 0.0.0.0 --foreground \
+			--http-port $(AUTHORITY_HTTP_PORT) \
+			--grpc-port $(AUTHORITY_GRPC_PORT) \
+			--pairing-port $(AUTHORITY_BOOTSTRAP_PORT) \
+			$(if $(ADMIN_PASS),--admin-passphrase $(ADMIN_PASS),)
+
+docker-authority-server-stop:
+	docker stop notx-authority || true
+
+docker-authority-server-volume:
+	docker volume create notx-authority-data || true
+	@echo "✓ Created docker volume 'notx-authority-data' for persistent storage"
+
+docker-authority-server-persist: docker-build docker-authority-server-volume
+	docker run --rm -d \
+		-v notx-authority-data:/data \
+		-p 127.0.0.1:$(AUTHORITY_HTTP_PORT):$(AUTHORITY_HTTP_PORT) \
+		-p 127.0.0.1:$(AUTHORITY_GRPC_PORT):$(AUTHORITY_GRPC_PORT) \
+		-p 127.0.0.1:$(AUTHORITY_BOOTSTRAP_PORT):$(AUTHORITY_BOOTSTRAP_PORT) \
+		--name notx-authority \
+		--hostname notx.local \
+		$(DOCKER_IMAGE) \
+		server --pairing --device-auto-approve --data-dir /data --host 0.0.0.0 --foreground \
+			--http-port $(AUTHORITY_HTTP_PORT) \
+			--grpc-port $(AUTHORITY_GRPC_PORT) \
+			--pairing-port $(AUTHORITY_BOOTSTRAP_PORT) \
+			$(if $(ADMIN_PASS),--admin-passphrase $(ADMIN_PASS),)
+	@echo "✓ Authority server started in background (persistent mode)"
+	@echo "  HTTP API:             http://notx.local:$(AUTHORITY_HTTP_PORT)"
+	@echo "  gRPC:                 notx.local:$(AUTHORITY_GRPC_PORT)"
+	@echo "  Bootstrap (pairing):  notx.local:$(AUTHORITY_BOOTSTRAP_PORT)"
+	@echo "  Stop with: make docker-authority-server-stop"
+	@echo "  View logs with: docker logs -f notx-authority"
 
 test-smoke:
 	go test -v -timeout 60s ./tests/smoke/

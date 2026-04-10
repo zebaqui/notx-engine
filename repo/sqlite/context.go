@@ -363,7 +363,25 @@ func (p *Provider) IndexNoteIntoProject(ctx context.Context, noteURN, projectURN
 			return nil // no peers yet, nothing to pair with
 		}
 
-		// ── 4. Run Jaccard detection for each note burst vs each peer burst ───
+		// ── 4. Load already-reviewed pair keys to avoid recreating dismissed or
+		//       promoted candidates when a note is re-indexed into a project. ────
+		existingPairKeys := make(map[string]struct{})
+		existingRows, err := db.Query(
+			`SELECT pair_key FROM candidate_relations
+			 WHERE (note_urn_a=? OR note_urn_b=?) AND status IN ('promoted','dismissed')`,
+			noteURN, noteURN,
+		)
+		if err == nil {
+			for existingRows.Next() {
+				var pk string
+				if existingRows.Scan(&pk) == nil {
+					existingPairKeys[pk] = struct{}{}
+				}
+			}
+			_ = existingRows.Close()
+		}
+
+		// ── 5. Run Jaccard detection for each note burst vs each peer burst ───
 		now := toMs(time.Now().UTC())
 		stmt, err := db.Prepare(
 			`INSERT OR IGNORE INTO candidate_relations
@@ -391,6 +409,11 @@ func (p *Provider) IndexNoteIntoProject(ctx context.Context, noteURN, projectURN
 					nb.id, noteURN,
 					pb.id, pb.noteURN,
 				)
+				// Skip pairs that have already been reviewed (promoted or dismissed)
+				// so we never surface the same candidate twice after a re-index.
+				if _, reviewed := existingPairKeys[pairKey]; reviewed {
+					continue
+				}
 				_, err = stmt.Exec(
 					idStr,
 					nAID, nBID,
@@ -422,6 +445,79 @@ func (p *Provider) IndexNoteIntoProject(ctx context.Context, noteURN, projectURN
 	}
 
 	return len(newCandidateIDs), nil
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SuggestProjectForNote
+// ─────────────────────────────────────────────────────────────────────────────
+
+// SuggestProjectForNote loads the note's project-less bursts, then scores them
+// against recent bursts from notes that do have a project assigned, delegating
+// all scoring logic to core.SuggestProjectForNote.
+func (p *Provider) SuggestProjectForNote(ctx context.Context, noteURN string) ([]core.ProjectSuggestion, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	// ── 1. Load this note's bursts that have no project yet ─────────────────
+	noteRows, err := p.db.QueryContext(ctx,
+		`SELECT tokens FROM context_bursts WHERE note_urn=? AND (project_urn IS NULL OR project_urn='')`,
+		noteURN,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("sqlite: suggest project — load note bursts: %w", err)
+	}
+	var noteTokenSets [][]string
+	for noteRows.Next() {
+		var tokStr string
+		if err := noteRows.Scan(&tokStr); err != nil {
+			noteRows.Close()
+			return nil, fmt.Errorf("sqlite: suggest project — scan note burst: %w", err)
+		}
+		if toks := strings.Fields(tokStr); len(toks) >= 3 {
+			noteTokenSets = append(noteTokenSets, toks)
+		}
+	}
+	noteRows.Close()
+	if err := noteRows.Err(); err != nil {
+		return nil, fmt.Errorf("sqlite: suggest project — note rows err: %w", err)
+	}
+
+	if len(noteTokenSets) == 0 {
+		return nil, nil
+	}
+
+	// ── 2. Load recent bursts from notes that DO have a project assigned ─────
+	cfg := p.burstCfg
+	cutoffMs := toMs(time.Now().UTC().Add(-time.Duration(cfg.CandidateLookbackDays) * 24 * time.Hour))
+	projRows, err := p.db.QueryContext(ctx,
+		`SELECT project_urn, tokens
+		 FROM context_bursts
+		 WHERE project_urn IS NOT NULL AND project_urn!='' AND note_urn!=? AND created_at>=?
+		 ORDER BY created_at DESC LIMIT ?`,
+		noteURN, cutoffMs, cfg.CandidateLookbackN,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("sqlite: suggest project — load project bursts: %w", err)
+	}
+	var hints []core.ProjectBurstHint
+	for projRows.Next() {
+		var projURN, tokStr string
+		if err := projRows.Scan(&projURN, &tokStr); err != nil {
+			projRows.Close()
+			return nil, fmt.Errorf("sqlite: suggest project — scan project burst: %w", err)
+		}
+		if toks := strings.Fields(tokStr); len(toks) >= 3 {
+			hints = append(hints, core.ProjectBurstHint{ProjectURN: projURN, Tokens: toks})
+		}
+	}
+	projRows.Close()
+	if err := projRows.Err(); err != nil {
+		return nil, fmt.Errorf("sqlite: suggest project — project rows err: %w", err)
+	}
+
+	// ── 3. Delegate scoring to pure core function ────────────────────────────
+	return core.SuggestProjectForNote(noteTokenSets, hints, cfg.OverlapThreshold), nil
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1036,5 +1132,70 @@ func (p *Provider) GetContextStats(ctx context.Context, projectURN string) (repo
 		stats.OldestPendingAgeDays = time.Since(oldest).Hours() / 24
 	}
 
+	// Inference counts (not project-scoped — inference records are note-level).
+	var infPending, infAccepted int
+	_ = p.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM note_context_inferences WHERE status='pending'`,
+	).Scan(&infPending)
+	_ = p.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM note_context_inferences WHERE status='accepted'`,
+	).Scan(&infAccepted)
+	stats.InferencesPending = infPending
+	stats.InferencesAccepted = infAccepted
+
 	return stats, nil
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SearchBursts
+// ─────────────────────────────────────────────────────────────────────────────
+
+// SearchBursts performs a full-text search over burst text and tokens using SQLite LIKE.
+func (p *Provider) SearchBursts(ctx context.Context, q string, pageSize int) ([]repo.BurstSearchResult, error) {
+	if strings.TrimSpace(q) == "" {
+		return []repo.BurstSearchResult{}, nil
+	}
+	if pageSize <= 0 {
+		pageSize = 20
+	}
+	if pageSize > 100 {
+		pageSize = 100
+	}
+
+	const sqlQuery = `
+		SELECT b.id, b.note_urn, COALESCE(b.project_urn,''), b.line_start, b.line_end,
+		       COALESCE(b.text,''), COALESCE(b.tokens,''),
+		       0.0 as bm25_score,
+		       b.created_at
+		FROM engine_context_bursts b
+		WHERE (b.tokens LIKE '%' || ? || '%' OR b.text LIKE '%' || ? || '%')
+		ORDER BY b.created_at DESC
+		LIMIT ?`
+
+	rows, err := p.db.QueryContext(ctx, sqlQuery, q, q, pageSize)
+	if err != nil {
+		return nil, fmt.Errorf("sqlite: search bursts: %w", err)
+	}
+	defer rows.Close()
+
+	var results []repo.BurstSearchResult
+	for rows.Next() {
+		var r repo.BurstSearchResult
+		var idInt int64
+		var createdAtMs int64
+		if err := rows.Scan(&idInt, &r.NoteURN, &r.ProjectURN, &r.LineStart, &r.LineEnd,
+			&r.Text, &r.Tokens, &r.BM25Score, &createdAtMs); err != nil {
+			return nil, fmt.Errorf("sqlite: search bursts: scan: %w", err)
+		}
+		r.ID = strconv.FormatInt(idInt, 10)
+		r.CreatedAt = fromMs(createdAtMs).UTC()
+		results = append(results, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("sqlite: search bursts: iterate: %w", err)
+	}
+	if results == nil {
+		results = []repo.BurstSearchResult{}
+	}
+	return results, nil
 }

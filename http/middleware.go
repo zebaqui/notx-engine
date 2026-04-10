@@ -28,6 +28,59 @@ func DeviceFromCtx(ctx context.Context) *core.Device {
 	return d
 }
 
+// withDeviceExistsAuth returns a middleware that enforces only that the calling
+// device is registered — it does NOT check approval status or revocation.
+//
+// This is intentionally lighter than withDeviceAuth and is used for endpoints
+// that a pending or revoked device must still be able to reach (e.g. the
+// status/stream SSE endpoint, which a freshly registered device polls while
+// waiting for administrator approval).
+//
+// Enforcement rules (in order):
+//  1. The X-Device-ID header must be present and non-empty — 401 otherwise.
+//  2. The device URN must exist in the repository — 401 if not found.
+//
+// On success the resolved *core.Device is stored in the request context under
+// ctxKeyDevice{} and the next handler is called.
+func (h *Handler) withDeviceExistsAuth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		log := loggerFromCtx(r.Context(), slog.Default())
+
+		deviceID := r.Header.Get(deviceIDHeader)
+		if deviceID == "" {
+			log.Warn("device exists auth: missing header", "header", deviceIDHeader)
+			writeError(w, http.StatusUnauthorized,
+				"missing "+deviceIDHeader+" header: all data requests must identify the calling device")
+			return
+		}
+
+		resp, err := h.deviceAdminSvc.GetDevice(r.Context(), &pb.GetDeviceRequest{DeviceUrn: deviceID})
+		if err != nil {
+			st, ok := status.FromError(err)
+			if ok && st.Code() == codes.NotFound {
+				log.Warn("device exists auth: unknown device", "device_id", deviceID)
+				writeError(w, http.StatusUnauthorized,
+					"device not registered: register this device before making data requests")
+				return
+			}
+			h.log.Error("device exists auth: service error", "device_id", deviceID, "err", err)
+			writeError(w, http.StatusInternalServerError, "internal server error")
+			return
+		}
+
+		log.Debug("device exists auth: ok", "device_id", deviceID)
+		ctx := context.WithValue(r.Context(), ctxKeyDevice{}, deviceInfoExtToCore(resp.Device))
+		next(w, r.WithContext(ctx))
+	}
+}
+
+// withDeviceExistsAuthMiddleware composes withMiddleware (logging + panic
+// recovery) with withDeviceExistsAuth so that callers only need one wrapper
+// call for routes that need a registered-but-not-necessarily-approved device.
+func (h *Handler) withDeviceExistsAuthMiddleware(next http.HandlerFunc) http.HandlerFunc {
+	return h.withMiddleware(h.withDeviceExistsAuth(next))
+}
+
 // withDeviceAuth returns a middleware that enforces device-level access
 // control using the X-Device-ID request header.
 //

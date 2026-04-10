@@ -33,7 +33,7 @@ func NewFromRepos(
 	links repo.LinkRepository,
 	log *slog.Logger,
 ) http.Handler {
-	noteSvc := grpcsvc.NewNoteServer(notes, 0, 0)
+	noteSvc := grpcsvc.NewNoteServerWithContext(notes, context, 0, 0)
 	projSvc := grpcsvc.NewProjectServer(projects, 0, 0)
 	folderSvc := grpcsvc.NewFolderServer(projects, 0, 0)
 	deviceSvc := grpcsvc.NewDeviceServer(devices)

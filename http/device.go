@@ -33,6 +33,74 @@ func (h *Handler) routeDevicesOpen(w http.ResponseWriter, r *http.Request) {
 	h.withDeviceAuth(h.routeDevices)(w, r)
 }
 
+// routeDeviceDispatch is the single entry point for all /v1/devices/{urn}/...
+// requests. It inspects the sub-path and applies the appropriate auth level
+// before delegating:
+//
+//   - {urn}/status and {urn}/status/stream use withDeviceExistsAuth so that a
+//     pending or revoked device can still reach its own approval-status stream.
+//   - Everything else uses the full withDeviceAuth gate (approved, not revoked).
+func (h *Handler) routeDeviceDispatch(w http.ResponseWriter, r *http.Request) {
+	trimmed := strings.TrimPrefix(r.URL.Path, "/v1/devices/")
+
+	// Determine the sub-path (everything after the first path segment).
+	var subPath string
+	if idx := strings.Index(trimmed, "/"); idx != -1 {
+		subPath = trimmed[idx+1:]
+	}
+
+	switch subPath {
+	case "status", "status/stream":
+		// Lighter auth — only requires device to exist, not be approved.
+		h.withDeviceExistsAuth(h.routeDeviceStatus)(w, r)
+	default:
+		// Full auth — device must be registered, not revoked, and approved.
+		h.withDeviceAuth(h.routeDevice)(w, r)
+	}
+}
+
+// routeDeviceStatus handles the /v1/devices/{urn}/status and
+// /v1/devices/{urn}/status/stream sub-paths without requiring a fully-approved
+// device. It only requires that the device is registered (existence check), so
+// that a pending device can poll its own approval status via the SSE stream.
+func (h *Handler) routeDeviceStatus(w http.ResponseWriter, r *http.Request) {
+	trimmed := strings.TrimPrefix(r.URL.Path, "/v1/devices/")
+	if trimmed == "" {
+		writeError(w, http.StatusBadRequest, "device URN is required")
+		return
+	}
+
+	idx := strings.Index(trimmed, "/")
+	if idx == -1 {
+		writeError(w, http.StatusBadRequest, "device URN is required")
+		return
+	}
+
+	urn := trimmed[:idx]
+	subPath := trimmed[idx+1:]
+	if urn == "" {
+		writeError(w, http.StatusBadRequest, "device URN is required")
+		return
+	}
+
+	switch subPath {
+	case "status":
+		if r.Method != http.MethodGet {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		h.handleGetDeviceStatus(w, r, urn)
+	case "status/stream":
+		if r.Method != http.MethodGet {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		h.handleStreamDeviceStatus(w, r, urn)
+	default:
+		writeError(w, http.StatusNotFound, "not found")
+	}
+}
+
 func (h *Handler) routeDevices(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -57,18 +125,6 @@ func (h *Handler) routeDevice(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		switch subPath {
-		case "status":
-			if r.Method != http.MethodGet {
-				writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-				return
-			}
-			h.handleGetDeviceStatus(w, r, urn)
-		case "status/stream":
-			if r.Method != http.MethodGet {
-				writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-				return
-			}
-			h.handleStreamDeviceStatus(w, r, urn)
 		case "approve":
 			if r.Method != http.MethodPatch {
 				writeError(w, http.StatusMethodNotAllowed, "method not allowed")

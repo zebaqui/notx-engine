@@ -386,3 +386,44 @@ func contextRepoErrToStatus(err error, id string) error {
 		return status.Errorf(codes.Internal, "internal error: %v", err)
 	}
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Inference — non-gRPC methods (called directly by the HTTP layer)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// GetFullStats returns the complete ContextStats (including inference counts)
+// directly as a repo.ContextStats, bypassing the proto mapping.
+// The HTTP handler uses this to avoid needing proto fields for new stats.
+func (s *ContextServer) GetFullStats(ctx context.Context, projectURN string) (repo.ContextStats, error) {
+	return s.repo.GetContextStats(ctx, projectURN)
+}
+
+// ListInferences returns a paginated list of inference records.
+func (s *ContextServer) ListInferences(ctx context.Context, opts repo.InferenceListOptions) ([]repo.InferenceRecord, string, error) {
+	return s.repo.ListInferences(ctx, opts)
+}
+
+// GetInference returns a single inference record by ID.
+func (s *ContextServer) GetInference(ctx context.Context, id string) (repo.InferenceRecord, error) {
+	return s.repo.GetInference(ctx, id)
+}
+
+// GetNoteInference returns the active pending inference for a note.
+func (s *ContextServer) GetNoteInference(ctx context.Context, noteURN string) (repo.InferenceRecord, bool, error) {
+	return s.repo.GetNoteInference(ctx, noteURN)
+}
+
+// AcceptInference marks an inference as accepted and applies the accepted fields.
+func (s *ContextServer) AcceptInference(ctx context.Context, id string, opts repo.AcceptInferenceOptions) error {
+	return s.repo.AcceptInference(ctx, id, opts)
+}
+
+// RejectInference marks an inference as rejected.
+func (s *ContextServer) RejectInference(ctx context.Context, id, reviewerURN string) error {
+	return s.repo.RejectInference(ctx, id, reviewerURN)
+}
+
+// SearchBursts performs a full-text search over burst text and tokens.
+func (s *ContextServer) SearchBursts(ctx context.Context, q string, pageSize int) ([]repo.BurstSearchResult, error) {
+	return s.repo.SearchBursts(ctx, q, pageSize)
+}

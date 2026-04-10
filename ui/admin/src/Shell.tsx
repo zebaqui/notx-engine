@@ -1,39 +1,41 @@
 import { useNavigate, useRouterState } from "@tanstack/react-router";
+import { HugeiconsIcon } from "@hugeicons/react";
 import {
-  LayoutDashboard,
-  Settings,
-  FileText,
-  Activity,
-  FolderOpen,
-  Monitor,
-  Users,
-  Server,
-  GitBranch,
-  Link2,
-} from "lucide-react";
+  DashboardSquare01Icon,
+  Settings01Icon,
+  Note01Icon,
+  FolderOpenIcon,
+  GitBranchIcon,
+  Link01Icon,
+  MonitorDotIcon,
+  ServerStack01Icon,
+  UserGroupIcon,
+  Activity01Icon,
+  Search01Icon,
+} from "@hugeicons/core-free-icons";
 
 // ─── Nav definition ───────────────────────────────────────────────────────────
 
 const NAV = [
-  { path: "/overview", label: "Overview", icon: <LayoutDashboard size={16} /> },
-  { path: "/notes", label: "Notes", icon: <FileText size={16} /> },
-  { path: "/projects", label: "Projects", icon: <FolderOpen size={16} /> },
-  { path: "/context", label: "Context", icon: <GitBranch size={16} /> },
-  { path: "/links", label: "Links", icon: <Link2 size={16} /> },
-  { path: "/devices", label: "Devices", icon: <Monitor size={16} /> },
-  { path: "/servers", label: "Servers", icon: <Server size={16} /> },
-  { path: "/users", label: "Users", icon: <Users size={16} /> },
-  { path: "/config", label: "Configuration", icon: <Settings size={16} /> },
+  { path: "/overview", label: "Overview", icon: DashboardSquare01Icon },
+  { path: "/notes", label: "Notes", icon: Note01Icon },
+  { path: "/projects", label: "Projects", icon: FolderOpenIcon },
+  { path: "/context", label: "Context", icon: GitBranchIcon },
+  { path: "/links", label: "Links", icon: Link01Icon },
+  { path: "/devices", label: "Devices", icon: MonitorDotIcon },
+  { path: "/servers", label: "Servers", icon: ServerStack01Icon },
+  { path: "/users", label: "Users", icon: UserGroupIcon },
+  { path: "/config", label: "Config", icon: Settings01Icon },
 ] as const;
 
 const PAGE_TITLES: Record<string, string> = {
   "/overview": "Overview",
   "/notes": "Notes",
-  "/projects": "Projects & Folders",
-  "/context": "Context Graph",
-  "/links": "Link Inspector",
+  "/projects": "Projects",
+  "/context": "Context graph",
+  "/links": "Link inspector",
   "/devices": "Devices",
-  "/servers": "Peer Servers",
+  "/servers": "Peer servers",
   "/users": "Users",
   "/config": "Configuration",
 };
@@ -44,33 +46,21 @@ export default function Shell({ children }: { children: React.ReactNode }) {
   const navigate = useNavigate();
   const routerState = useRouterState();
   const pathname = routerState.location.pathname;
-  const title = PAGE_TITLES[pathname] ?? "notx admin";
+  const title = PAGE_TITLES[pathname] ?? "notx";
 
   return (
     <div className="shell">
       {/* ── Sidebar ─────────────────────────────────────────────────────── */}
       <aside className="sidebar">
         <div className="sidebar-logo">
-          <button className="search-hint" onClick={() => {}}>
-            <svg
-              width="13"
-              height="13"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2.2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            >
-              <circle cx="11" cy="11" r="8" />
-              <line x1="21" y1="21" x2="16.65" y2="16.65" />
-            </svg>
-            <kbd>⌘P</kbd>
-          </button>
           <div className="logo-wordmark">
             <span className="logo-dot" />
             notx
           </div>
+          <button className="search-hint" onClick={() => {}}>
+            <HugeiconsIcon icon={Search01Icon} size={11} />
+            <kbd>⌘P</kbd>
+          </button>
         </div>
 
         <nav className="sidebar-nav">
@@ -80,12 +70,12 @@ export default function Shell({ children }: { children: React.ReactNode }) {
               className={`nav-item${pathname === path ? " active" : ""}`}
               onClick={() => navigate({ to: path })}
             >
-              {icon}
+              <HugeiconsIcon icon={icon} size={14} strokeWidth={1.5} />
               {label}
             </button>
           ))}
 
-          <div className="divider" style={{ margin: "8px 0" }} />
+          <div className="divider" style={{ margin: "6px 0" }} />
 
           <a
             href="http://localhost:4060/healthz"
@@ -94,22 +84,24 @@ export default function Shell({ children }: { children: React.ReactNode }) {
             className="nav-item"
             style={{ textDecoration: "none" }}
           >
-            <Activity size={16} />
-            /healthz
+            <HugeiconsIcon icon={Activity01Icon} size={14} strokeWidth={1.5} />
+            healthz
           </a>
         </nav>
 
         <div
           style={{
-            padding: "12px 16px",
+            padding: "10px 14px",
             borderTop: "1px solid var(--border)",
-            fontSize: 11,
+            fontSize: 10.5,
             color: "var(--text-muted)",
-            lineHeight: 1.6,
+            lineHeight: 1.7,
           }}
         >
-          <div style={{ fontWeight: 600, marginBottom: 2 }}>notx-engine</div>
-          <div>HTTP :4060 · gRPC :50051</div>
+          <div style={{ color: "var(--text-secondary)", marginBottom: 1 }}>
+            notx-engine
+          </div>
+          <div>:4060 · :50051</div>
         </div>
       </aside>
 
@@ -120,7 +112,7 @@ export default function Shell({ children }: { children: React.ReactNode }) {
           <div className="topbar-right">
             <span
               style={{
-                fontSize: 11,
+                fontSize: 10.5,
                 color: "var(--text-muted)",
                 fontFamily: "var(--font-mono)",
               }}

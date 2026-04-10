@@ -1,19 +1,15 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { HugeiconsIcon } from "@hugeicons/react";
 import {
-  X,
-  Lock,
-  FileText,
-  Clock,
-  User,
-  Hash,
-  Layers,
-  Link2,
-  Anchor,
-  ArrowRight,
-  ArrowLeft,
-  ExternalLink,
-} from "lucide-react";
+  Note01Icon,
+  LockIcon,
+  Link01Icon,
+  Clock01Icon,
+  AnchorIcon,
+  Layers01Icon,
+  UserIcon,
+} from "@hugeicons/core-free-icons";
 import {
   fetchNote,
   fetchNoteEvents,
@@ -262,13 +258,17 @@ export default function NoteDrawer({ note, onClose }: Props) {
             }}
           >
             {isSecure ? (
-              <Lock
+              <HugeiconsIcon
+                icon={LockIcon}
                 size={15}
+                strokeWidth={1.5}
                 style={{ color: "var(--yellow)", flexShrink: 0 }}
               />
             ) : (
-              <FileText
+              <HugeiconsIcon
+                icon={Note01Icon}
                 size={15}
+                strokeWidth={1.5}
                 style={{ color: "var(--accent)", flexShrink: 0 }}
               />
             )}
@@ -284,7 +284,7 @@ export default function NoteDrawer({ note, onClose }: Props) {
             </span>
           </div>
           <button className="close-btn" onClick={onClose} aria-label="Close">
-            <X size={16} />
+            <span style={{ fontSize: 14 }}>×</span>
           </button>
         </div>
 
@@ -316,7 +316,16 @@ export default function NoteDrawer({ note, onClose }: Props) {
             <div className="card-title">Metadata</div>
             <table className="kv-table">
               <tbody>
-                <Row label="URN" icon={<Hash size={12} />}>
+                <Row
+                  label="URN"
+                  icon={
+                    <HugeiconsIcon
+                      icon={Note01Icon}
+                      size={12}
+                      strokeWidth={1.5}
+                    />
+                  }
+                >
                   <span
                     className="mono"
                     style={{ fontSize: 11, wordBreak: "break-all" }}
@@ -324,11 +333,29 @@ export default function NoteDrawer({ note, onClose }: Props) {
                     {note.urn}
                   </span>
                 </Row>
-                <Row label="Type" icon={<Layers size={12} />}>
+                <Row
+                  label="Type"
+                  icon={
+                    <HugeiconsIcon
+                      icon={Layers01Icon}
+                      size={12}
+                      strokeWidth={1.5}
+                    />
+                  }
+                >
                   <span className="mono">{note.note_type}</span>
                 </Row>
                 {note.project_urn && (
-                  <Row label="Project URN" icon={<Hash size={12} />}>
+                  <Row
+                    label="Project URN"
+                    icon={
+                      <HugeiconsIcon
+                        icon={Note01Icon}
+                        size={12}
+                        strokeWidth={1.5}
+                      />
+                    }
+                  >
                     <span
                       className="mono"
                       style={{ fontSize: 11, wordBreak: "break-all" }}
@@ -338,7 +365,16 @@ export default function NoteDrawer({ note, onClose }: Props) {
                   </Row>
                 )}
                 {note.folder_urn && (
-                  <Row label="Folder URN" icon={<Hash size={12} />}>
+                  <Row
+                    label="Folder URN"
+                    icon={
+                      <HugeiconsIcon
+                        icon={Note01Icon}
+                        size={12}
+                        strokeWidth={1.5}
+                      />
+                    }
+                  >
                     <span
                       className="mono"
                       style={{ fontSize: 11, wordBreak: "break-all" }}
@@ -347,10 +383,28 @@ export default function NoteDrawer({ note, onClose }: Props) {
                     </span>
                   </Row>
                 )}
-                <Row label="Created" icon={<Clock size={12} />}>
+                <Row
+                  label="Created"
+                  icon={
+                    <HugeiconsIcon
+                      icon={Clock01Icon}
+                      size={12}
+                      strokeWidth={1.5}
+                    />
+                  }
+                >
                   <span className="mono">{fmtDate(note.created_at)}</span>
                 </Row>
-                <Row label="Updated" icon={<Clock size={12} />}>
+                <Row
+                  label="Updated"
+                  icon={
+                    <HugeiconsIcon
+                      icon={Clock01Icon}
+                      size={12}
+                      strokeWidth={1.5}
+                    />
+                  }
+                >
                   <span className="mono">{fmtDate(note.updated_at)}</span>
                 </Row>
               </tbody>
@@ -389,7 +443,12 @@ export default function NoteDrawer({ note, onClose }: Props) {
             >
               <div className="card-title" style={{ marginBottom: 0 }}>
                 <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                  <Anchor size={13} style={{ color: "var(--accent)" }} />
+                  <HugeiconsIcon
+                    icon={AnchorIcon}
+                    size={13}
+                    strokeWidth={1.5}
+                    style={{ color: "var(--accent)" }}
+                  />
                   Anchors
                 </span>
               </div>
@@ -488,7 +547,12 @@ export default function NoteDrawer({ note, onClose }: Props) {
             >
               <div className="card-title" style={{ marginBottom: 0 }}>
                 <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                  <Link2 size={13} style={{ color: "var(--accent)" }} />
+                  <HugeiconsIcon
+                    icon={Link01Icon}
+                    size={13}
+                    strokeWidth={1.5}
+                    style={{ color: "var(--accent)" }}
+                  />
                   Links
                 </span>
               </div>
@@ -510,19 +574,25 @@ export default function NoteDrawer({ note, onClose }: Props) {
                 {
                   key: "inbound" as const,
                   label: "Inbound",
-                  icon: <ArrowLeft size={11} />,
+                  icon: <span style={{ fontSize: 11 }}>←</span>,
                   count: inbound.length,
                 },
                 {
                   key: "outbound" as const,
                   label: "Outbound",
-                  icon: <ArrowRight size={11} />,
+                  icon: <span style={{ fontSize: 11 }}>→</span>,
                   count: outbound.length,
                 },
                 {
                   key: "external" as const,
                   label: "External",
-                  icon: <ExternalLink size={11} />,
+                  icon: (
+                    <HugeiconsIcon
+                      icon={Link01Icon}
+                      size={11}
+                      strokeWidth={1.5}
+                    />
+                  ),
                   count: external.length,
                 },
               ].map(({ key, label, icon, count }) => (
@@ -731,7 +801,7 @@ export default function NoteDrawer({ note, onClose }: Props) {
                   fontSize: 13,
                 }}
               >
-                <Lock size={13} />
+                <HugeiconsIcon icon={LockIcon} size={13} strokeWidth={1.5} />
                 Event stream is encrypted — contents are not readable by the
                 admin.
               </div>
@@ -746,7 +816,7 @@ export default function NoteDrawer({ note, onClose }: Props) {
               <>
                 <div style={{ marginBottom: 12, display: "flex", gap: 12 }}>
                   <span className="badge badge-blue">
-                    <Hash size={10} />
+                    <span style={{ fontSize: 10 }}>#</span>
                     {eventCount} {eventCount === 1 ? "event" : "events"}
                   </span>
                 </div>
@@ -786,7 +856,7 @@ export default function NoteDrawer({ note, onClose }: Props) {
                               gap: 4,
                             }}
                           >
-                            <Hash size={10} />
+                            <span style={{ fontSize: 10 }}>#</span>
                             <span className="mono">seq {ev.sequence}</span>
                           </span>
                           <span
@@ -796,7 +866,11 @@ export default function NoteDrawer({ note, onClose }: Props) {
                               gap: 4,
                             }}
                           >
-                            <User size={10} />
+                            <HugeiconsIcon
+                              icon={UserIcon}
+                              size={10}
+                              strokeWidth={1.5}
+                            />
                             <span
                               className="mono"
                               style={{
@@ -817,7 +891,11 @@ export default function NoteDrawer({ note, onClose }: Props) {
                               gap: 4,
                             }}
                           >
-                            <Clock size={10} />
+                            <HugeiconsIcon
+                              icon={Clock01Icon}
+                              size={10}
+                              strokeWidth={1.5}
+                            />
                             <span className="mono">
                               {new Date(ev.created_at).toLocaleTimeString()}
                             </span>
