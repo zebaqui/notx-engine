@@ -17,6 +17,7 @@ import (
 
 	"github.com/zebaqui/notx-engine/core"
 	"github.com/zebaqui/notx-engine/internal/clientconfig"
+	"github.com/zebaqui/notx-engine/internal/cloud"
 	"github.com/zebaqui/notx-engine/internal/grpcclient"
 	pb "github.com/zebaqui/notx-engine/proto"
 )
@@ -130,9 +131,10 @@ func runAddNote(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("load config: %w", err)
 	}
 
-	// ── If --urn is set, push a content update via HTTP ───────────────────────
-	if addNoteFlags.urn != "" {
-		return runUpdateContent(absPath, addNoteFlags.urn, content, cfg)
+	// ── Load client.json to determine connection mode ─────────────────────────
+	clientJSON, err := clientconfig.LoadClientJSON()
+	if err != nil {
+		return fmt.Errorf("load client.json: %w", err)
 	}
 
 	// ── Derive note name from filename ────────────────────────────────────────
@@ -144,6 +146,37 @@ func runAddNote(cmd *cobra.Command, args []string) error {
 	}
 
 	lines := splitContentLines(content)
+
+	// ── Dispatch based on connection mode ────────────────────────────────────
+	switch clientJSON.Settings.Source {
+	case "cloud":
+		return runAddNoteCloud(cmd, args, clientJSON, absPath, content, noteName, lines)
+	case "remote":
+		// Remote mode: honour remoteUrl from client.json when --addr is not
+		// explicitly set. The grpcPort in client.json takes precedence over
+		// whatever is stored in config.json.
+		if addNoteFlags.addr == "" && clientJSON.Settings.RemoteURL != "" {
+			// Strip scheme to get host, then append the gRPC port.
+			host := clientJSON.Settings.RemoteURL
+			host = strings.TrimPrefix(host, "http://")
+			host = strings.TrimPrefix(host, "https://")
+			// Strip any existing port or path.
+			if idx := strings.Index(host, "/"); idx != -1 {
+				host = host[:idx]
+			}
+			if idx := strings.LastIndex(host, ":"); idx != -1 {
+				host = host[:idx]
+			}
+			if clientJSON.Settings.GRPCPort > 0 {
+				cfg.Client.GRPCAddr = fmt.Sprintf("%s:%d", host, clientJSON.Settings.GRPCPort)
+			}
+		}
+	}
+
+	// ── If --urn is set, push a content update via HTTP ───────────────────────
+	if addNoteFlags.urn != "" {
+		return runUpdateContent(absPath, addNoteFlags.urn, content, cfg)
+	}
 
 	// --addr flag overrides the config value for this invocation.
 	grpcAddr := cfg.Client.GRPCAddr
@@ -253,6 +286,20 @@ func runAddNote(cmd *cobra.Command, args []string) error {
 		urn = createResp.Header.Urn
 	}
 
+	// Build the web URL for the note. For local/remote the UI is served from
+	// the same host as the gRPC addr but on the HTTP port from config.
+	httpBase := cfg.Server.HTTPAddr
+	if strings.HasPrefix(httpBase, ":") {
+		httpBase = "localhost" + httpBase
+	}
+	if clientJSON.Settings.Source == "remote" && clientJSON.Settings.RemoteURL != "" {
+		httpBase = strings.TrimRight(clientJSON.Settings.RemoteURL, "/")
+	}
+	if !strings.HasPrefix(httpBase, "http") {
+		httpBase = "http://" + httpBase
+	}
+	noteURL := fmt.Sprintf("%s/n/%s", httpBase, urn)
+
 	fmt.Printf("\n  \033[1;32m✓\033[0m  Note created\n")
 	fmt.Printf("     name   : %s\n", noteName)
 	fmt.Printf("     urn    : %s\n", urn)
@@ -261,9 +308,117 @@ func runAddNote(cmd *cobra.Command, args []string) error {
 	if addNoteFlags.projectURN != "" {
 		fmt.Printf("     project: %s\n", addNoteFlags.projectURN)
 	}
+	fmt.Printf("     url    : %s\n", noteURL)
 	fmt.Printf("     server : %s\n\n", grpcAddr)
 
 	// ── Optionally delete the source file ─────────────────────────────────────
+	if addNoteFlags.delete {
+		if err := os.Remove(absPath); err != nil {
+			return fmt.Errorf("delete source file %q: %w", absPath, err)
+		}
+		fmt.Printf("  \033[1;33m✓\033[0m  Deleted source file: %s\n\n", absPath)
+	}
+
+	return nil
+}
+
+// runAddNoteCloud handles note creation and updates when source mode is "cloud".
+// It obtains a valid JWT via cloud.EnsureToken, then uses cloud.NoteClient to
+// talk to the notx cloud REST API instead of gRPC.
+func runAddNoteCloud(
+	_ *cobra.Command,
+	_ []string,
+	clientJSON *clientconfig.ClientJSON,
+	absPath, content, noteName string,
+	lines []string,
+) error {
+	token, err := cloud.EnsureToken(clientJSON)
+	if err != nil {
+		return fmt.Errorf("cloud auth: %w", err)
+	}
+
+	noteClient := cloud.NewNoteClient(token)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	serverLabel := cloud.CloudBaseURL()
+
+	// ── Update existing note ──────────────────────────────────────────────────
+	if addNoteFlags.urn != "" {
+		sequence, changed, err := noteClient.ReplaceContent(ctx, addNoteFlags.urn, content, "")
+		if err != nil {
+			return fmt.Errorf("cloud update note: %w", err)
+		}
+
+		cloudUpdateURL := fmt.Sprintf("%s/n/%s", cloud.WebBaseURL(), addNoteFlags.urn)
+
+		if !changed {
+			fmt.Printf("\n  \033[1;33m–\033[0m  No changes detected\n")
+			fmt.Printf("     urn      : %s\n", addNoteFlags.urn)
+			fmt.Printf("     sequence : %d (unchanged)\n", sequence)
+			fmt.Printf("     url      : %s\n", cloudUpdateURL)
+			fmt.Printf("     server   : %s\n\n", serverLabel)
+		} else {
+			fmt.Printf("\n  \033[1;32m✓\033[0m  Note updated\n")
+			fmt.Printf("     urn      : %s\n", addNoteFlags.urn)
+			fmt.Printf("     sequence : %d\n", sequence)
+			fmt.Printf("     lines    : %d\n", len(lines))
+			fmt.Printf("     url      : %s\n", cloudUpdateURL)
+			fmt.Printf("     server   : %s\n\n", serverLabel)
+		}
+
+		if addNoteFlags.delete {
+			if err := os.Remove(absPath); err != nil {
+				return fmt.Errorf("delete source file %q: %w", absPath, err)
+			}
+			fmt.Printf("  \033[1;33m✓\033[0m  Deleted source file: %s\n\n", absPath)
+		}
+
+		return nil
+	}
+
+	// ── Create new note ───────────────────────────────────────────────────────
+	noteType := "normal"
+	if addNoteFlags.secure {
+		noteType = "secure"
+	}
+
+	noteURNStr := core.NewURN(core.ObjectTypeNote).String()
+
+	urn, err := noteClient.CreateNote(
+		ctx,
+		noteURNStr,
+		noteName,
+		noteType,
+		addNoteFlags.projectURN,
+		addNoteFlags.folderURN,
+	)
+	if err != nil {
+		return fmt.Errorf("cloud create note: %w", err)
+	}
+
+	// Append initial content (only for non-empty files).
+	if len(lines) > 0 {
+		_, _, err = noteClient.ReplaceContent(ctx, urn, content, "")
+		if err != nil {
+			return fmt.Errorf("cloud set note content: %w", err)
+		}
+	}
+
+	// ── Success output ────────────────────────────────────────────────────────
+	cloudCreateURL := fmt.Sprintf("%s/n/%s", cloud.WebBaseURL(), urn)
+
+	fmt.Printf("\n  \033[1;32m✓\033[0m  Note created\n")
+	fmt.Printf("     name   : %s\n", noteName)
+	fmt.Printf("     urn    : %s\n", urn)
+	fmt.Printf("     type   : %s\n", noteType)
+	fmt.Printf("     lines  : %d\n", len(lines))
+	if addNoteFlags.projectURN != "" {
+		fmt.Printf("     project: %s\n", addNoteFlags.projectURN)
+	}
+	fmt.Printf("     url    : %s\n", cloudCreateURL)
+	fmt.Printf("     server : notx cloud (%s)\n\n", serverLabel)
+
 	if addNoteFlags.delete {
 		if err := os.Remove(absPath); err != nil {
 			return fmt.Errorf("delete source file %q: %w", absPath, err)
@@ -334,16 +489,24 @@ func runUpdateContent(srcPath, noteURN, content string, cfg *clientconfig.Config
 
 	lines := splitContentLines(content)
 
+	updateBase := httpAddr
+	if !strings.HasPrefix(updateBase, "http") {
+		updateBase = "http://" + updateBase
+	}
+	updateNoteURL := fmt.Sprintf("%s/n/%s", updateBase, noteURN)
+
 	if !result.Changed {
 		fmt.Printf("\n  \033[1;33m–\033[0m  No changes detected\n")
 		fmt.Printf("     urn      : %s\n", noteURN)
 		fmt.Printf("     sequence : %d (unchanged)\n", result.Sequence)
+		fmt.Printf("     url      : %s\n", updateNoteURL)
 		fmt.Printf("     server   : %s\n\n", httpAddr)
 	} else {
 		fmt.Printf("\n  \033[1;32m✓\033[0m  Note updated\n")
 		fmt.Printf("     urn      : %s\n", noteURN)
 		fmt.Printf("     sequence : %d\n", result.Sequence)
 		fmt.Printf("     lines    : %d\n", len(lines))
+		fmt.Printf("     url      : %s\n", updateNoteURL)
 		fmt.Printf("     server   : %s\n\n", httpAddr)
 	}
 

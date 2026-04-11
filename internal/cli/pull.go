@@ -16,6 +16,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/zebaqui/notx-engine/core"
 	"github.com/zebaqui/notx-engine/internal/clientconfig"
+	"github.com/zebaqui/notx-engine/internal/cloud"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -159,12 +160,26 @@ func runPull(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("pull: load config: %w", err)
 	}
 
+	clientJSON, err := clientconfig.LoadClientJSON()
+	if err != nil {
+		return fmt.Errorf("pull: load client.json: %w", err)
+	}
+
+	if clientJSON.Settings.Source == "cloud" {
+		return runPullCloud(args, clientJSON)
+	}
+
 	shortcuts, err := clientconfig.LoadShortcuts()
 	if err != nil {
 		return fmt.Errorf("pull: load shortcuts: %w", err)
 	}
 
-	base := httpBase(cfg, pullFlags.addr)
+	// In remote mode, honour remoteUrl from client.json as the HTTP base.
+	addrOverride := pullFlags.addr
+	if addrOverride == "" && clientJSON.Settings.Source == "remote" && clientJSON.Settings.RemoteURL != "" {
+		addrOverride = clientJSON.Settings.RemoteURL
+	}
+	base := httpBase(cfg, addrOverride)
 
 	dc, err := newDeviceClient(base, cfg)
 	if err != nil {
@@ -287,12 +302,26 @@ func runPullShortcut(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("pull shortcut: load config: %w", err)
 	}
 
+	clientJSON, err := clientconfig.LoadClientJSON()
+	if err != nil {
+		return fmt.Errorf("pull shortcut: load client.json: %w", err)
+	}
+
+	if clientJSON.Settings.Source == "cloud" {
+		return runPullShortcutCloud(clientJSON)
+	}
+
 	shortcuts, err := clientconfig.LoadShortcuts()
 	if err != nil {
 		return fmt.Errorf("pull shortcut: load shortcuts: %w", err)
 	}
 
-	base := httpBase(cfg, pullFlags.addr)
+	// In remote mode, honour remoteUrl from client.json as the HTTP base.
+	addrOverride := pullFlags.addr
+	if addrOverride == "" && clientJSON.Settings.Source == "remote" && clientJSON.Settings.RemoteURL != "" {
+		addrOverride = clientJSON.Settings.RemoteURL
+	}
+	base := httpBase(cfg, addrOverride)
 
 	dc, err := newDeviceClient(base, cfg)
 	if err != nil {
@@ -397,6 +426,316 @@ func runPullShortcut(cmd *cobra.Command, args []string) error {
 // ─────────────────────────────────────────────────────────────────────────────
 // HTTP helpers
 // ─────────────────────────────────────────────────────────────────────────────
+
+// ─────────────────────────────────────────────────────────────────────────────
+// runPullCloud / runPullShortcutCloud
+// ─────────────────────────────────────────────────────────────────────────────
+
+// runPullCloud is the cloud-mode equivalent of runPull. It uses cloud.NoteClient
+// (Bearer JWT) instead of deviceClient (X-Device-ID).
+func runPullCloud(args []string, clientJSON *clientconfig.ClientJSON) error {
+	token, err := cloud.EnsureToken(clientJSON)
+	if err != nil {
+		return fmt.Errorf("pull cloud: auth: %w", err)
+	}
+
+	nc := cloud.NewNoteClient(token)
+	ctx := context.Background()
+
+	shortcuts, err := clientconfig.LoadShortcuts()
+	if err != nil {
+		return fmt.Errorf("pull cloud: load shortcuts: %w", err)
+	}
+
+	// ── Resolve target URN ────────────────────────────────────────────────────
+	var urn string
+
+	if len(args) == 1 {
+		id := args[0]
+		if sc, ok := shortcuts.Resolve(id); ok {
+			urn = sc.URN
+		} else {
+			urn = expandURN(id)
+		}
+	} else {
+		// Interactive picker — fetch note + project + folder lists.
+		notes, err := nc.ListNotes(ctx)
+		if err != nil {
+			return fmt.Errorf("pull cloud: %w", err)
+		}
+
+		projectNames, folderNames := cloudProjectFolderNames(ctx, nc)
+
+		// Convert cloud.NoteHeader slice to the local noteHeader slice that
+		// buildPickerItems expects.
+		localHeaders := make([]noteHeader, 0, len(notes))
+		for _, n := range notes {
+			localHeaders = append(localHeaders, noteHeader{
+				URN:        n.URN,
+				Name:       n.Name,
+				NoteType:   n.NoteType,
+				ProjectURN: n.ProjectURN,
+				FolderURN:  n.FolderURN,
+				Deleted:    n.Deleted,
+				CreatedAt:  n.CreatedAt,
+				UpdatedAt:  n.UpdatedAt,
+			})
+		}
+
+		items := buildPickerItems(localHeaders, shortcuts, projectNames, folderNames)
+		selected, ok := RunPicker(items)
+		if !ok {
+			return nil
+		}
+		urn = selected.URN
+	}
+
+	// ── Fetch note ────────────────────────────────────────────────────────────
+	noteResp, err := nc.GetNote(ctx, urn)
+	if err != nil {
+		return fmt.Errorf("pull cloud: %w", err)
+	}
+
+	outName := pullFlags.name
+	if outName == "" {
+		outName = noteResp.Header.Name
+	}
+	if outName == "" {
+		outName = shortURN(urn)
+	}
+
+	// ── --text --stdout ───────────────────────────────────────────────────────
+	if pullFlags.text && pullFlags.stdout {
+		_, err = fmt.Fprint(os.Stdout, noteResp.Content)
+		return err
+	}
+
+	ext := ".notx"
+	if pullFlags.text {
+		ext = ".txt"
+	}
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("pull cloud: get working dir: %w", err)
+	}
+	outPath := filepath.Join(cwd, outName+ext)
+
+	// ── Overwrite prompt ──────────────────────────────────────────────────────
+	if _, err := os.Stat(outPath); err == nil {
+		fmt.Fprintf(os.Stderr, "  File %s already exists. Overwrite? [y/N] ", outName+ext)
+		sc := bufio.NewScanner(os.Stdin)
+		if sc.Scan() {
+			v := strings.TrimSpace(strings.ToLower(sc.Text()))
+			if v != "y" && v != "yes" {
+				fmt.Fprintln(os.Stderr, "  Aborted.")
+				return nil
+			}
+		} else {
+			fmt.Fprintln(os.Stderr, "  Aborted.")
+			return nil
+		}
+	}
+
+	// ── Write file ────────────────────────────────────────────────────────────
+	if pullFlags.text {
+		if err := os.WriteFile(outPath, []byte(noteResp.Content), 0o644); err != nil {
+			return fmt.Errorf("pull cloud: write %s: %w", outPath, err)
+		}
+	} else {
+		evResp, err := nc.GetEvents(ctx, urn)
+		if err != nil {
+			return fmt.Errorf("pull cloud: %w", err)
+		}
+
+		// Convert cloud.EventsResponse → local eventsResponse for writeNotxFile.
+		localEv := cloudEventsToLocal(evResp)
+		hdr := noteHeader{
+			URN:        noteResp.Header.URN,
+			Name:       noteResp.Header.Name,
+			NoteType:   noteResp.Header.NoteType,
+			ProjectURN: noteResp.Header.ProjectURN,
+			FolderURN:  noteResp.Header.FolderURN,
+			CreatedAt:  noteResp.Header.CreatedAt,
+			UpdatedAt:  noteResp.Header.UpdatedAt,
+		}
+		if err := writeNotxFile(outPath, hdr, localEv); err != nil {
+			return fmt.Errorf("pull cloud: write %s: %w", outPath, err)
+		}
+	}
+
+	relPath := "./" + outName + ext
+	printPullSummary(urn, noteResp.Header.Name, relPath, noteResp.Header.ProjectURN, noteResp.Header.FolderURN, outName, shortcuts, false)
+	return nil
+}
+
+// runPullShortcutCloud is the cloud-mode equivalent of runPullShortcut.
+func runPullShortcutCloud(clientJSON *clientconfig.ClientJSON) error {
+	token, err := cloud.EnsureToken(clientJSON)
+	if err != nil {
+		return fmt.Errorf("pull shortcut cloud: auth: %w", err)
+	}
+
+	nc := cloud.NewNoteClient(token)
+	ctx := context.Background()
+
+	shortcuts, err := clientconfig.LoadShortcuts()
+	if err != nil {
+		return fmt.Errorf("pull shortcut cloud: load shortcuts: %w", err)
+	}
+
+	notes, err := nc.ListNotes(ctx)
+	if err != nil {
+		return fmt.Errorf("pull shortcut cloud: %w", err)
+	}
+
+	projectNames, folderNames := cloudProjectFolderNames(ctx, nc)
+
+	localHeaders := make([]noteHeader, 0, len(notes))
+	for _, n := range notes {
+		localHeaders = append(localHeaders, noteHeader{
+			URN:        n.URN,
+			Name:       n.Name,
+			NoteType:   n.NoteType,
+			ProjectURN: n.ProjectURN,
+			FolderURN:  n.FolderURN,
+			Deleted:    n.Deleted,
+			CreatedAt:  n.CreatedAt,
+			UpdatedAt:  n.UpdatedAt,
+		})
+	}
+
+	items := buildPickerItems(localHeaders, shortcuts, projectNames, folderNames)
+	selected, ok := RunPicker(items)
+	if !ok {
+		return nil
+	}
+
+	fmt.Fprintf(os.Stderr, "\n  Selected: %s  (%s)\n", selected.Name, selected.URN)
+
+	// ── Prompt for alias ──────────────────────────────────────────────────────
+	sc := bufio.NewScanner(os.Stdin)
+	var alias string
+
+	for attempt := 0; attempt < 3; attempt++ {
+		fmt.Fprint(os.Stderr, "  Enter shortcut name: ")
+		if !sc.Scan() {
+			break
+		}
+		raw := strings.TrimSpace(sc.Text())
+		if raw == "" {
+			fmt.Fprintln(os.Stderr, "  (skipped)")
+			return nil
+		}
+		if err := clientconfig.ValidateShortcutName(raw); err != nil {
+			fmt.Fprintf(os.Stderr, "  \033[1;33m⚠\033[0m  %v\n", err)
+			continue
+		}
+		alias = raw
+		break
+	}
+
+	if alias == "" {
+		fmt.Fprintln(os.Stderr, "  Too many invalid attempts — aborted.")
+		return nil
+	}
+
+	if existingAlias, _, found := shortcuts.FindByURN(selected.URN); found && existingAlias != alias {
+		fmt.Fprintf(os.Stderr, "  \033[1;33m⚠\033[0m  This note already has shortcut %q. Replace? [y/N] ", existingAlias)
+		if sc.Scan() {
+			v := strings.TrimSpace(strings.ToLower(sc.Text()))
+			if v != "y" && v != "yes" {
+				fmt.Fprintln(os.Stderr, "  Aborted.")
+				return nil
+			}
+		} else {
+			fmt.Fprintln(os.Stderr, "  Aborted.")
+			return nil
+		}
+	}
+
+	if existing, ok := shortcuts.Resolve(alias); ok && existing.URN != selected.URN {
+		fmt.Fprintf(os.Stderr, "  \033[1;33m⚠\033[0m  Shortcut %q already points to %s. Overwrite? [y/N] ", alias, existing.Name)
+		if sc.Scan() {
+			v := strings.TrimSpace(strings.ToLower(sc.Text()))
+			if v != "y" && v != "yes" {
+				fmt.Fprintln(os.Stderr, "  Aborted.")
+				return nil
+			}
+		} else {
+			fmt.Fprintln(os.Stderr, "  Aborted.")
+			return nil
+		}
+	}
+
+	sc2 := &clientconfig.Shortcut{
+		URN:         selected.URN,
+		Name:        selected.Name,
+		Description: selected.Description,
+		CreatedAt:   time.Now().UTC().Format(time.RFC3339),
+	}
+	if err := shortcuts.Add(alias, sc2); err != nil {
+		return fmt.Errorf("pull shortcut cloud: %w", err)
+	}
+	if err := clientconfig.SaveShortcuts(shortcuts); err != nil {
+		return fmt.Errorf("pull shortcut cloud: save shortcuts: %w", err)
+	}
+
+	fmt.Fprintf(os.Stderr, "\n  \033[1;32m✓\033[0m  Shortcut %q → %s saved.\n\n", alias, selected.Name)
+	return nil
+}
+
+// cloudProjectFolderNames fetches project and folder name maps from the cloud,
+// returning empty maps (not nil) on error so the picker still works.
+func cloudProjectFolderNames(ctx context.Context, nc *cloud.NoteClient) (projectNames, folderNames map[string]string) {
+	projectNames = make(map[string]string)
+	folderNames = make(map[string]string)
+
+	if projects, err := nc.ListProjects(ctx); err == nil {
+		for _, p := range projects {
+			if p.URN != "" && p.Name != "" {
+				projectNames[p.URN] = p.Name
+			}
+		}
+	}
+	if folders, err := nc.ListFolders(ctx); err == nil {
+		for _, f := range folders {
+			if f.URN != "" && f.Name != "" {
+				folderNames[f.URN] = f.Name
+			}
+		}
+	}
+	return projectNames, folderNames
+}
+
+// cloudEventsToLocal converts a *cloud.EventsResponse to a *eventsResponse
+// so it can be passed to writeNotxFile unchanged.
+func cloudEventsToLocal(ev *cloud.EventsResponse) *eventsResponse {
+	local := &eventsResponse{
+		NoteURN: ev.NoteURN,
+		Count:   ev.Count,
+		Events:  make([]noteEvent, 0, len(ev.Events)),
+	}
+	for _, e := range ev.Events {
+		le := noteEvent{
+			URN:       e.URN,
+			NoteURN:   e.NoteURN,
+			Sequence:  e.Sequence,
+			AuthorURN: e.AuthorURN,
+			CreatedAt: e.CreatedAt,
+			Entries:   make([]lineEntry, 0, len(e.Entries)),
+		}
+		for _, en := range e.Entries {
+			le.Entries = append(le.Entries, lineEntry{
+				Op:         en.Op,
+				LineNumber: en.LineNumber,
+				Content:    en.Content,
+			})
+		}
+		local.Events = append(local.Events, le)
+	}
+	return local
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // deviceClient — HTTP client that injects X-Device-ID on every request
