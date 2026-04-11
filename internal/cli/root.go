@@ -43,6 +43,7 @@ func Execute() {
 func init() {
 	rootCmd.AddCommand(infoCmd)
 	rootCmd.AddCommand(validateCmd)
+	rootCmd.AddCommand(pullCmd)
 
 	// Mirror the add-note flags on the root command so they work when the user
 	// invokes notx directly with a file path:

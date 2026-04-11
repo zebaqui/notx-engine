@@ -450,6 +450,28 @@ func (p *Provider) Delete(ctx context.Context, urn string) error {
 		if n == 0 {
 			return fmt.Errorf("%w: %s", repo.ErrNotFound, urn)
 		}
+
+		// ── Purge context bursts for the deleted note ─────────────────────
+		if _, err := db.Exec(`DELETE FROM context_bursts WHERE note_urn=?`, urn); err != nil {
+			return fmt.Errorf("sqlite: delete note bursts: %w", err)
+		}
+		// Defensive explicit FTS delete (content= table does not auto-cascade).
+		_, _ = db.Exec(`DELETE FROM context_bursts_fts WHERE note_urn=?`, urn)
+
+		// ── Purge pending candidates that reference this note ─────────────
+		if _, err := db.Exec(
+			`DELETE FROM candidate_relations
+			 WHERE (note_urn_a=? OR note_urn_b=?) AND status='pending'`,
+			urn, urn,
+		); err != nil {
+			return fmt.Errorf("sqlite: delete note pending candidates: %w", err)
+		}
+
+		// TODO: When note un-delete (restore) is implemented, re-run burst extraction
+		// from the note's full event history and re-run candidate detection against the
+		// project's burst pool for any note that lacks an existing link for the same
+		// candidate pair (pair_key).
+
 		return nil
 	})
 }
@@ -533,6 +555,16 @@ func (p *Provider) AppendEvent(ctx context.Context, event *core.Event, opts repo
 // MUST be called from inside the writer goroutine — it uses db directly and
 // never calls p.write(), avoiding write-channel re-entrancy deadlock.
 // All errors are logged and suppressed — the write path must not be blocked.
+// placeholders returns a comma-separated string of n "?" SQL placeholders,
+// used to build variable-length IN (...) clauses for raw SQL statements.
+func placeholders(n int) string {
+	parts := make([]string, n)
+	for i := range parts {
+		parts[i] = "?"
+	}
+	return strings.Join(parts, ",")
+}
+
 func (p *Provider) extractBurstsForEvent(db *sql.DB, event *core.Event, content string) {
 	noteURN := event.NoteURN.String()
 
@@ -560,8 +592,69 @@ func (p *Provider) extractBurstsForEvent(db *sql.DB, event *core.Event, content 
 		}
 	}
 
-	// ── 4. Extract bursts (pure in-memory) ────────────────────────────────────
+	// ── 3A. Compute affected line windows from the event entries ──────────────
 	noteLines := splitContentLines(content)
+	totalLines := len(noteLines)
+	affectedWindows := core.GroupAffectedLines(event.Entries, cfg.WindowLines, totalLines)
+
+	// ── 3B. Find existing bursts for this note that overlap any affected window,
+	//        then delete them and their pending candidates. ────────────────────
+	if len(affectedWindows) > 0 {
+		existingRows, err2 := db.Query(
+			`SELECT id, line_start, line_end FROM context_bursts WHERE note_urn=?`,
+			noteURN,
+		)
+		if err2 != nil {
+			fmt.Printf("context: WARN: query existing bursts for overlap check: %v\n", err2)
+		} else {
+			type existingBurst struct {
+				id        string
+				lineStart int
+				lineEnd   int
+			}
+			var overlapping []existingBurst
+			for existingRows.Next() {
+				var eb existingBurst
+				if scanErr := existingRows.Scan(&eb.id, &eb.lineStart, &eb.lineEnd); scanErr == nil {
+					for _, w := range affectedWindows {
+						if eb.lineStart <= w.End && eb.lineEnd >= w.Start {
+							overlapping = append(overlapping, eb)
+							break
+						}
+					}
+				}
+			}
+			existingRows.Close()
+
+			// ── 3C. Delete overlapping bursts and their pending candidates ────
+			if len(overlapping) > 0 {
+				ids := make([]any, len(overlapping))
+				for i, ob := range overlapping {
+					ids[i] = ob.id
+				}
+				ph := placeholders(len(ids))
+
+				if _, delErr := db.Exec(
+					`DELETE FROM context_bursts WHERE id IN (`+ph+`)`, ids...,
+				); delErr != nil {
+					fmt.Printf("context: WARN: delete overlapping bursts: %v\n", delErr)
+				}
+				// Defensive explicit FTS delete.
+				_, _ = db.Exec(
+					`DELETE FROM context_bursts_fts WHERE id IN (`+ph+`)`, ids...,
+				)
+				if _, delErr := db.Exec(
+					`DELETE FROM candidate_relations
+					 WHERE (burst_a_id IN (`+ph+`) OR burst_b_id IN (`+ph+`)) AND status='pending'`,
+					append(ids, ids...)...,
+				); delErr != nil {
+					fmt.Printf("context: WARN: delete pending candidates for overlapping bursts: %v\n", delErr)
+				}
+			}
+		}
+	}
+
+	// ── 4. Extract bursts (pure in-memory) ────────────────────────────────────
 	bursts := core.ExtractBursts(note, event, noteLines, cfg)
 	if len(bursts) == 0 {
 		return
@@ -620,12 +713,14 @@ func (p *Provider) extractBurstsForEvent(db *sql.DB, event *core.Event, content 
 			continue
 		}
 
-		// Fetch recent bursts in project for candidate detection (raw SQL)
+		// Fetch recent bursts in project for candidate detection (raw SQL).
+		// Exclude bursts from deleted notes.
 		cutoffMs := toMs(time.Now().UTC().Add(-time.Duration(cfg.CandidateLookbackDays) * 24 * time.Hour))
 		rows, err2 := db.Query(
 			`SELECT id, note_urn, project_urn, tokens
 			 FROM context_bursts
 			 WHERE project_urn=? AND created_at>=? AND note_urn!=?
+			   AND note_urn NOT IN (SELECT urn FROM notes WHERE deleted=1)
 			 ORDER BY created_at DESC LIMIT ?`,
 			projURN, cutoffMs, noteURN, cfg.CandidateLookbackN,
 		)

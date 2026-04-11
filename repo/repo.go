@@ -3,6 +3,7 @@ package repo
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/zebaqui/notx-engine/core"
@@ -549,17 +550,75 @@ type BurstRecord struct {
 	CreatedAt  time.Time `json:"created_at"`
 }
 
+// MatchLocation pinpoints a single occurrence of the search query inside a
+// burst's Text field.
+//
+// Line is 1-based relative to the burst itself (Line 1 = the first line of
+// Text, which corresponds to note line LineStart). To get the absolute note
+// line number: noteLineNumber = burst.LineStart + Line - 1.
+//
+// CharStart and CharEnd are 0-based byte offsets within that line string,
+// forming the half-open interval [CharStart, CharEnd).
+type MatchLocation struct {
+	Line      int `json:"line"`
+	CharStart int `json:"char_start"`
+	CharEnd   int `json:"char_end"`
+}
+
 // BurstSearchResult is a single hit returned by SearchBursts.
 type BurstSearchResult struct {
-	ID         string
-	NoteURN    string
-	ProjectURN string
-	LineStart  int
-	LineEnd    int
-	Text       string
-	Tokens     string
-	BM25Score  float32
-	CreatedAt  time.Time
+	ID             string
+	NoteURN        string
+	ProjectURN     string
+	LineStart      int
+	LineEnd        int
+	Text           string
+	Tokens         string
+	BM25Score      float32
+	CreatedAt      time.Time
+	MatchLocations []MatchLocation
+}
+
+// FindMatchLocations returns every location within text where query appears,
+// case-insensitively. It handles prefix queries (e.g. "Cha" matches
+// "Challenges") by scanning for the literal query string inside each line.
+//
+// The search is done on the lowercased form of both text and query so that
+// "challenges", "Challenges", and "CHALLENGES" all produce the same offsets.
+// Returned offsets are byte positions in the original (non-lowercased) line.
+//
+// Results are ordered by (line, char_start) ascending.
+func FindMatchLocations(text, query string) []MatchLocation {
+	if text == "" || query == "" {
+		return nil
+	}
+	queryLower := strings.ToLower(query)
+	qLen := len(queryLower)
+
+	lines := strings.Split(text, "\n")
+	var locs []MatchLocation
+
+	for lineIdx, line := range lines {
+		lineLower := strings.ToLower(line)
+		start := 0
+		for {
+			idx := strings.Index(lineLower[start:], queryLower)
+			if idx < 0 {
+				break
+			}
+			abs := start + idx
+			locs = append(locs, MatchLocation{
+				Line:      lineIdx + 1, // 1-based
+				CharStart: abs,
+				CharEnd:   abs + qLen,
+			})
+			start = abs + qLen
+			if start >= len(lineLower) {
+				break
+			}
+		}
+	}
+	return locs
 }
 
 // CandidateRecord is a candidate relation between two bursts.
@@ -764,7 +823,6 @@ type ContextRepository interface {
 	// fields (title and/or project_urn) to the note record directly.
 	// Returns ErrNotFound if the inference does not exist or is not pending.
 	AcceptInference(ctx context.Context, id string, opts AcceptInferenceOptions) error
-
 
 	// SearchBursts performs a full-text search over burst text and tokens,
 	// ordered by relevance score descending.

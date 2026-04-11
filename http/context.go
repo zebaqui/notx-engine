@@ -868,16 +868,23 @@ func (h *Handler) handleSearchBursts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	type matchLocationJSON struct {
+		Line      int `json:"line"`
+		CharStart int `json:"char_start"`
+		CharEnd   int `json:"char_end"`
+	}
+
 	type burstSearchResultJSON struct {
-		ID         string  `json:"id"`
-		NoteURN    string  `json:"note_urn"`
-		ProjectURN string  `json:"project_urn,omitempty"`
-		LineStart  int     `json:"line_start"`
-		LineEnd    int     `json:"line_end"`
-		Text       string  `json:"text"`
-		Tokens     string  `json:"tokens,omitempty"`
-		BM25Score  float32 `json:"bm25_score"`
-		CreatedAt  string  `json:"created_at,omitempty"`
+		ID             string              `json:"id"`
+		NoteURN        string              `json:"note_urn"`
+		ProjectURN     string              `json:"project_urn,omitempty"`
+		LineStart      int                 `json:"line_start"`
+		LineEnd        int                 `json:"line_end"`
+		Text           string              `json:"text"`
+		Tokens         string              `json:"tokens,omitempty"`
+		BM25Score      float32             `json:"bm25_score"`
+		CreatedAt      string              `json:"created_at,omitempty"`
+		MatchLocations []matchLocationJSON `json:"match_locations,omitempty"`
 	}
 
 	out := make([]burstSearchResultJSON, 0, len(results))
@@ -894,6 +901,16 @@ func (h *Handler) handleSearchBursts(w http.ResponseWriter, r *http.Request) {
 		}
 		if !res.CreatedAt.IsZero() {
 			j.CreatedAt = res.CreatedAt.UTC().Format(time.RFC3339)
+		}
+		if len(res.MatchLocations) > 0 {
+			j.MatchLocations = make([]matchLocationJSON, len(res.MatchLocations))
+			for i, loc := range res.MatchLocations {
+				j.MatchLocations[i] = matchLocationJSON{
+					Line:      loc.Line,
+					CharStart: loc.CharStart,
+					CharEnd:   loc.CharEnd,
+				}
+			}
 		}
 		out = append(out, j)
 	}

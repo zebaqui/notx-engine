@@ -335,6 +335,7 @@ func (p *Provider) IndexNoteIntoProject(ctx context.Context, noteURN, projectURN
 			`SELECT id, note_urn, project_urn, tokens
 			 FROM context_bursts
 			 WHERE project_urn=? AND note_urn!=? AND created_at>=?
+			   AND note_urn NOT IN (SELECT urn FROM notes WHERE deleted=1)
 			 ORDER BY created_at DESC LIMIT ?`,
 			projectURN, noteURN, cutoffMs, cfg.CandidateLookbackN,
 		)
@@ -1150,9 +1151,25 @@ func (p *Provider) GetContextStats(ctx context.Context, projectURN string) (repo
 // SearchBursts
 // ─────────────────────────────────────────────────────────────────────────────
 
-// SearchBursts performs a full-text search over burst text and tokens using SQLite LIKE.
+// SearchBursts searches burst tokens and text with two complementary strategies
+// so that partial input, different cases, and full words all return results:
+//
+//  1. FTS5 prefix search on context_bursts_fts.tokens — "Cha*" matches
+//     "challenges", "change", etc.  FTS5's unicode61 tokenizer folds to
+//     lowercase before indexing, so the match is always case-insensitive.
+//     The FTS5 rank value is returned as the BM25 score for ordering.
+//
+//  2. LIKE fallback on context_bursts.text and tokens — catches raw text
+//     passages where the term appears but may not have been tokenised the same
+//     way (e.g. hyphenated words, punctuation boundaries).  LOWER() on both
+//     sides makes it case-insensitive.  Rows already found by the FTS5 leg are
+//     skipped so there are no duplicates; these rows get a score of 0.
+//
+// FTS5 hits always sort above LIKE-only hits because the FTS5 score (-rank,
+// which is positive) is non-zero while LIKE-only rows receive 0.0.
 func (p *Provider) SearchBursts(ctx context.Context, q string, pageSize int) ([]repo.BurstSearchResult, error) {
-	if strings.TrimSpace(q) == "" {
+	q = strings.TrimSpace(q)
+	if q == "" {
 		return []repo.BurstSearchResult{}, nil
 	}
 	if pageSize <= 0 {
@@ -1162,38 +1179,125 @@ func (p *Provider) SearchBursts(ctx context.Context, q string, pageSize int) ([]
 		pageSize = 100
 	}
 
-	const sqlQuery = `
-		SELECT b.id, b.note_urn, COALESCE(b.project_urn,''), b.line_start, b.line_end,
-		       COALESCE(b.text,''), COALESCE(b.tokens,''),
-		       0.0 as bm25_score,
-		       b.created_at
-		FROM engine_context_bursts b
-		WHERE (b.tokens LIKE '%' || ? || '%' OR b.text LIKE '%' || ? || '%')
-		ORDER BY b.created_at DESC
-		LIMIT ?`
+	qLower := strings.ToLower(q)
+	words := strings.Fields(qLower)
 
-	rows, err := p.db.QueryContext(ctx, sqlQuery, q, q, pageSize)
-	if err != nil {
-		return nil, fmt.Errorf("sqlite: search bursts: %w", err)
+	// ── Leg 1: FTS5 exact phrase-prefix match ────────────────────────────────
+	// "phase 3*" — FTS5 treats this as a phrase where the last word is
+	// prefix-matched. This gives the highest relevance for exact phrase hits.
+	phraseQuery := `"` + qLower + `*"`
+
+	// ── Leg 2: FTS5 AND of individual token prefixes ─────────────────────────
+	// "phase* AND 3*" — all words must appear anywhere in the burst (not
+	// necessarily adjacent). Only built for multi-word queries; for single
+	// words it's identical to Leg 1 so we skip it.
+	var andQuery string
+	if len(words) > 1 {
+		prefixed := make([]string, len(words))
+		for i, w := range words {
+			prefixed[i] = w + "*"
+		}
+		andQuery = strings.Join(prefixed, " AND ")
 	}
-	defer rows.Close()
 
 	var results []repo.BurstSearchResult
-	for rows.Next() {
-		var r repo.BurstSearchResult
-		var idInt int64
-		var createdAtMs int64
-		if err := rows.Scan(&idInt, &r.NoteURN, &r.ProjectURN, &r.LineStart, &r.LineEnd,
-			&r.Text, &r.Tokens, &r.BM25Score, &createdAtMs); err != nil {
-			return nil, fmt.Errorf("sqlite: search bursts: scan: %w", err)
+	seenIDs := make(map[string]struct{})
+
+	// ─────────────────────────────────────────────────────────────────────────
+	// Helper: run one FTS5 leg and append new hits to results.
+	// scoreMultiplier scales -rank so we can rank legs relative to each other.
+	// ─────────────────────────────────────────────────────────────────────────
+	runFTSLeg := func(ftsQ string, scoreMultiplier float64) error {
+		const ftsSQL = `
+			SELECT b.id, b.note_urn, COALESCE(b.project_urn,''), b.line_start, b.line_end,
+			       COALESCE(b.text,''), COALESCE(b.tokens,''),
+			       CAST(-fts.rank * ? AS REAL) AS bm25_score,
+			       b.created_at
+			FROM context_bursts_fts fts
+			JOIN context_bursts b ON b.id = fts.id
+			WHERE context_bursts_fts MATCH ?
+			ORDER BY fts.rank
+			LIMIT ?`
+		rows, err := p.db.QueryContext(ctx, ftsSQL, scoreMultiplier, ftsQ, pageSize)
+		if err != nil {
+			// FTS5 may not be available on older DBs — ignore.
+			return nil
 		}
-		r.ID = strconv.FormatInt(idInt, 10)
-		r.CreatedAt = fromMs(createdAtMs).UTC()
-		results = append(results, r)
+		defer rows.Close()
+		for rows.Next() {
+			var r repo.BurstSearchResult
+			var createdAtMs int64
+			if err := rows.Scan(&r.ID, &r.NoteURN, &r.ProjectURN, &r.LineStart, &r.LineEnd,
+				&r.Text, &r.Tokens, &r.BM25Score, &createdAtMs); err != nil {
+				return fmt.Errorf("sqlite: search bursts fts: scan: %w", err)
+			}
+			if _, already := seenIDs[r.ID]; already {
+				continue
+			}
+			r.CreatedAt = fromMs(createdAtMs).UTC()
+			r.MatchLocations = repo.FindMatchLocations(r.Text, q)
+			results = append(results, r)
+			seenIDs[r.ID] = struct{}{}
+		}
+		return rows.Err()
 	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("sqlite: search bursts: iterate: %w", err)
+
+	// Run Leg 1: exact phrase prefix (full score weight 1.0).
+	if err := runFTSLeg(phraseQuery, 1.0); err != nil {
+		return nil, fmt.Errorf("sqlite: search bursts phrase: %w", err)
 	}
+
+	// Run Leg 2: AND of individual prefixes (score weight 0.75 — below phrase).
+	if andQuery != "" && len(results) < pageSize {
+		if err := runFTSLeg(andQuery, 0.75); err != nil {
+			return nil, fmt.Errorf("sqlite: search bursts and: %w", err)
+		}
+	}
+
+	// ── Leg 3: LIKE fallback on raw text ─────────────────────────────────────
+	if len(results) < pageSize {
+		remaining := pageSize - len(results)
+
+		const likeSQLQuery = `
+			SELECT b.id, b.note_urn, COALESCE(b.project_urn,''), b.line_start, b.line_end,
+			       COALESCE(b.text,''), COALESCE(b.tokens,''),
+			       0.0 AS bm25_score,
+			       b.created_at
+			FROM context_bursts b
+			WHERE (LOWER(b.tokens) LIKE '%' || LOWER(?) || '%'
+			    OR LOWER(b.text)   LIKE '%' || LOWER(?) || '%')
+			ORDER BY b.created_at DESC
+			LIMIT ?`
+
+		likeRows, err := p.db.QueryContext(ctx, likeSQLQuery, q, q, remaining+len(seenIDs))
+		if err != nil {
+			return nil, fmt.Errorf("sqlite: search bursts like: %w", err)
+		}
+		defer likeRows.Close()
+
+		for likeRows.Next() {
+			var r repo.BurstSearchResult
+			var createdAtMs int64
+			if err := likeRows.Scan(&r.ID, &r.NoteURN, &r.ProjectURN, &r.LineStart, &r.LineEnd,
+				&r.Text, &r.Tokens, &r.BM25Score, &createdAtMs); err != nil {
+				return nil, fmt.Errorf("sqlite: search bursts like: scan: %w", err)
+			}
+			if _, already := seenIDs[r.ID]; already {
+				continue
+			}
+			r.CreatedAt = fromMs(createdAtMs).UTC()
+			r.MatchLocations = repo.FindMatchLocations(r.Text, q)
+			results = append(results, r)
+			seenIDs[r.ID] = struct{}{}
+			if len(results) >= pageSize {
+				break
+			}
+		}
+		if err := likeRows.Err(); err != nil {
+			return nil, fmt.Errorf("sqlite: search bursts like: iterate: %w", err)
+		}
+	}
+
 	if results == nil {
 		results = []repo.BurstSearchResult{}
 	}
