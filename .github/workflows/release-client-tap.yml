@@ -60,10 +60,10 @@ jobs:
 
             on_macos do
               if Hardware::CPU.arm?
-                url "https://github.com/zebaqui/notx-engine/releases/download/${VERSION}/notx-${VERSION}-darwin-arm64.zip"
+                url "https://github.com/zebaqui/notx-engine/releases/download/client-${VERSION}/notx-${VERSION}-darwin-arm64.zip"
                 sha256 "${ZIP_ARM64}"
               else
-                url "https://github.com/zebaqui/notx-engine/releases/download/${VERSION}/notx-${VERSION}-darwin-amd64.zip"
+                url "https://github.com/zebaqui/notx-engine/releases/download/client-${VERSION}/notx-${VERSION}-darwin-amd64.zip"
                 sha256 "${ZIP_AMD64}"
               end
             end
