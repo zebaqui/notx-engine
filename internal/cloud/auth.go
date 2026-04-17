@@ -30,19 +30,19 @@ type AllClaims struct {
 // CloudBaseURL returns the base URL for the notx cloud API.
 // When NOTX_DEV=1 is set, it returns the local dev server URL.
 func CloudBaseURL() string {
-	// if os.Getenv("NOTX_DEV") == "1" {
-	return "http://localhost:8080"
-	// }
-	// return "https://notx.zebaqui.com"
+	if os.Getenv("NOTX_DEV") == "1" {
+		return "http://localhost:8080"
+	}
+	return "https://notx.zebaqui.com"
 }
 
 // WebBaseURL returns the base URL for the notx web frontend.
 // When NOTX_DEV=1 is set, it returns the local dev frontend URL.
 func WebBaseURL() string {
-	// if os.Getenv("NOTX_DEV") == "1" {
-	return "http://localhost:5173"
-	// }
-	// return "https://notx.zebaqui.com"
+	if os.Getenv("NOTX_DEV") == "1" {
+		return "http://localhost:5173"
+	}
+	return "https://notx.zebaqui.com"
 }
 
 // EnsureToken returns a valid JWT for cloud mode, refreshing or triggering a
