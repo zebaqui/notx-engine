@@ -48,7 +48,7 @@ func startRelayServer(t *testing.T) (baseURL string, stop func()) {
 		Level: slog.LevelError,
 	}))
 
-	srv, err := server.New(cfg, provider, provider, provider, provider, provider, provider, nil, nil, log)
+	srv, err := server.New(cfg, provider, provider, provider, provider, provider, provider, nil, nil, log, nil)
 	if err != nil {
 		t.Fatalf("startRelayServer: server.New: %v", err)
 	}

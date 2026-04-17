@@ -134,8 +134,10 @@ type serverInfoResponse struct {
 }
 
 type outboundPairRequest struct {
-	URL    string `json:"url"`    // e.g. "remote-host:50052"
-	Secret string `json:"secret"` // NTXP-... pairing secret
+	URL           string `json:"url"`            // e.g. "remote-host:50052"
+	Secret        string `json:"secret"`         // NTXP-... pairing secret
+	CAFingerprint string `json:"ca_fingerprint"` // SHA-256 fingerprint of authority CA cert (optional)
+	CertDir       string `json:"cert_dir"`       // directory to write issued certs into (optional)
 }
 
 type outboundPairResponse struct {
@@ -262,6 +264,17 @@ func (h *Handler) handleOutboundPair(w http.ResponseWriter, r *http.Request) {
 	if req.Secret == "" {
 		writeError(w, http.StatusBadRequest, "secret is required")
 		return
+	}
+
+	// Apply per-request overrides for CA fingerprint and cert dir so that
+	// callers (e.g. auto-pair from notx login) can supply these without
+	// requiring the server to have been started with --peer-ca-fingerprint
+	// or --peer-cert-dir flags.
+	if req.CAFingerprint != "" {
+		h.cfg.Pairing.PeerCAFingerprint = req.CAFingerprint
+	}
+	if req.CertDir != "" {
+		h.cfg.Pairing.PeerCertDir = req.CertDir
 	}
 
 	resp, err := h.pairing.RegisterWithPeer(r.Context(), req.URL, req.Secret)

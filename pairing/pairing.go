@@ -137,18 +137,30 @@ type namespaceAwareSecretStore interface {
 	ConsumeSecretWithNamespace(ctx context.Context, plaintext string) (*repo.PairingSecret, string, error)
 }
 
+// pairingNamespaceKey is the context key used to pass the tenant namespace
+// from registerServer to CrossNamespaceServerRepo.RegisterServer.
+type pairingNamespaceKey struct{}
+
+// NamespaceFromContext retrieves the tenant namespace injected by registerServer.
+// Returns ("", false) when no namespace is present in the context.
+func NamespaceFromContext(ctx context.Context) (string, bool) {
+	ns, ok := ctx.Value(pairingNamespaceKey{}).(string)
+	return ns, ok && ns != ""
+}
+
 func (s *pairingCore) registerServer(ctx context.Context, req *pb.RegisterServerRequest) (*pb.RegisterServerResponse, error) {
 	remoteAddr := remoteAddrFromCtx(ctx)
 
 	// Validate and consume the pairing secret. Never log the plaintext.
-	// Under the new URN scheme, namespace is not part of the URN identity,
-	// so no namespace-based rewriting of server URNs is needed.
+	// The namespace is extracted from the secret so the server record lands in
+	// the correct tenant namespace regardless of the URN format.
 	var (
-		secret *repo.PairingSecret
-		err    error
+		secret    *repo.PairingSecret
+		namespace string
+		err       error
 	)
 	if nsStore, ok := s.secretStore.(namespaceAwareSecretStore); ok {
-		secret, _, err = nsStore.ConsumeSecretWithNamespace(ctx, req.PairingSecret)
+		secret, namespace, err = nsStore.ConsumeSecretWithNamespace(ctx, req.PairingSecret)
 	} else {
 		secret, err = s.secretStore.ConsumeSecret(ctx, req.PairingSecret)
 	}
@@ -210,6 +222,14 @@ func (s *pairingCore) registerServer(ctx context.Context, req *pb.RegisterServer
 		RegisteredAt: now,
 		ExpiresAt:    expiresAt,
 		LastSeenAt:   now,
+	}
+
+	// Inject the tenant namespace (derived from the consumed secret) into the
+	// context so CrossNamespaceServerRepo can route to the correct tenant
+	// without having to parse it from the URN (which uses urn:notx:srv: format,
+	// not namespace:type:id format).
+	if namespace != "" {
+		ctx = context.WithValue(ctx, pairingNamespaceKey{}, namespace)
 	}
 
 	if err := s.srvRepo.RegisterServer(ctx, sv); err != nil {

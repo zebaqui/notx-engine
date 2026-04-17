@@ -201,6 +201,9 @@ func (h *Handler) routes() {
 	// Events
 	h.mux.HandleFunc("/v1/events", h.withDeviceAuthMiddleware(h.routeAppendEvent))
 
+	// Sync progress stream
+	h.mux.HandleFunc("/v1/sync/stream", h.withDeviceAuthMiddleware(h.handleSyncStream))
+
 	// Search
 	h.mux.HandleFunc("/v1/search", h.withDeviceAuthMiddleware(h.routeSearch))
 

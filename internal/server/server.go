@@ -22,6 +22,7 @@ import (
 	httpsvc "github.com/zebaqui/notx-engine/http"
 	"github.com/zebaqui/notx-engine/internal/relay"
 	grpcsvc "github.com/zebaqui/notx-engine/internal/server/grpc"
+	syncsvc "github.com/zebaqui/notx-engine/internal/sync"
 	pb "github.com/zebaqui/notx-engine/proto"
 	"github.com/zebaqui/notx-engine/repo"
 )
@@ -44,11 +45,14 @@ type Server struct {
 	grpcServer      *googlegrpc.Server
 	pairingService  *grpcsvc.PairingServer
 	bootstrapServer *googlegrpc.Server
+	bus             *syncsvc.Bus
 }
 
 // New creates a Server from the given config and repository.
 // It wires all sub-components but does not start any listeners yet.
-func New(cfg *config.Config, r repo.NoteRepository, projRepo repo.ProjectRepository, devRepo repo.DeviceRepository, userRepo repo.UserRepository, srvRepo repo.ServerRepository, secretStore repo.PairingSecretStore, contextRepo repo.ContextRepository, linkRepo repo.LinkRepository, log *slog.Logger) (*Server, error) {
+// busRepo may be nil; when non-nil and peer certs are configured the real-time
+// sync bus is started automatically.
+func New(cfg *config.Config, r repo.NoteRepository, projRepo repo.ProjectRepository, devRepo repo.DeviceRepository, userRepo repo.UserRepository, srvRepo repo.ServerRepository, secretStore repo.PairingSecretStore, contextRepo repo.ContextRepository, linkRepo repo.LinkRepository, log *slog.Logger, busRepo syncsvc.BusRepo) (*Server, error) {
 	if log == nil {
 		log = slog.New(slog.NewTextHandler(os.Stderr, nil))
 	}
@@ -182,6 +186,11 @@ func New(cfg *config.Config, r repo.NoteRepository, projRepo repo.ProjectReposit
 		s.grpcServer = grpcSrv
 	}
 
+	// ── Start real-time sync bus if peer certs are configured ────────────────
+	if busRepo != nil && cfg.Pairing.PeerCertDir != "" && cfg.Pairing.PeerAuthority != "" {
+		s.bus = syncsvc.New(cfg, busRepo, log)
+	}
+
 	return s, nil
 }
 
@@ -259,6 +268,11 @@ func bootstrapAdminDevice(cfg *config.Config, devRepo repo.DeviceRepository, log
 
 	log.Debug("admin device ok (local-mode)", "device_urn", cfg.Admin.DeviceURN)
 	return nil
+}
+
+// Bus returns the real-time sync bus, or nil if one was not started.
+func (s *Server) Bus() *syncsvc.Bus {
+	return s.bus
 }
 
 // Run starts all configured servers and blocks until they all exit.
@@ -355,6 +369,9 @@ func (s *Server) run(ctx context.Context) error {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), s.cfg.ShutdownTimeout)
 	defer cancel()
 
+	if s.bus != nil {
+		s.bus.Stop()
+	}
 	s.initiateShutdown(shutdownCtx)
 	wg.Wait()
 

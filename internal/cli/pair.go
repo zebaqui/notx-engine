@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -91,6 +93,17 @@ type pairResponse struct {
 
 type pairErrorResponse struct {
 	Error string `json:"error"`
+}
+
+// IsAlreadyPaired returns true when all three mTLS certificate files
+// (server.crt, server.key, ca.crt) exist in peerCertDir.
+func IsAlreadyPaired(peerCertDir string) bool {
+	for _, f := range []string{"server.crt", "server.key", "ca.crt"} {
+		if _, err := os.Stat(filepath.Join(peerCertDir, f)); err != nil {
+			return false
+		}
+	}
+	return true
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

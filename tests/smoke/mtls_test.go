@@ -235,7 +235,7 @@ func startSecureServer(t *testing.T, pki *certBundle, mtls bool) (baseURL string
 		Level: slog.LevelError,
 	}))
 
-	srv, err := server.New(cfg, provider, provider, provider, provider, provider, provider, nil, nil, log)
+	srv, err := server.New(cfg, provider, provider, provider, provider, provider, provider, nil, nil, log, nil)
 	if err != nil {
 		t.Fatalf("startSecureServer: server.New: %v", err)
 	}

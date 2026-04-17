@@ -55,6 +55,7 @@ func startSQLiteHTTPServer(t *testing.T) (baseURL string, stop func()) {
 		provider, // ContextRepository  ← enables burst extraction + search
 		provider, // LinkRepository
 		log,
+		nil, // busRepo — sync bus not needed in smoke tests
 	)
 	if err != nil {
 		provider.Close()

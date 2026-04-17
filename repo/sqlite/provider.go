@@ -64,6 +64,12 @@ type writeRequest struct {
 // Provider
 // ─────────────────────────────────────────────────────────────────────────────
 
+// SyncNotifier is implemented by the real-time sync bus. Calling Notify
+// triggers an immediate push attempt for the given note URN.
+type SyncNotifier interface {
+	Notify(noteURN string)
+}
+
 // Provider is a SQLite-backed implementation of all repository interfaces.
 type Provider struct {
 	dataDir            string
@@ -78,6 +84,52 @@ type Provider struct {
 	inferenceCh        chan<- string      // channel to send note URNs for metadata inference
 	inferenceCtxCancel context.CancelFunc // cancels the inference runner goroutine
 	burstCfg           core.BurstConfig   // burst extraction config
+	syncBus            SyncNotifier       // optional real-time sync bus; may be nil
+}
+
+// SetSyncBus registers the real-time sync bus. Must be called before the first
+// AppendEvent call if immediate push-on-write is desired.
+func (p *Provider) SetSyncBus(bus SyncNotifier) {
+	p.syncBus = bus
+}
+
+// MarkSyncPending upserts a row into pending_sync for the given note URN.
+func (p *Provider) MarkSyncPending(noteURN string) error {
+	return p.write(func(db *sql.DB) error {
+		_, err := db.Exec(
+			`INSERT INTO pending_sync(note_urn, updated_at) VALUES(?, ?)
+			 ON CONFLICT(note_urn) DO UPDATE SET updated_at=excluded.updated_at`,
+			noteURN, toMs(time.Now()),
+		)
+		return err
+	})
+}
+
+// ClearSyncPending removes the pending_sync row for the given note URN.
+func (p *Provider) ClearSyncPending(noteURN string) error {
+	return p.write(func(db *sql.DB) error {
+		_, err := db.Exec(`DELETE FROM pending_sync WHERE note_urn=?`, noteURN)
+		return err
+	})
+}
+
+// ListSyncPending returns all note URNs that have pending sync rows.
+func (p *Provider) ListSyncPending() ([]string, error) {
+	rows, err := p.db.QueryContext(context.Background(),
+		`SELECT note_urn FROM pending_sync ORDER BY updated_at ASC`)
+	if err != nil {
+		return nil, fmt.Errorf("sqlite: list pending sync: %w", err)
+	}
+	defer rows.Close()
+	var urns []string
+	for rows.Next() {
+		var urn string
+		if err := rows.Scan(&urn); err != nil {
+			return nil, fmt.Errorf("sqlite: scan pending sync: %w", err)
+		}
+		urns = append(urns, urn)
+	}
+	return urns, rows.Err()
 }
 
 // New opens (or creates) the SQLite index and starts the writer goroutine.
@@ -485,7 +537,7 @@ func (p *Provider) AppendEvent(ctx context.Context, event *core.Event, opts repo
 		return err
 	}
 	noteURN := event.NoteURN.String()
-	return p.write(func(db *sql.DB) error {
+	err := p.write(func(db *sql.DB) error {
 		var headSeq int
 		var noteTypeStr string
 		err := db.QueryRow(`SELECT head_seq, note_type FROM notes WHERE urn=?`, noteURN).
@@ -505,10 +557,15 @@ func (p *Provider) AppendEvent(ctx context.Context, event *core.Event, opts repo
 
 		payloadJSON, _ := json.Marshal(event.Entries)
 		authorURN := event.AuthorURN.String()
+		eventURNStr := event.URN.String()
+		if eventURNStr == "" || eventURNStr == (core.URN{}).String() {
+			event.URN = core.NewURN(core.ObjectTypeEvent)
+			eventURNStr = event.URN.String()
+		}
 		_, err = db.Exec(
-			`INSERT INTO events(note_urn, sequence, author_urn, label, payload, created_at)
-			 VALUES(?, ?, ?, ?, ?, ?)`,
-			noteURN, event.Sequence, authorURN, event.Label, string(payloadJSON),
+			`INSERT INTO events(urn, note_urn, sequence, author_urn, label, payload, created_at)
+			 VALUES(?, ?, ?, ?, ?, ?, ?)`,
+			eventURNStr, noteURN, event.Sequence, authorURN, event.Label, string(payloadJSON),
 			toMs(event.CreatedAt),
 		)
 		if err != nil {
@@ -547,8 +604,24 @@ func (p *Provider) AppendEvent(ctx context.Context, event *core.Event, opts repo
 		if err != nil {
 			return fmt.Errorf("sqlite: update note head_seq: %w", err)
 		}
+
+		// Mark this note as needing a cloud sync. Errors are intentionally
+		// suppressed — a missing pending_sync row just means the 30-second
+		// backlog sweep will catch it on next reconnect.
+		_, _ = db.Exec(
+			`INSERT INTO pending_sync(note_urn, updated_at) VALUES(?, ?)
+			 ON CONFLICT(note_urn) DO UPDATE SET updated_at=excluded.updated_at`,
+			noteURN, toMs(event.CreatedAt),
+		)
 		return nil
 	})
+	if err != nil {
+		return err
+	}
+	if p.syncBus != nil {
+		p.syncBus.Notify(noteURN)
+	}
+	return nil
 }
 
 // extractBurstsForEvent runs context burst extraction for a single event.
@@ -837,7 +910,7 @@ func (p *Provider) Events(ctx context.Context, noteURN string, fromSequence int)
 		return nil, err
 	}
 	rows, err := p.db.QueryContext(ctx,
-		`SELECT note_urn, sequence, author_urn, label, payload, created_at
+		`SELECT urn, note_urn, sequence, author_urn, label, payload, created_at
 		 FROM events WHERE note_urn=? AND sequence >= ? ORDER BY sequence ASC`,
 		noteURN, fromSequence)
 	if err != nil {
@@ -846,17 +919,22 @@ func (p *Provider) Events(ctx context.Context, noteURN string, fromSequence int)
 	defer rows.Close()
 	var events []*core.Event
 	for rows.Next() {
-		var noteURNStr, authorURNStr, label, payloadJSON string
+		var urnStr, noteURNStr, authorURNStr, label, payloadJSON string
 		var sequence int
 		var createdMs int64
-		if err := rows.Scan(&noteURNStr, &sequence, &authorURNStr, &label, &payloadJSON, &createdMs); err != nil {
+		if err := rows.Scan(&urnStr, &noteURNStr, &sequence, &authorURNStr, &label, &payloadJSON, &createdMs); err != nil {
 			return nil, fmt.Errorf("sqlite: scan event: %w", err)
+		}
+		evURN, _ := core.ParseURN(urnStr)
+		if evURN == (core.URN{}) {
+			evURN = core.NewURN(core.ObjectTypeEvent)
 		}
 		nURN, _ := core.ParseURN(noteURNStr)
 		aURN, _ := core.ParseURN(authorURNStr)
 		var entries []core.LineEntry
 		_ = json.Unmarshal([]byte(payloadJSON), &entries)
 		events = append(events, &core.Event{
+			URN:       evURN,
 			NoteURN:   nURN,
 			Sequence:  sequence,
 			AuthorURN: aURN,
@@ -941,10 +1019,15 @@ func (p *Provider) ReceiveSharedNote(ctx context.Context, note *core.Note, event
 			}
 			payloadJSON, _ := json.Marshal(ev.Entries)
 			authorURN := ev.AuthorURN.String()
+			evURNStr := ev.URN.String()
+			if evURNStr == "" || evURNStr == (core.URN{}).String() {
+				ev.URN = core.NewURN(core.ObjectTypeEvent)
+				evURNStr = ev.URN.String()
+			}
 			_, err = db.Exec(
-				`INSERT OR IGNORE INTO events(note_urn, sequence, author_urn, label, payload, created_at)
-				 VALUES(?, ?, ?, ?, ?, ?)`,
-				noteURN, ev.Sequence, authorURN, ev.Label, string(payloadJSON), toMs(ev.CreatedAt),
+				`INSERT OR IGNORE INTO events(urn, note_urn, sequence, author_urn, label, payload, created_at)
+				 VALUES(?, ?, ?, ?, ?, ?, ?)`,
+				evURNStr, noteURN, ev.Sequence, authorURN, ev.Label, string(payloadJSON), toMs(ev.CreatedAt),
 			)
 			if err != nil {
 				return fmt.Errorf("sqlite: receive shared note insert event: %w", err)

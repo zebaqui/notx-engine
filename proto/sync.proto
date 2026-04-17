@@ -1,0 +1,32 @@
+syntax = "proto3";
+
+package notx.v1;
+
+import "note.proto";
+
+option go_package = "github.com/zebaqui/notx-engine/proto;notxpb";
+
+// SyncService is registered on the primary mTLS gRPC listener (:50051).
+// A paired local server dials the cloud with its issued certificate and calls
+// SyncNotes to exchange the full note event stream bidirectionally.
+service SyncService {
+  // SyncNotes is a bidirectional streaming RPC.
+  // The caller (local server) sends SyncNoteMessage frames — one per local note.
+  // The server (cloud) responds with SyncNoteResult frames — one per received note,
+  // plus additional SyncNoteMessage frames for notes that exist only on the cloud.
+  rpc SyncNotes(stream SyncNoteMessage) returns (stream SyncNoteResult);
+}
+
+// SyncNoteMessage carries a note header and its complete event stream.
+// Sent by the local server for each note it wants to push/sync.
+message SyncNoteMessage {
+  NoteHeader header = 1;
+  repeated Event events = 2;
+}
+
+// SyncNoteResult is sent by the cloud server for each note it processed.
+message SyncNoteResult {
+  string note_urn = 1;
+  int32 events_stored = 2;
+  string error = 3; // non-empty on per-note error (does not close the stream)
+}

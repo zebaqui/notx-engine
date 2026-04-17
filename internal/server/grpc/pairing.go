@@ -15,6 +15,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 
@@ -299,14 +300,25 @@ func (s *PairingServer) RegisterWithPeer(ctx context.Context, authorityAddr, sec
 	}
 	defer conn.Close()
 
-	endpoint := ""
-	if s.cfg != nil {
-		endpoint = s.cfg.GRPCAddr()
+	// Build a human-readable name using the machine hostname so the cloud UI
+	// can identify which local machine this server is running on.
+	hostname, _ := os.Hostname()
+	if hostname == "" {
+		hostname = "local"
 	}
+	// Detect OS for the name label.
+	osLabel := runtime.GOOS
 
-	// Derive a human-readable name from the endpoint so the authority UI can
-	// display something meaningful (e.g. "notx-engine :50051").
-	serverName := "notx-engine " + endpoint
+	serverName := fmt.Sprintf("%s (%s)", hostname, osLabel)
+
+	// The endpoint is prefixed with "local://" to signal to the cloud that
+	// this server is not directly reachable from the internet. The gRPC port
+	// is appended so cert renewal and relay can still identify the port.
+	grpcPort := ""
+	if s.cfg != nil {
+		grpcPort = s.cfg.GRPCAddr()
+	}
+	endpoint := "local://" + hostname + grpcPort
 
 	// 4. RegisterServer RPC.
 	resp, err := conn.Pairing().RegisterServer(ctx, &pb.RegisterServerRequest{

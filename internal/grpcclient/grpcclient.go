@@ -27,9 +27,11 @@
 package grpcclient
 
 import (
+	"context"
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/pem"
 	"fmt"
 	"os"
 	"strings"
@@ -175,6 +177,11 @@ func (c *Conn) Pairing() pb.ServerPairingServiceClient {
 // Links returns a client for LinkService.
 func (c *Conn) Links() pb.LinkServiceClient {
 	return pb.NewLinkServiceClient(c.cc)
+}
+
+// Sync returns a client for SyncService.
+func (c *Conn) Sync() pb.SyncServiceClient {
+	return pb.NewSyncServiceClient(c.cc)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -324,7 +331,8 @@ func DialWithCA(addr string, caPool *x509.CertPool) (*Conn, error) {
 // InsecureSkipVerify is never set. Use DialBootstrapWithFingerprint when only
 // a SHA-256 fingerprint of the authority CA is known.
 //
-// This is the correct dial function for the RegisterServer RPC.
+// This is the correct dial function for the RegisterServer RPC after a CA pool
+// has been established (e.g. via DialBootstrapWithFingerprint phase 2).
 func DialBootstrap(addr string, caPool *x509.CertPool) (*Conn, error) {
 	tlsCfg := &tls.Config{
 		MinVersion: tls.VersionTLS13,
@@ -343,12 +351,15 @@ func DialBootstrap(addr string, caPool *x509.CertPool) (*Conn, error) {
 	return &Conn{cc: cc}, nil
 }
 
-// DialBootstrapWithFingerprint dials addr with TLS and verifies that the SHA-256
-// fingerprint of the root CA in the server's verified certificate chain matches
-// expectedFingerprint (uppercase colon-separated hex, e.g. "AA:BB:CC:...").
+// DialBootstrapWithFingerprint dials the bootstrap gRPC listener at addr using
+// a two-phase TOFU (Trust On First Use) approach:
 //
-// Use this when only the authority's CA fingerprint is known (via
-// PeerCAFingerprint in config), not the full CA PEM.
+//  1. Dial insecurely and call GetCACertificate to retrieve the authority's CA cert.
+//  2. Verify the CA cert's SHA-256 fingerprint matches expectedFingerprint.
+//  3. Re-dial with proper TLS verification using the pinned CA cert as the root.
+//
+// This handles self-signed CA certificates that are not in the system trust store.
+// expectedFingerprint must be uppercase colon-separated hex (e.g. "AA:BB:CC:...").
 func DialBootstrapWithFingerprint(addr, expectedFingerprint string) (*Conn, error) {
 	if expectedFingerprint == "" {
 		return nil, fmt.Errorf("grpcclient: expectedFingerprint must not be empty")
@@ -356,51 +367,57 @@ func DialBootstrapWithFingerprint(addr, expectedFingerprint string) (*Conn, erro
 	// Normalise: uppercase, trim spaces.
 	expectedFingerprint = strings.TrimSpace(strings.ToUpper(expectedFingerprint))
 
-	tlsCfg := &tls.Config{
-		MinVersion: tls.VersionTLS13,
-		// We use InsecureSkipVerify=true here ONLY to allow our custom
-		// VerifyConnection callback to do the full chain verification +
-		// fingerprint check. Standard chain verification is performed manually
-		// inside VerifyConnection.
-		InsecureSkipVerify: true, //nolint:gosec // see VerifyConnection below
-		VerifyConnection: func(cs tls.ConnectionState) error {
-			// Verify the chain against system roots first.
-			opts := x509.VerifyOptions{
-				DNSName:       cs.ServerName,
-				Intermediates: x509.NewCertPool(),
-			}
-			for _, cert := range cs.PeerCertificates[1:] {
-				opts.Intermediates.AddCert(cert)
-			}
-			chains, err := cs.PeerCertificates[0].Verify(opts)
-			if err != nil {
-				return fmt.Errorf("grpcclient: TLS chain verification failed: %w", err)
-			}
-			// Walk the verified chains looking for a root whose fingerprint matches.
-			for _, chain := range chains {
-				root := chain[len(chain)-1]
-				sum := sha256.Sum256(root.Raw)
-				pairs := make([]string, len(sum))
-				for i, b := range sum {
-					pairs[i] = fmt.Sprintf("%02X", b)
-				}
-				fp := strings.Join(pairs, ":")
-				if fp == expectedFingerprint {
-					return nil
-				}
-			}
-			return fmt.Errorf("grpcclient: CA fingerprint mismatch: expected %s", expectedFingerprint)
-		},
-	}
-
-	cc, err := grpc.NewClient(addr,
-		grpc.WithTransportCredentials(credentials.NewTLS(tlsCfg)),
+	// ── Phase 1: fetch CA cert over a TLS connection with verification skipped.
+	// We skip verification here ONLY to retrieve the CA cert; the cert is then
+	// fingerprint-verified before being trusted as a root for the real dial.
+	insecureConn, err := grpc.NewClient(addr,
+		grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{
+			InsecureSkipVerify: true, //nolint:gosec // fingerprint verified below
+			MinVersion:         tls.VersionTLS13,
+		})),
 		grpc.WithKeepaliveParams(keepaliveParams),
 	)
 	if err != nil {
-		return nil, fmt.Errorf("grpcclient: dial bootstrap (fingerprint) %s: %w", addr, err)
+		return nil, fmt.Errorf("grpcclient: dial bootstrap (insecure phase) %s: %w", addr, err)
 	}
-	return &Conn{cc: cc}, nil
+
+	ctx, cancel := context.WithTimeout(context.Background(), defaultDialTimeout)
+	defer cancel()
+
+	pairingClient := pb.NewServerPairingServiceClient(insecureConn)
+	caResp, err := pairingClient.GetCACertificate(ctx, &pb.GetCACertificateRequest{})
+	insecureConn.Close()
+	if err != nil {
+		return nil, fmt.Errorf("grpcclient: fetch CA cert from %s: %w", addr, err)
+	}
+	if len(caResp.CaCertificate) == 0 {
+		return nil, fmt.Errorf("grpcclient: empty CA certificate from %s", addr)
+	}
+
+	// ── Phase 2: verify the CA cert fingerprint ───────────────────────────────
+	block, _ := pem.Decode(caResp.CaCertificate)
+	if block == nil {
+		return nil, fmt.Errorf("grpcclient: CA cert from %s is not valid PEM", addr)
+	}
+	caCert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("grpcclient: parse CA cert from %s: %w", addr, err)
+	}
+
+	sum := sha256.Sum256(caCert.Raw)
+	pairs := make([]string, len(sum))
+	for i, b := range sum {
+		pairs[i] = fmt.Sprintf("%02X", b)
+	}
+	actualFP := strings.Join(pairs, ":")
+	if actualFP != expectedFingerprint {
+		return nil, fmt.Errorf("grpcclient: CA fingerprint mismatch: got %s, expected %s", actualFP, expectedFingerprint)
+	}
+
+	// ── Phase 3: re-dial with the verified CA cert as trust root ──────────────
+	caPool := x509.NewCertPool()
+	caPool.AddCert(caCert)
+	return DialBootstrap(addr, caPool)
 }
 
 // DialMTLS creates an mTLS connection to the pairing primary listener

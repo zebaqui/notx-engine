@@ -74,7 +74,7 @@ type LineEntry struct {
 // NoteEvent is a single event in the event stream.
 type NoteEvent struct {
 	URN       string      `json:"urn"`
-	NoteURN   string      `json:"note_urn"`
+	NoteURN   string      `json:"note_urn,omitempty"`
 	Sequence  int         `json:"sequence"`
 	AuthorURN string      `json:"author_urn"`
 	CreatedAt string      `json:"created_at"`
@@ -322,4 +322,41 @@ func percentEncodeURN(urn string) string {
 		}
 	}
 	return string(result)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Receive (sync) types and method
+// ─────────────────────────────────────────────────────────────────────────────
+
+// receiveNoteRequest is the request body for POST /engine/v1/notes/:urn/receive.
+type receiveNoteRequest struct {
+	Header NoteHeader  `json:"header"`
+	Events []NoteEvent `json:"events"`
+}
+
+// receiveNoteResponse is the response body from POST /engine/v1/notes/:urn/receive.
+type receiveNoteResponse struct {
+	NoteURN      string `json:"note_urn"`
+	EventsStored int    `json:"events_stored"`
+	Error        string `json:"error,omitempty"`
+}
+
+// ReceiveNote pushes a full event stream for a note to the cloud engine via
+// POST /engine/v1/notes/:urn/receive.
+// Returns the number of events stored by the server.
+func (c *NoteClient) ReceiveNote(ctx context.Context, header NoteHeader, events []NoteEvent) (int, error) {
+	reqBody := receiveNoteRequest{
+		Header: header,
+		Events: events,
+	}
+
+	path := "/engine/v1/notes/" + percentEncodeURN(header.URN) + "/receive"
+	var resp receiveNoteResponse
+	if err := c.doJSON(ctx, http.MethodPost, path, reqBody, &resp); err != nil {
+		return 0, fmt.Errorf("cloud receive note: %w", err)
+	}
+	if resp.Error != "" {
+		return 0, fmt.Errorf("cloud receive note: %s", resp.Error)
+	}
+	return resp.EventsStored, nil
 }

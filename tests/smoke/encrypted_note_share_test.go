@@ -83,7 +83,7 @@ func startShareServer(t *testing.T, label string) (baseURL string, stop func()) 
 		Level: slog.LevelError,
 	}))
 
-	srv, err := server.New(cfg, provider, provider, provider, provider, provider, provider, nil, nil, log)
+	srv, err := server.New(cfg, provider, provider, provider, provider, provider, provider, nil, nil, log, nil)
 	if err != nil {
 		t.Fatalf("startShareServer(%s): server.New: %v", label, err)
 	}

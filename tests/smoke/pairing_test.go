@@ -111,6 +111,7 @@ func startPairingHarness(t *testing.T) *pairingHarness {
 		provider,       // repo.PairingSecretStore
 		8760*time.Hour, // certTTL  — 1 year
 		24*time.Hour,   // secretTTL — 24 h
+		nil,            // syncSvc — not exercised in this test
 		slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
 			Level: slog.LevelError, // keep test output clean
 		})),

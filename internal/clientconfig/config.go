@@ -64,6 +64,14 @@ type ClientConfig struct {
 	// Insecure disables TLS verification on the client dial (dev only).
 	// Default: true (matches the server default of no TLS in dev)
 	Insecure bool `json:"insecure"`
+
+	// PeerCertDir is the directory holding the mTLS client cert issued after
+	// pairing with the cloud. Set automatically by notx login / notx pair.
+	PeerCertDir string `json:"peer_cert_dir,omitempty"`
+
+	// PeerAuthority is the host:port of the cloud's primary mTLS gRPC listener.
+	// Set automatically by notx login / notx pair.
+	PeerAuthority string `json:"peer_authority,omitempty"`
 }
 
 // ServerConfig controls the notx gRPC/HTTP server listeners.

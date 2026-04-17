@@ -4,13 +4,16 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
+
+	"github.com/zebaqui/notx-engine/core"
 )
 
 // currentSchemaVersion must match len(migrations).
 // Bump it by 1 every time you add a migration to the slice below.
 // NEVER edit or remove existing migrations — only append new ones.
-const currentSchemaVersion = 8
+const currentSchemaVersion = 10
 
 // currentProjectionVersion is incremented when projection logic changes
 // (i.e. existing rows need recomputing from the event log even though
@@ -44,6 +47,7 @@ CREATE INDEX IF NOT EXISTS idx_notes_folder  ON notes(folder_urn,  deleted, upda
 
 -- Event log: one row per appended event on a note.
 CREATE TABLE IF NOT EXISTS events (
+    urn        TEXT    NOT NULL DEFAULT '',
     note_urn   TEXT    NOT NULL,
     sequence   INTEGER NOT NULL,
     author_urn TEXT    NOT NULL DEFAULT '',
@@ -277,6 +281,13 @@ CREATE TABLE IF NOT EXISTS projection_meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+
+-- pending_sync tracks notes that have local events not yet pushed to cloud.
+-- A row exists when the note needs syncing; it is deleted on successful push.
+CREATE TABLE IF NOT EXISTS pending_sync (
+    note_urn   TEXT PRIMARY KEY,
+    updated_at INTEGER NOT NULL  -- Unix ms of last local write that needs sync
+);
 `
 
 // migrations is the ordered list of additive SQL migrations.
@@ -294,6 +305,7 @@ CREATE TABLE IF NOT EXISTS projection_meta (
 //	v3 — add anchors, backlinks tables (link spec)
 //	v4 — add external_links table (link spec)
 //	v5 — add context_bursts, context_bursts_fts, candidate_relations, project_context_config (context graph)
+//	v10 — pending_sync table for real-time event bus
 var migrations = []string{
 	// v1: initial schema — ddl already handles this on new installs.
 	"SELECT 1",
@@ -467,6 +479,16 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_inferences_note_pending
     WHERE status = 'pending';
 CREATE INDEX IF NOT EXISTS idx_inferences_status
     ON note_context_inferences(status, created_at DESC);`,
+
+	// v9: add urn column to events table for sync identity tracking.
+	// Uses a Go-level existence check (handled in runMigrations) for idempotency.
+	`SELECT 1`,
+
+	// v10: pending_sync table for real-time event bus.
+	`CREATE TABLE IF NOT EXISTS pending_sync (
+    note_urn   TEXT PRIMARY KEY,
+    updated_at INTEGER NOT NULL
+);`,
 }
 
 // applySchema creates all tables/indexes on a fresh DB and seeds meta rows.
@@ -532,6 +554,12 @@ func runMigrations(ctx context.Context, db *sql.DB, appliedVersion int) error {
 			}
 		}
 
+		if version == 9 {
+			if err := ensureEventURNColumn(ctx, db); err != nil {
+				return fmt.Errorf("sqlite schema: migration %d pre-step: %w", version, err)
+			}
+		}
+
 		if _, err := db.ExecContext(ctx, sqlStmt); err != nil {
 			return fmt.Errorf("sqlite schema: migration %d: %w", version, err)
 		}
@@ -541,6 +569,53 @@ func runMigrations(ctx context.Context, db *sql.DB, appliedVersion int) error {
 			version, now,
 		); err != nil {
 			return fmt.Errorf("sqlite schema: record migration %d: %w", version, err)
+		}
+	}
+	return nil
+}
+
+// ensureEventURNColumn adds the urn column to the events table if it does not
+// already exist, then backfills empty values with generated event URNs so that
+// all existing rows have a unique, valid URN.
+func ensureEventURNColumn(ctx context.Context, db *sql.DB) error {
+	// Add column if missing (idempotent).
+	if _, err := db.ExecContext(ctx, `ALTER TABLE events ADD COLUMN urn TEXT NOT NULL DEFAULT ''`); err != nil {
+		// "duplicate column name" means it already exists — ignore.
+		if !strings.Contains(err.Error(), "duplicate column name") {
+			return fmt.Errorf("sqlite: add urn column to events: %w", err)
+		}
+	}
+
+	// Backfill: assign a unique URN to every row that still has an empty urn.
+	rows, err := db.QueryContext(ctx, `SELECT note_urn, sequence FROM events WHERE urn = ''`)
+	if err != nil {
+		return fmt.Errorf("sqlite: query events without urn: %w", err)
+	}
+	type key struct {
+		noteURN string
+		seq     int
+	}
+	var toFill []key
+	for rows.Next() {
+		var k key
+		if err := rows.Scan(&k.noteURN, &k.seq); err != nil {
+			rows.Close()
+			return fmt.Errorf("sqlite: scan event row: %w", err)
+		}
+		toFill = append(toFill, k)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("sqlite: iterate events without urn: %w", err)
+	}
+
+	for _, k := range toFill {
+		newURN := core.NewURN(core.ObjectTypeEvent).String()
+		if _, err := db.ExecContext(ctx,
+			`UPDATE events SET urn = ? WHERE note_urn = ? AND sequence = ?`,
+			newURN, k.noteURN, k.seq,
+		); err != nil {
+			return fmt.Errorf("sqlite: backfill event urn (note=%s seq=%d): %w", k.noteURN, k.seq, err)
 		}
 	}
 	return nil

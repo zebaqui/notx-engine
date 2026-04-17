@@ -73,6 +73,7 @@ func StartHub(
 	secretStore repo.PairingSecretStore,
 	certTTL time.Duration,
 	secretTTL time.Duration,
+	syncSvc pb.SyncServiceServer,
 	log *slog.Logger,
 ) (*Hub, error) {
 	// ── 1. Load or generate the platform CA ──────────────────────────────────
@@ -144,6 +145,9 @@ func StartHub(
 	primaryCreds := credentials.NewTLS(mtlsCfg)
 	primarySrv := grpc.NewServer(grpc.Creds(primaryCreds))
 	pb.RegisterServerPairingServiceServer(primarySrv, primarySvc)
+	if syncSvc != nil {
+		pb.RegisterSyncServiceServer(primarySrv, syncSvc)
+	}
 
 	primaryLn, err := net.Listen("tcp", primaryAddr)
 	if err != nil {

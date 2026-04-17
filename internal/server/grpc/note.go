@@ -673,6 +673,9 @@ func protoEventToCore(p *pb.Event) (*core.Event, error) {
 			urn = parsed
 		}
 	}
+	if urn == (core.URN{}) {
+		urn = core.NewURN(core.ObjectTypeEvent)
+	}
 
 	entries := make([]core.LineEntry, 0, len(p.Entries))
 	for _, e := range p.Entries {
@@ -748,6 +751,9 @@ func sharedEventToCore(p *pb.Event) (*core.Event, error) {
 		if parsed, err := core.ParseURN(p.GetUrn()); err == nil {
 			evURN = parsed
 		}
+	}
+	if evURN == (core.URN{}) {
+		evURN = core.NewURN(core.ObjectTypeEvent)
 	}
 
 	entries := make([]core.LineEntry, 0, len(p.GetEntries()))

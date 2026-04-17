@@ -136,8 +136,8 @@ type lineEntry struct {
 }
 
 type noteEvent struct {
-	URN       string      `json:"urn"`
-	NoteURN   string      `json:"note_urn"`
+	URN       string      `json:"urn,omitempty"`
+	NoteURN   string      `json:"note_urn,omitempty"`
 	Sequence  int         `json:"sequence"`
 	AuthorURN string      `json:"author_urn"`
 	CreatedAt string      `json:"created_at"`

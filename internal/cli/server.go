@@ -3,6 +3,7 @@ package cli
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -37,8 +38,9 @@ func notxDir() string {
 	return filepath.Join(home, ".notx")
 }
 
-func pidFilePath() string { return filepath.Join(notxDir(), "server.pid") }
-func logFilePath() string { return filepath.Join(notxDir(), "server.log") }
+func pidFilePath() string   { return filepath.Join(notxDir(), "server.pid") }
+func logFilePath() string   { return filepath.Join(notxDir(), "server.log") }
+func portsFilePath() string { return filepath.Join(notxDir(), "server.ports") }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // PID helpers
@@ -61,6 +63,50 @@ func readPID() (int, error) {
 }
 
 func removePID() { os.Remove(pidFilePath()) }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Ports file helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+// serverPorts is written to ~/.notx/server.ports when the daemon worker starts
+// so that other commands (e.g. sync) can discover which ports the server is
+// actually listening on, regardless of what flags were passed.
+type serverPorts struct {
+	HTTPPort      int    `json:"http_port"`
+	GRPCPort      int    `json:"grpc_port"`
+	PeerCertDir   string `json:"peer_cert_dir,omitempty"`
+	PeerAuthority string `json:"peer_authority,omitempty"`
+}
+
+func writePorts(httpPort, grpcPort int, peerCertDir, peerAuthority string) error {
+	data, err := json.Marshal(serverPorts{
+		HTTPPort:      httpPort,
+		GRPCPort:      grpcPort,
+		PeerCertDir:   peerCertDir,
+		PeerAuthority: peerAuthority,
+	})
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(portsFilePath(), data, 0o644)
+}
+
+// ReadServerPorts reads ~/.notx/server.ports and returns the ports the running
+// server is listening on.  Returns an error when the file does not exist (i.e.
+// no server has been started yet).
+func ReadServerPorts() (serverPorts, error) {
+	data, err := os.ReadFile(portsFilePath())
+	if err != nil {
+		return serverPorts{}, err
+	}
+	var p serverPorts
+	if err := json.Unmarshal(data, &p); err != nil {
+		return serverPorts{}, fmt.Errorf("corrupt ports file: %w", err)
+	}
+	return p, nil
+}
+
+func removePorts() { os.Remove(portsFilePath()) }
 
 // processAlive returns true when a process with the given PID exists and is
 // reachable via kill(pid, 0).
@@ -377,6 +423,11 @@ func runDaemonWorker(cmd *cobra.Command, args []string) error {
 		"device_auto_approve", cfg.DeviceOnboarding.AutoApprove,
 	)
 
+	// Write the ports file so other commands (e.g. sync) can find the server.
+	if err := writePorts(cfg.HTTPPort, cfg.GRPCPort, cfg.Pairing.PeerCertDir, cfg.Pairing.PeerAuthority); err != nil {
+		log.Warn("could not write server.ports file", "err", err)
+	}
+
 	provider, err := sqlite.New(cfg.DataDir, nil)
 	if err != nil {
 		return fmt.Errorf("open sqlite provider at %q: %w", cfg.DataDir, err)
@@ -387,15 +438,21 @@ func runDaemonWorker(cmd *cobra.Command, args []string) error {
 		}
 	}()
 
-	srv, err := server.New(cfg, provider, provider, provider, provider, provider, provider, provider, provider, log)
+	srv, err := server.New(cfg, provider, provider, provider, provider, provider, provider, provider, provider, log, provider)
 	if err != nil {
 		return fmt.Errorf("build server: %w", err)
 	}
 
+	// Wire the sync bus back into the provider so AppendEvent notifies it.
+	if srv.Bus() != nil {
+		provider.SetSyncBus(srv.Bus())
+	}
+
 	runErr := srv.Run()
 
-	// Clean up the PID file when the server exits normally.
+	// Clean up the PID and ports files when the server exits normally.
 	removePID()
+	removePorts()
 
 	log.Info("notx server stopped")
 	return runErr
@@ -425,6 +482,10 @@ var serverStatusCmd = &cobra.Command{
 
 		fmt.Fprintf(os.Stdout, "  \033[1;32m✓\033[0m  notx server is \033[1;32mrunning\033[0m \033[2m(pid %d)\033[0m\n", pid)
 		fmt.Fprintf(os.Stdout, "       Log file → \033[36m%s\033[0m\n", logFilePath())
+		if p, err := ReadServerPorts(); err == nil {
+			fmt.Fprintf(os.Stdout, "       HTTP     → \033[36mhttp://localhost:%d\033[0m\n", p.HTTPPort)
+			fmt.Fprintf(os.Stdout, "       gRPC     → \033[36mlocalhost:%d\033[0m\n", p.GRPCPort)
+		}
 		return nil
 	},
 }
