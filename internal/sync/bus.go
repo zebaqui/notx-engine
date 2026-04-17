@@ -1,8 +1,10 @@
 // Package sync provides the real-time event sync bus.
-// When an event is written locally the Bus immediately attempts to push the
-// full note (header + events) to the cloud via SyncService.SyncNotes over an
-// mTLS gRPC channel. On failure the pending_sync row is left intact so the
-// 30-second backlog sweep retries it later.
+//
+// On each local write the Bus enqueues the note URN and the background worker
+// sends it over a long-lived bidirectional SyncStream gRPC connection. On any
+// connection failure the stream is torn down and re-established with exponential
+// backoff (1s → 2s → 4s … max 30s). Pending writes are retried via the 30-second
+// backlog sweep so no events are lost during offline periods.
 package sync
 
 import (
@@ -10,6 +12,7 @@ import (
 	"io"
 	"log/slog"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -32,11 +35,17 @@ type BusRepo interface {
 	ListSyncPending() ([]string, error)
 	// MarkSyncPending upserts a pending_sync row.
 	MarkSyncPending(noteURN string) error
+	// ReceiveNote stores a note and its events received from the cloud.
+	ReceiveNote(ctx context.Context, note *core.Note, events []*core.Event) error
 }
 
-// Bus is a real-time event sync bus. On each local write it attempts to push
-// the note to the cloud immediately; on failure the pending_sync row stays so
-// the 30-second sweep can retry.
+// Bus is a real-time event sync bus.
+//
+// It maintains a persistent SyncStream gRPC connection to the cloud authority.
+// Local writes are pushed immediately over the stream; cloud notifications
+// (NoteChangedNotif) are handled by sending a pull request back and storing the
+// received note locally. On any stream error the connection is re-established
+// with exponential backoff.
 type Bus struct {
 	ch      chan string // buffered channel of note URNs to push
 	cfg     *config.Config
@@ -44,9 +53,14 @@ type Bus struct {
 	log     *slog.Logger
 	stopCh  chan struct{}
 	stopped chan struct{}
+
+	// stream state — owned by streamLoop, protected by streamMu
+	streamMu   sync.Mutex
+	streamConn *grpcclient.Conn
+	stream     pb.SyncService_SyncStreamClient
 }
 
-// New creates a Bus and starts the background worker goroutine.
+// New creates a Bus and starts the background worker goroutines.
 func New(cfg *config.Config, repo BusRepo, log *slog.Logger) *Bus {
 	if log == nil {
 		log = slog.Default()
@@ -59,6 +73,7 @@ func New(cfg *config.Config, repo BusRepo, log *slog.Logger) *Bus {
 		stopCh:  make(chan struct{}),
 		stopped: make(chan struct{}),
 	}
+	go b.streamLoop()
 	go b.loop()
 	return b
 }
@@ -74,13 +89,16 @@ func (b *Bus) Notify(noteURN string) {
 	}
 }
 
-// Stop signals the background goroutine and waits for it to exit.
+// Stop signals the background goroutines and waits for them to exit.
 func (b *Bus) Stop() {
 	close(b.stopCh)
 	<-b.stopped
 }
 
-// loop is the background worker goroutine.
+// ─────────────────────────────────────────────────────────────────────────────
+// loop — main worker: drains ch and runs the 30s backlog sweep
+// ─────────────────────────────────────────────────────────────────────────────
+
 func (b *Bus) loop() {
 	defer close(b.stopped)
 	ticker := time.NewTicker(30 * time.Second)
@@ -88,7 +106,7 @@ func (b *Bus) loop() {
 	for {
 		select {
 		case noteURN := <-b.ch:
-			b.tryPush(noteURN)
+			b.sendNote(noteURN)
 		case <-ticker.C:
 			urns, err := b.repo.ListSyncPending()
 			if err != nil {
@@ -96,47 +114,239 @@ func (b *Bus) loop() {
 				continue
 			}
 			for _, urn := range urns {
-				b.tryPush(urn)
+				b.sendNote(urn)
 			}
 		case <-b.stopCh:
+			b.closeStream()
 			return
 		}
 	}
 }
 
-// tryPush dials the cloud, sends the note, and clears the pending_sync row on
-// success. All errors are logged at debug level so offline periods don't spam.
-func (b *Bus) tryPush(noteURN string) {
+// ─────────────────────────────────────────────────────────────────────────────
+// streamLoop — maintains the persistent SyncStream connection with backoff
+// ─────────────────────────────────────────────────────────────────────────────
+
+func (b *Bus) streamLoop() {
+	backoff := time.Second
+	const maxBackoff = 30 * time.Second
+
+	for {
+		select {
+		case <-b.stopCh:
+			return
+		default:
+		}
+
+		conn, stream, err := b.dialStream()
+		if err != nil {
+			b.log.Debug("sync_bus: dial stream failed, retrying",
+				"err", err,
+				"backoff", backoff,
+			)
+			select {
+			case <-time.After(backoff):
+			case <-b.stopCh:
+				return
+			}
+			backoff = min(backoff*2, maxBackoff)
+			continue
+		}
+
+		// Connection established — reset backoff.
+		backoff = time.Second
+		b.setStream(conn, stream)
+		b.log.Info("sync_bus: SyncStream connected",
+			"peer", b.cfg.Pairing.PeerAuthority,
+		)
+
+		// Run the receive loop until it returns (stream error or stop).
+		b.recvLoop(stream)
+
+		// Clean up — recvLoop returned because the stream errored or was closed.
+		b.closeStream()
+
+		select {
+		case <-b.stopCh:
+			return
+		default:
+		}
+
+		b.log.Debug("sync_bus: stream disconnected, reconnecting",
+			"backoff", backoff,
+		)
+		select {
+		case <-time.After(backoff):
+		case <-b.stopCh:
+			return
+		}
+		backoff = min(backoff*2, maxBackoff)
+	}
+}
+
+// dialStream dials the cloud authority with mTLS and opens a SyncStream.
+// On success it sends an initial ping so the server can verify the stream.
+func (b *Bus) dialStream() (*grpcclient.Conn, pb.SyncService_SyncStreamClient, error) {
 	certFile := filepath.Join(b.cfg.Pairing.PeerCertDir, "server.crt")
 	keyFile := filepath.Join(b.cfg.Pairing.PeerCertDir, "server.key")
 	caFile := filepath.Join(b.cfg.Pairing.PeerCertDir, "ca.crt")
 
 	clientCert, err := grpcclient.LoadClientCert(certFile, keyFile)
 	if err != nil {
-		b.log.Debug("sync_bus: load client cert", "err", err)
-		return
+		return nil, nil, err
 	}
 	caPool, err := grpcclient.LoadCAPool(caFile)
 	if err != nil {
-		b.log.Debug("sync_bus: load CA pool", "err", err)
-		return
+		return nil, nil, err
 	}
 	conn, err := grpcclient.DialMTLS(b.cfg.Pairing.PeerAuthority, clientCert, caPool)
 	if err != nil {
-		b.log.Debug("sync_bus: dial mTLS", "addr", b.cfg.Pairing.PeerAuthority, "err", err)
+		return nil, nil, err
+	}
+
+	ctx := context.Background() // stream lives as long as the bus
+	syncClient := pb.NewSyncServiceClient(conn.Raw())
+	stream, err := syncClient.SyncStream(ctx)
+	if err != nil {
+		conn.Close()
+		return nil, nil, err
+	}
+
+	// Send initial ping.
+	ping := &pb.SyncStreamMessage{
+		Ping: &pb.SyncPing{TimestampMs: time.Now().UnixMilli()},
+	}
+	if err := stream.Send(ping); err != nil {
+		conn.Close()
+		return nil, nil, err
+	}
+
+	return conn, stream, nil
+}
+
+// recvLoop reads messages from stream until it errors or the bus is stopped.
+// Cloud-pushed NoteChangedNotif messages cause a pull request to be sent back.
+func (b *Bus) recvLoop(stream pb.SyncService_SyncStreamClient) {
+	for {
+		select {
+		case <-b.stopCh:
+			return
+		default:
+		}
+
+		msg, err := stream.Recv()
+		if err == io.EOF {
+			return
+		}
+		if err != nil {
+			b.log.Debug("sync_bus: recv error", "err", err)
+			return
+		}
+
+		switch {
+		case msg.NoteChanged != nil:
+			b.handleNoteChanged(stream, msg.NoteChanged)
+
+		case msg.PushAck != nil:
+			// Acknowledge a note push we sent. Clear the pending row if no error.
+			ack := msg.PushAck
+			if ack.Error != "" {
+				b.log.Warn("sync_bus: push ack error",
+					"urn", ack.NoteUrn,
+					"err", ack.Error,
+				)
+			} else {
+				if err := b.repo.ClearSyncPending(ack.NoteUrn); err != nil {
+					b.log.Debug("sync_bus: clear pending after ack", "urn", ack.NoteUrn, "err", err)
+				}
+			}
+
+		case msg.NotePush != nil:
+			// Cloud is pushing a note to us (response to our pull request).
+			b.handleNotePush(msg.NotePush)
+
+		case msg.Ping != nil:
+			// Pong — no action needed; the server echoed back our ping timestamp.
+		}
+	}
+}
+
+// handleNoteChanged is called when the cloud notifies us that a note changed.
+// We determine our local head sequence and send a SyncPullRequest for any
+// missing events.
+func (b *Bus) handleNoteChanged(stream pb.SyncService_SyncStreamClient, notif *pb.NoteChangedNotif) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	localNote, err := b.repo.Get(ctx, notif.NoteUrn)
+	localHeadSeq := int32(0)
+	if err == nil && localNote != nil {
+		localHeadSeq = int32(localNote.HeadSequence())
+	}
+
+	// If we're already at or ahead of the cloud's head, nothing to do.
+	if localHeadSeq >= notif.HeadSeq {
 		return
 	}
-	defer conn.Close()
+
+	// Send a pull request to fetch events from our local head + 1 onwards.
+	pullReq := &pb.SyncStreamMessage{
+		PullRequest: &pb.SyncPullRequest{
+			NoteUrn: notif.NoteUrn,
+			FromSeq: localHeadSeq + 1,
+		},
+	}
+	if sendErr := stream.Send(pullReq); sendErr != nil {
+		b.log.Debug("sync_bus: send pull request failed",
+			"urn", notif.NoteUrn,
+			"err", sendErr,
+		)
+		// Mark as pending so the backlog sweep retries.
+		_ = b.repo.MarkSyncPending(notif.NoteUrn)
+	}
+}
+
+// handleNotePush stores a note pushed by the cloud (in response to our pull request).
+func (b *Bus) handleNotePush(push *pb.SyncNoteMessage) {
+	if push.Header == nil {
+		return
+	}
+	urn := push.Header.Urn
+
+	note, events, err := protoToCoreNote(push)
+	if err != nil {
+		b.log.Warn("sync_bus: proto→core failed", "urn", urn, "err", err)
+		return
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	syncClient := pb.NewSyncServiceClient(conn.Raw())
-	stream, err := syncClient.SyncNotes(ctx)
-	if err != nil {
-		b.log.Debug("sync_bus: open SyncNotes stream", "err", err)
+	if err := b.repo.ReceiveNote(ctx, note, events); err != nil {
+		b.log.Warn("sync_bus: receive note failed", "urn", urn, "err", err)
+		// Mark pending so the next sweep can retry via the old one-shot path.
+		_ = b.repo.MarkSyncPending(urn)
 		return
 	}
+
+	b.log.Debug("sync_bus: received note from cloud", "urn", urn, "events", len(events))
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// sendNote — push a local note to the cloud over the persistent stream
+// ─────────────────────────────────────────────────────────────────────────────
+
+// sendNote builds a SyncNoteMessage for noteURN and sends it on the persistent
+// stream. On any error the pending_sync row is left so the backlog sweep retries.
+func (b *Bus) sendNote(noteURN string) {
+	stream := b.getStream()
+	if stream == nil {
+		// Stream not yet established — pending row will be retried by backlog sweep.
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 
 	note, err := b.repo.Get(ctx, noteURN)
 	if err != nil {
@@ -149,39 +359,60 @@ func (b *Bus) tryPush(noteURN string) {
 		return
 	}
 
-	msg := &pb.SyncNoteMessage{
-		Header: coreNoteHeaderToProto(note),
-		Events: coreEventsToProto(events),
+	msg := &pb.SyncStreamMessage{
+		NotePush: &pb.SyncNoteMessage{
+			Header: coreNoteHeaderToProto(note),
+			Events: coreEventsToProto(events),
+		},
 	}
 	if err := stream.Send(msg); err != nil {
-		b.log.Debug("sync_bus: send SyncNoteMessage", "urn", noteURN, "err", err)
+		b.log.Debug("sync_bus: send note_push failed", "urn", noteURN, "err", err)
+		// Invalidate the stream so streamLoop reconnects.
+		b.invalidateStream()
 		return
 	}
-	if err := stream.CloseSend(); err != nil {
-		b.log.Debug("sync_bus: CloseSend", "urn", noteURN, "err", err)
-		return
-	}
+	// Ack is received asynchronously in recvLoop — pending row cleared there.
+}
 
-	// Drain responses until EOF.
-	for {
-		_, err := stream.Recv()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			b.log.Debug("sync_bus: recv result", "urn", noteURN, "err", err)
-			return
-		}
-	}
+// ─────────────────────────────────────────────────────────────────────────────
+// stream state helpers
+// ─────────────────────────────────────────────────────────────────────────────
 
-	// Success — remove the pending row.
-	if err := b.repo.ClearSyncPending(noteURN); err != nil {
-		b.log.Debug("sync_bus: clear pending", "urn", noteURN, "err", err)
+func (b *Bus) setStream(conn *grpcclient.Conn, stream pb.SyncService_SyncStreamClient) {
+	b.streamMu.Lock()
+	defer b.streamMu.Unlock()
+	b.streamConn = conn
+	b.stream = stream
+}
+
+func (b *Bus) getStream() pb.SyncService_SyncStreamClient {
+	b.streamMu.Lock()
+	defer b.streamMu.Unlock()
+	return b.stream
+}
+
+func (b *Bus) invalidateStream() {
+	b.streamMu.Lock()
+	defer b.streamMu.Unlock()
+	b.stream = nil
+	// Do NOT close the conn here — streamLoop owns the conn lifecycle.
+}
+
+func (b *Bus) closeStream() {
+	b.streamMu.Lock()
+	defer b.streamMu.Unlock()
+	if b.stream != nil {
+		_ = b.stream.CloseSend()
+		b.stream = nil
+	}
+	if b.streamConn != nil {
+		_ = b.streamConn.Close()
+		b.streamConn = nil
 	}
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Conversion helpers (core → proto)
+// Conversion helpers (core ↔ proto)
 // ─────────────────────────────────────────────────────────────────────────────
 
 func coreNoteHeaderToProto(n *core.Note) *pb.NoteHeader {
@@ -235,4 +466,96 @@ func coreEventToProto(ev *core.Event) *pb.Event {
 		})
 	}
 	return p
+}
+
+// protoToCoreNote converts a SyncNoteMessage to a core.Note + []*core.Event.
+func protoToCoreNote(msg *pb.SyncNoteMessage) (*core.Note, []*core.Event, error) {
+	h := msg.Header
+
+	noteURN, err := core.ParseURN(h.Urn)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	var noteType core.NoteType
+	if h.NoteType == pb.NoteType_NOTE_TYPE_SECURE {
+		noteType = core.NoteTypeSecure
+	}
+
+	createdAt := time.Now().UTC()
+	if h.CreatedAt != nil {
+		createdAt = h.CreatedAt.AsTime()
+	}
+
+	var note *core.Note
+	if noteType == core.NoteTypeSecure {
+		note = core.NewSecureNote(noteURN, h.Name, createdAt)
+	} else {
+		note = core.NewNote(noteURN, h.Name, createdAt)
+	}
+	note.Deleted = h.Deleted
+	if h.UpdatedAt != nil {
+		note.UpdatedAt = h.UpdatedAt.AsTime()
+	}
+	if h.ProjectUrn != "" {
+		pURN, err := core.ParseURN(h.ProjectUrn)
+		if err != nil {
+			return nil, nil, err
+		}
+		note.ProjectURN = &pURN
+	}
+	if h.FolderUrn != "" {
+		fURN, err := core.ParseURN(h.FolderUrn)
+		if err != nil {
+			return nil, nil, err
+		}
+		note.FolderURN = &fURN
+	}
+
+	events := make([]*core.Event, 0, len(msg.Events))
+	for _, pe := range msg.Events {
+		noteURNParsed, err := core.ParseURN(pe.NoteUrn)
+		if err != nil {
+			return nil, nil, err
+		}
+		authorURN, err := core.ParseURN(pe.AuthorUrn)
+		if err != nil {
+			return nil, nil, err
+		}
+		evURN, err := core.ParseURN(pe.Urn)
+		if err != nil {
+			return nil, nil, err
+		}
+		createdAt := time.Now().UTC()
+		if pe.CreatedAt != nil {
+			createdAt = pe.CreatedAt.AsTime()
+		}
+		entries := make([]core.LineEntry, 0, len(pe.Entries))
+		for _, le := range pe.Entries {
+			entries = append(entries, core.LineEntry{
+				Op:         core.LineOp(le.Op),
+				LineNumber: int(le.LineNumber),
+				Content:    le.Content,
+			})
+		}
+		ev := &core.Event{
+			URN:       evURN,
+			NoteURN:   noteURNParsed,
+			Sequence:  int(pe.Sequence),
+			AuthorURN: authorURN,
+			CreatedAt: createdAt,
+			Entries:   entries,
+		}
+		events = append(events, ev)
+	}
+
+	return note, events, nil
+}
+
+// min returns the smaller of two durations.
+func min(a, b time.Duration) time.Duration {
+	if a < b {
+		return a
+	}
+	return b
 }

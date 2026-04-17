@@ -114,6 +114,12 @@ func (p *Provider) ClearSyncPending(noteURN string) error {
 }
 
 // ListSyncPending returns all note URNs that have pending sync rows.
+// ReceiveNote stores a note and its events received from the cloud.
+// It is a thin wrapper over ReceiveSharedNote and satisfies the BusRepo interface.
+func (p *Provider) ReceiveNote(ctx context.Context, note *core.Note, events []*core.Event) error {
+	return p.ReceiveSharedNote(ctx, note, events)
+}
+
 func (p *Provider) ListSyncPending() ([]string, error) {
 	rows, err := p.db.QueryContext(context.Background(),
 		`SELECT note_urn FROM pending_sync ORDER BY updated_at ASC`)
