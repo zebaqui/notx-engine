@@ -8,6 +8,7 @@ package notxpb
 
 import (
 	context "context"
+
 	grpc "google.golang.org/grpc"
 	codes "google.golang.org/grpc/codes"
 	status "google.golang.org/grpc/status"
@@ -19,18 +20,18 @@ import (
 const _ = grpc.SupportPackageIsVersion7
 
 const (
-	SyncService_SyncNotes_FullMethodName = "/notx.v1.SyncService/SyncNotes"
+	SyncService_SyncNotes_FullMethodName  = "/notx.v1.SyncService/SyncNotes"
+	SyncService_SyncStream_FullMethodName = "/notx.v1.SyncService/SyncStream"
 )
 
 // SyncServiceClient is the client API for SyncService service.
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 type SyncServiceClient interface {
-	// SyncNotes is a bidirectional streaming RPC.
-	// The caller (local server) sends SyncNoteMessage frames — one per local note.
-	// The server (cloud) responds with SyncNoteResult frames — one per received note,
-	// plus additional SyncNoteMessage frames for notes that exist only on the cloud.
+	// SyncNotes: one-shot full sync used by the CLI (notx sync command).
 	SyncNotes(ctx context.Context, opts ...grpc.CallOption) (SyncService_SyncNotesClient, error)
+	// SyncStream: long-lived bidirectional stream for real-time sync.
+	SyncStream(ctx context.Context, opts ...grpc.CallOption) (SyncService_SyncStreamClient, error)
 }
 
 type syncServiceClient struct {
@@ -72,15 +73,45 @@ func (x *syncServiceSyncNotesClient) Recv() (*SyncNoteResult, error) {
 	return m, nil
 }
 
+func (c *syncServiceClient) SyncStream(ctx context.Context, opts ...grpc.CallOption) (SyncService_SyncStreamClient, error) {
+	stream, err := c.cc.NewStream(ctx, &SyncService_ServiceDesc.Streams[1], SyncService_SyncStream_FullMethodName, opts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &syncServiceSyncStreamClient{stream}
+	return x, nil
+}
+
+type SyncService_SyncStreamClient interface {
+	Send(*SyncStreamMessage) error
+	Recv() (*SyncStreamMessage, error)
+	grpc.ClientStream
+}
+
+type syncServiceSyncStreamClient struct {
+	grpc.ClientStream
+}
+
+func (x *syncServiceSyncStreamClient) Send(m *SyncStreamMessage) error {
+	return x.ClientStream.SendMsg(m)
+}
+
+func (x *syncServiceSyncStreamClient) Recv() (*SyncStreamMessage, error) {
+	m := new(SyncStreamMessage)
+	if err := x.ClientStream.RecvMsg(m); err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+
 // SyncServiceServer is the server API for SyncService service.
 // All implementations must embed UnimplementedSyncServiceServer
 // for forward compatibility
 type SyncServiceServer interface {
-	// SyncNotes is a bidirectional streaming RPC.
-	// The caller (local server) sends SyncNoteMessage frames — one per local note.
-	// The server (cloud) responds with SyncNoteResult frames — one per received note,
-	// plus additional SyncNoteMessage frames for notes that exist only on the cloud.
+	// SyncNotes: one-shot full sync used by the CLI (notx sync command).
 	SyncNotes(SyncService_SyncNotesServer) error
+	// SyncStream: long-lived bidirectional stream for real-time sync.
+	SyncStream(SyncService_SyncStreamServer) error
 	mustEmbedUnimplementedSyncServiceServer()
 }
 
@@ -90,6 +121,9 @@ type UnimplementedSyncServiceServer struct {
 
 func (UnimplementedSyncServiceServer) SyncNotes(SyncService_SyncNotesServer) error {
 	return status.Errorf(codes.Unimplemented, "method SyncNotes not implemented")
+}
+func (UnimplementedSyncServiceServer) SyncStream(SyncService_SyncStreamServer) error {
+	return status.Errorf(codes.Unimplemented, "method SyncStream not implemented")
 }
 func (UnimplementedSyncServiceServer) mustEmbedUnimplementedSyncServiceServer() {}
 
@@ -106,6 +140,10 @@ func RegisterSyncServiceServer(s grpc.ServiceRegistrar, srv SyncServiceServer) {
 
 func _SyncService_SyncNotes_Handler(srv interface{}, stream grpc.ServerStream) error {
 	return srv.(SyncServiceServer).SyncNotes(&syncServiceSyncNotesServer{stream})
+}
+
+func _SyncService_SyncStream_Handler(srv interface{}, stream grpc.ServerStream) error {
+	return srv.(SyncServiceServer).SyncStream(&syncServiceSyncStreamServer{stream})
 }
 
 type SyncService_SyncNotesServer interface {
@@ -130,6 +168,28 @@ func (x *syncServiceSyncNotesServer) Recv() (*SyncNoteMessage, error) {
 	return m, nil
 }
 
+type SyncService_SyncStreamServer interface {
+	Send(*SyncStreamMessage) error
+	Recv() (*SyncStreamMessage, error)
+	grpc.ServerStream
+}
+
+type syncServiceSyncStreamServer struct {
+	grpc.ServerStream
+}
+
+func (x *syncServiceSyncStreamServer) Send(m *SyncStreamMessage) error {
+	return x.ServerStream.SendMsg(m)
+}
+
+func (x *syncServiceSyncStreamServer) Recv() (*SyncStreamMessage, error) {
+	m := new(SyncStreamMessage)
+	if err := x.ServerStream.RecvMsg(m); err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+
 // SyncService_ServiceDesc is the grpc.ServiceDesc for SyncService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -141,6 +201,12 @@ var SyncService_ServiceDesc = grpc.ServiceDesc{
 		{
 			StreamName:    "SyncNotes",
 			Handler:       _SyncService_SyncNotes_Handler,
+			ServerStreams: true,
+			ClientStreams: true,
+		},
+		{
+			StreamName:    "SyncStream",
+			Handler:       _SyncService_SyncStream_Handler,
 			ServerStreams: true,
 			ClientStreams: true,
 		},

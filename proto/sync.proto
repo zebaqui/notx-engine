@@ -2,23 +2,22 @@ syntax = "proto3";
 
 package notx.v1;
 
+import "google/protobuf/timestamp.proto";
 import "note.proto";
 
 option go_package = "github.com/zebaqui/notx-engine/proto;notxpb";
 
-// SyncService is registered on the primary mTLS gRPC listener (:50051).
-// A paired local server dials the cloud with its issued certificate and calls
-// SyncNotes to exchange the full note event stream bidirectionally.
 service SyncService {
-  // SyncNotes is a bidirectional streaming RPC.
-  // The caller (local server) sends SyncNoteMessage frames — one per local note.
-  // The server (cloud) responds with SyncNoteResult frames — one per received note,
-  // plus additional SyncNoteMessage frames for notes that exist only on the cloud.
+  // SyncNotes: one-shot full sync used by the CLI (notx sync command).
   rpc SyncNotes(stream SyncNoteMessage) returns (stream SyncNoteResult);
+
+  // SyncStream: long-lived bidirectional stream for real-time sync.
+  // The local server initiates by dialling the cloud mTLS primary listener.
+  // Both sides send SyncStreamMessage frames on the same stream.
+  rpc SyncStream(stream SyncStreamMessage) returns (stream SyncStreamMessage);
 }
 
 // SyncNoteMessage carries a note header and its complete event stream.
-// Sent by the local server for each note it wants to push/sync.
 message SyncNoteMessage {
   NoteHeader header = 1;
   repeated Event events = 2;
@@ -28,5 +27,36 @@ message SyncNoteMessage {
 message SyncNoteResult {
   string note_urn = 1;
   int32 events_stored = 2;
-  string error = 3; // non-empty on per-note error (does not close the stream)
+  string error = 3;
+}
+
+// SyncStreamMessage is the envelope for the long-lived SyncStream RPC.
+// Exactly one of the payload fields is set per message.
+message SyncStreamMessage {
+  oneof payload {
+    SyncNoteMessage note_push = 1; // local→cloud: push a note's events
+    SyncNoteResult push_ack = 2; // cloud→local: ack a push
+    NoteChangedNotif note_changed = 3; // cloud→local: "this note changed, fetch it"
+    SyncPullRequest pull_request = 4; // local→cloud: "give me this note from seq N"
+    SyncPing ping = 5; // either side: keepalive
+  }
+}
+
+// NoteChangedNotif is pushed by the cloud to inform the local server that
+// a note has been updated on the cloud side.
+message NoteChangedNotif {
+  string note_urn = 1;
+  int32 head_seq = 2;
+  google.protobuf.Timestamp updated_at = 3;
+}
+
+// SyncPullRequest asks the cloud to send the note's events from from_seq onward.
+message SyncPullRequest {
+  string note_urn = 1;
+  int32 from_seq = 2;
+}
+
+// SyncPing is a keepalive message. The receiver should respond with another SyncPing.
+message SyncPing {
+  int64 timestamp_ms = 1;
 }
