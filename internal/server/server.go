@@ -160,6 +160,14 @@ func New(cfg *config.Config, r repo.NoteRepository, projRepo repo.ProjectReposit
 		s.bootstrapServer = bootstrapSrv
 	}
 
+	// ── Resolve optional sync repo (sqlite.Provider implements repo.SyncRepository) ──
+	var syncRepo repo.SyncRepository
+	if busRepo != nil {
+		if sr, ok := busRepo.(repo.SyncRepository); ok {
+			syncRepo = sr
+		}
+	}
+
 	if cfg.EnableHTTP {
 		s.httpHandler = httpsvc.New(
 			cfg,
@@ -175,6 +183,8 @@ func New(cfg *config.Config, r repo.NoteRepository, projRepo repo.ProjectReposit
 			relaySvc,
 			contextSvc,
 			linkSvc,
+			syncRepo,
+			nil, // syncBus — wired below after bus is created
 		)
 	}
 
@@ -189,6 +199,26 @@ func New(cfg *config.Config, r repo.NoteRepository, projRepo repo.ProjectReposit
 	// ── Start real-time sync bus if peer certs are configured ────────────────
 	if busRepo != nil && cfg.Pairing.PeerCertDir != "" && cfg.Pairing.PeerAuthority != "" {
 		s.bus = syncsvc.New(cfg, busRepo, log)
+
+		// Wire sync log function — appends to persistent storage.
+		if syncRepo != nil {
+			sr := syncRepo // capture
+			s.bus.SetSyncLogFunc(func(noteURN, direction string, eventCount int, status, errStr string, syncedAt time.Time) {
+				_ = sr.AppendSyncLogEntry(repo.SyncLogEntry{
+					NoteURN:    noteURN,
+					Direction:  direction,
+					EventCount: eventCount,
+					Status:     status,
+					Error:      errStr,
+					SyncedAt:   syncedAt,
+				})
+			})
+		}
+
+		// Expose the bus to the HTTP handler for status/trigger endpoints.
+		if s.httpHandler != nil {
+			s.httpHandler.SetSyncBus(s.bus)
+		}
 	}
 
 	return s, nil

@@ -9,8 +9,11 @@ package sync
 
 import (
 	"context"
+	"crypto/x509"
+	"encoding/pem"
 	"io"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"sync"
 	"time"
@@ -22,6 +25,20 @@ import (
 	"github.com/zebaqui/notx-engine/internal/grpcclient"
 	pb "github.com/zebaqui/notx-engine/proto"
 )
+
+// SyncLogFunc is called by Bus after each push or pull completes.
+// Parameters: noteURN, direction ("push"|"pull"), eventCount, status ("ok"|"error"), errStr, syncedAt.
+type SyncLogFunc func(noteURN, direction string, eventCount int, status, errStr string, syncedAt time.Time)
+
+// StatusSnapshot is a point-in-time snapshot of Bus connection state.
+type StatusSnapshot struct {
+	Connected     bool
+	PeerAuthority string
+	ConnectedAt   *time.Time
+	LastPingAt    *time.Time
+	PendingCount  int
+	CertExpiry    *time.Time
+}
 
 // BusRepo is the subset of the sqlite Provider that Bus needs.
 type BusRepo interface {
@@ -58,6 +75,15 @@ type Bus struct {
 	streamMu   sync.Mutex
 	streamConn *grpcclient.Conn
 	stream     pb.SyncService_SyncStreamClient
+
+	// connection status — protected by statusMu
+	statusMu    sync.RWMutex
+	connected   bool
+	connectedAt time.Time
+	lastPingAt  time.Time
+
+	// optional sync log callback
+	logFn SyncLogFunc
 }
 
 // New creates a Bus and starts the background worker goroutines.
@@ -76,6 +102,55 @@ func New(cfg *config.Config, repo BusRepo, log *slog.Logger) *Bus {
 	go b.streamLoop()
 	go b.loop()
 	return b
+}
+
+// SetSyncLogFunc registers a callback that is invoked after each push or pull completes.
+// It is safe to call before or after starting the bus.
+func (b *Bus) SetSyncLogFunc(fn SyncLogFunc) {
+	b.statusMu.Lock()
+	defer b.statusMu.Unlock()
+	b.logFn = fn
+}
+
+// Status returns a point-in-time snapshot of the bus connection state.
+func (b *Bus) Status() StatusSnapshot {
+	b.statusMu.RLock()
+	snap := StatusSnapshot{
+		Connected:     b.connected,
+		PeerAuthority: b.cfg.Pairing.PeerAuthority,
+	}
+	if b.connected {
+		t := b.connectedAt
+		snap.ConnectedAt = &t
+	}
+	if !b.lastPingAt.IsZero() {
+		t := b.lastPingAt
+		snap.LastPingAt = &t
+	}
+	logFn := b.logFn
+	b.statusMu.RUnlock()
+	_ = logFn // used only to avoid holding lock while doing I/O below
+
+	// Pending count — best-effort.
+	if urns, err := b.repo.ListSyncPending(); err == nil {
+		snap.PendingCount = len(urns)
+	}
+
+	// Cert expiry — read PeerCertDir/server.crt.
+	if b.cfg.Pairing.PeerCertDir != "" {
+		certFile := filepath.Join(b.cfg.Pairing.PeerCertDir, "server.crt")
+		if data, err := os.ReadFile(certFile); err == nil {
+			block, _ := pem.Decode(data)
+			if block != nil {
+				if cert, err := x509.ParseCertificate(block.Bytes); err == nil {
+					t := cert.NotAfter
+					snap.CertExpiry = &t
+				}
+			}
+		}
+	}
+
+	return snap
 }
 
 // Notify enqueues noteURN for an immediate push attempt. Non-blocking: if the
@@ -156,6 +231,10 @@ func (b *Bus) streamLoop() {
 		// Connection established — reset backoff.
 		backoff = time.Second
 		b.setStream(conn, stream)
+		b.statusMu.Lock()
+		b.connected = true
+		b.connectedAt = time.Now()
+		b.statusMu.Unlock()
 		b.log.Info("sync_bus: SyncStream connected",
 			"peer", b.cfg.Pairing.PeerAuthority,
 		)
@@ -165,6 +244,9 @@ func (b *Bus) streamLoop() {
 
 		// Clean up — recvLoop returned because the stream errored or was closed.
 		b.closeStream()
+		b.statusMu.Lock()
+		b.connected = false
+		b.statusMu.Unlock()
 
 		select {
 		case <-b.stopCh:
@@ -267,6 +349,9 @@ func (b *Bus) recvLoop(stream pb.SyncService_SyncStreamClient) {
 
 		case msg.Ping != nil:
 			// Pong — no action needed; the server echoed back our ping timestamp.
+			b.statusMu.Lock()
+			b.lastPingAt = time.Now()
+			b.statusMu.Unlock()
 		}
 	}
 }
@@ -316,6 +401,7 @@ func (b *Bus) handleNotePush(push *pb.SyncNoteMessage) {
 	note, events, err := protoToCoreNote(push)
 	if err != nil {
 		b.log.Warn("sync_bus: proto→core failed", "urn", urn, "err", err)
+		b.callLogFn(urn, "pull", 0, "error", err.Error())
 		return
 	}
 
@@ -326,10 +412,12 @@ func (b *Bus) handleNotePush(push *pb.SyncNoteMessage) {
 		b.log.Warn("sync_bus: receive note failed", "urn", urn, "err", err)
 		// Mark pending so the next sweep can retry via the old one-shot path.
 		_ = b.repo.MarkSyncPending(urn)
+		b.callLogFn(urn, "pull", len(events), "error", err.Error())
 		return
 	}
 
 	b.log.Debug("sync_bus: received note from cloud", "urn", urn, "events", len(events))
+	b.callLogFn(urn, "pull", len(events), "ok", "")
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -369,9 +457,21 @@ func (b *Bus) sendNote(noteURN string) {
 		b.log.Debug("sync_bus: send note_push failed", "urn", noteURN, "err", err)
 		// Invalidate the stream so streamLoop reconnects.
 		b.invalidateStream()
+		b.callLogFn(noteURN, "push", len(events), "error", err.Error())
 		return
 	}
 	// Ack is received asynchronously in recvLoop — pending row cleared there.
+	b.callLogFn(noteURN, "push", len(events), "ok", "")
+}
+
+// callLogFn invokes the registered SyncLogFunc if set.
+func (b *Bus) callLogFn(noteURN, direction string, eventCount int, status, errStr string) {
+	b.statusMu.RLock()
+	fn := b.logFn
+	b.statusMu.RUnlock()
+	if fn != nil {
+		fn(noteURN, direction, eventCount, status, errStr, time.Now())
+	}
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

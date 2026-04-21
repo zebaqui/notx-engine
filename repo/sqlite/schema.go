@@ -13,7 +13,7 @@ import (
 // currentSchemaVersion must match len(migrations).
 // Bump it by 1 every time you add a migration to the slice below.
 // NEVER edit or remove existing migrations — only append new ones.
-const currentSchemaVersion = 10
+const currentSchemaVersion = 11
 
 // currentProjectionVersion is incremented when projection logic changes
 // (i.e. existing rows need recomputing from the event log even though
@@ -288,6 +288,19 @@ CREATE TABLE IF NOT EXISTS pending_sync (
     note_urn   TEXT PRIMARY KEY,
     updated_at INTEGER NOT NULL  -- Unix ms of last local write that needs sync
 );
+
+-- sync_log records each completed sync operation for admin visibility.
+CREATE TABLE IF NOT EXISTS sync_log (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    note_urn    TEXT    NOT NULL,
+    direction   TEXT    NOT NULL,
+    event_count INTEGER NOT NULL DEFAULT 0,
+    status      TEXT    NOT NULL,
+    error       TEXT    NOT NULL DEFAULT '',
+    synced_at   INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_sync_log_synced ON sync_log(synced_at DESC);
+CREATE INDEX IF NOT EXISTS idx_sync_log_note   ON sync_log(note_urn, synced_at DESC);
 `
 
 // migrations is the ordered list of additive SQL migrations.
@@ -306,6 +319,7 @@ CREATE TABLE IF NOT EXISTS pending_sync (
 //	v4 — add external_links table (link spec)
 //	v5 — add context_bursts, context_bursts_fts, candidate_relations, project_context_config (context graph)
 //	v10 — pending_sync table for real-time event bus
+//	v11 — sync_log table for admin sync history
 var migrations = []string{
 	// v1: initial schema — ddl already handles this on new installs.
 	"SELECT 1",
@@ -489,6 +503,19 @@ CREATE INDEX IF NOT EXISTS idx_inferences_status
     note_urn   TEXT PRIMARY KEY,
     updated_at INTEGER NOT NULL
 );`,
+
+	// v11: sync_log table for admin sync history.
+	`CREATE TABLE IF NOT EXISTS sync_log (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    note_urn    TEXT    NOT NULL,
+    direction   TEXT    NOT NULL,
+    event_count INTEGER NOT NULL DEFAULT 0,
+    status      TEXT    NOT NULL,
+    error       TEXT    NOT NULL DEFAULT '',
+    synced_at   INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_sync_log_synced ON sync_log(synced_at DESC);
+CREATE INDEX IF NOT EXISTS idx_sync_log_note   ON sync_log(note_urn, synced_at DESC);`,
 }
 
 // applySchema creates all tables/indexes on a fresh DB and seeds meta rows.

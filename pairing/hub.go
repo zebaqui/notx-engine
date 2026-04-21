@@ -15,6 +15,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"golang.org/x/time/rate"
@@ -83,7 +84,18 @@ func StartHub(
 	}
 
 	// ── 2. Load or generate the server TLS certificate ───────────────────────
-	serverCert, err := LoadServerCert(caDir, authority)
+	// ENGINE_BOOTSTRAP_HOST may be a comma-separated list of additional DNS
+	// names (e.g. "notx.zebaqui.com") to include in the server TLS cert so
+	// that remote clients can verify the certificate against the public hostname.
+	var extraHosts []string
+	if h := os.Getenv("ENGINE_BOOTSTRAP_HOST"); h != "" {
+		for _, name := range strings.Split(h, ",") {
+			if name = strings.TrimSpace(name); name != "" {
+				extraHosts = append(extraHosts, name)
+			}
+		}
+	}
+	serverCert, err := LoadServerCert(caDir, authority, extraHosts...)
 	if err != nil {
 		return nil, fmt.Errorf("pairing hub: load server cert: %w", err)
 	}
@@ -191,9 +203,13 @@ func StartHub(
 // "server.crt" and "server.key"). If either file is absent a new key-pair is
 // generated and signed by authority, then written to disk for reuse.
 //
+// extraHosts is an optional list of additional DNS SANs (e.g. the public
+// hostname "notx.zebaqui.com") to include alongside "localhost" so that
+// remote TLS clients can verify the certificate.
+//
 // The returned tls.Certificate is suitable for use with both
 // BuildBootstrapTLSConfig and pairingCore.BuildMTLSConfig.
-func LoadServerCert(caDir string, authority *ca.CA) (tls.Certificate, error) {
+func LoadServerCert(caDir string, authority *ca.CA, extraHosts ...string) (tls.Certificate, error) {
 	certPath := filepath.Join(caDir, "server.crt")
 	keyPath := filepath.Join(caDir, "server.key")
 
@@ -230,7 +246,7 @@ func LoadServerCert(caDir string, authority *ca.CA) (tls.Certificate, error) {
 		NotAfter:    now.Add(10 * 365 * 24 * time.Hour),
 		KeyUsage:    x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
 		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-		DNSNames:    []string{"localhost"},
+		DNSNames:    append([]string{"localhost"}, extraHosts...),
 	}
 
 	certDER, err := x509.CreateCertificate(rand.Reader, tmpl, authority.Cert, &serverKey.PublicKey, authority.Key)

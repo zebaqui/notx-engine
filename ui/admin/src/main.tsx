@@ -21,6 +21,7 @@ import DevicesPage from "./pages/DevicesPage";
 import UsersPage from "./pages/UsersPage";
 import ConfigPage from "./pages/ConfigPage";
 import ServersPage from "./pages/ServersPage";
+import SyncPage from "./pages/SyncPage";
 
 // ─── Query client ─────────────────────────────────────────────────────────────
 
@@ -108,6 +109,12 @@ const serversRoute = createRoute({
   component: ServersPage,
 });
 
+const syncRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/sync",
+  component: SyncPage,
+});
+
 const routeTree = rootRoute.addChildren([
   indexRoute,
   overviewRoute,
@@ -117,6 +124,7 @@ const routeTree = rootRoute.addChildren([
   linksRoute,
   devicesRoute,
   serversRoute,
+  syncRoute,
   usersRoute,
   configRoute,
 ]);

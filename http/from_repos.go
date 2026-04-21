@@ -53,5 +53,5 @@ func NewFromRepos(
 		linkSvc = grpcsvc.NewLinkServer(links)
 	}
 
-	return New(cfg, noteSvc, projSvc, folderSvc, deviceSvc, deviceAdminSvc, userSvc, log, nil, secretStore, nil, contextSvc, linkSvc)
+	return New(cfg, noteSvc, projSvc, folderSvc, deviceSvc, deviceAdminSvc, userSvc, log, nil, secretStore, nil, contextSvc, linkSvc, nil, nil)
 }

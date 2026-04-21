@@ -24,8 +24,12 @@ import (
 	"github.com/zebaqui/notx-engine/core"
 	grpcsvc "github.com/zebaqui/notx-engine/internal/server/grpc"
 	internalsync "github.com/zebaqui/notx-engine/internal/sync"
-	pb "github.com/zebaqui/notx-engine/proto"
 )
+
+// SyncLogWriter is called by the SyncServer after each push or pull operation
+// so the cloud can persist a row to engine_sync_log.
+// This is a re-export of grpcsvc.SyncLogWriter.
+type SyncLogWriter = grpcsvc.SyncLogWriter
 
 // StreamRegistry tracks active SyncStream gRPC connections keyed by namespace
 // and fans out NoteChangedNotif messages to every connected stream.
@@ -74,12 +78,31 @@ type ServerNamespaceResolver interface {
 //	srvRepo    resolves the peer certificate CN to a tenant namespace.
 //	provider   tenant-scoped note access (may be nil on the local engine side).
 //	log        structured logger; defaults to slog.Default() when nil.
+//
+// SyncServiceServer is the concrete type returned by NewSyncServiceServer.
+// Exposed so callers can call SetSyncLogWriter after construction.
+type SyncServiceServer = grpcsvc.SyncServer
+
+// NewSyncServiceServer builds a pb.SyncServiceServer that:
+//
+//   - accepts long-lived SyncStream connections from paired local engines,
+//   - fans out NoteChangedNotif messages via registry when the cloud writes a note,
+//   - receives note pushes from local engines and stores them via provider.ForTenant,
+//   - serves pull requests from local engines by reading from provider.ForTenant.
+//
+// Pass the returned value to pairing.StartHub as the syncSvc argument.
+//
+//	registry   built with NewStreamRegistry(); also wired to the postgres
+//	           provider via provider.SetStreamNotifier(registry).
+//	srvRepo    resolves the peer certificate CN to a tenant namespace.
+//	provider   tenant-scoped note access (may be nil on the local engine side).
+//	log        structured logger; defaults to slog.Default() when nil.
 func NewSyncServiceServer(
 	registry *StreamRegistry,
 	srvRepo ServerNamespaceResolver,
 	provider TenantProvider,
 	log *slog.Logger,
-) pb.SyncServiceServer {
+) *SyncServiceServer {
 	return grpcsvc.NewSyncServer(registry, srvRepo, provider, log)
 }
 

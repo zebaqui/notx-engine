@@ -12,6 +12,7 @@ import {
   UserGroupIcon,
   Activity01Icon,
   Search01Icon,
+  Refresh01Icon,
 } from "@hugeicons/core-free-icons";
 
 // ─── Nav definition ───────────────────────────────────────────────────────────
@@ -24,6 +25,7 @@ const NAV = [
   { path: "/links", label: "Links", icon: Link01Icon },
   { path: "/devices", label: "Devices", icon: MonitorDotIcon },
   { path: "/servers", label: "Servers", icon: ServerStack01Icon },
+  { path: "/sync", label: "Sync", icon: Refresh01Icon },
   { path: "/users", label: "Users", icon: UserGroupIcon },
   { path: "/config", label: "Config", icon: Settings01Icon },
 ] as const;
@@ -36,6 +38,7 @@ const PAGE_TITLES: Record<string, string> = {
   "/links": "Link inspector",
   "/devices": "Devices",
   "/servers": "Peer servers",
+  "/sync": "Sync",
   "/users": "Users",
   "/config": "Configuration",
 };

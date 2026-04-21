@@ -21,6 +21,7 @@ import (
 
 	"github.com/zebaqui/notx-engine/config"
 	grpcsvc "github.com/zebaqui/notx-engine/internal/server/grpc"
+	internalsync "github.com/zebaqui/notx-engine/internal/sync"
 	"github.com/zebaqui/notx-engine/repo"
 )
 
@@ -45,6 +46,8 @@ type Handler struct {
 	relaySvc       *grpcsvc.RelayServer
 	contextSvc     *grpcsvc.ContextServer
 	linkSvc        *grpcsvc.LinkServer
+	syncRepo       SyncAdminRepo
+	syncBus        *internalsync.Bus
 
 	log    *slog.Logger
 	mux    *http.ServeMux
@@ -71,6 +74,8 @@ func New(
 	relaySvc *grpcsvc.RelayServer,
 	contextSvc *grpcsvc.ContextServer,
 	linkSvc *grpcsvc.LinkServer,
+	syncRepo SyncAdminRepo,
+	syncBus *internalsync.Bus,
 ) *Handler {
 	h := &Handler{
 		cfg:            cfg,
@@ -85,11 +90,19 @@ func New(
 		relaySvc:       relaySvc,
 		contextSvc:     contextSvc,
 		linkSvc:        linkSvc,
+		syncRepo:       syncRepo,
+		syncBus:        syncBus,
 		log:            log,
 		mux:            http.NewServeMux(),
 	}
 	h.routes()
 	return h
+}
+
+// SetSyncBus wires a Bus into the handler after construction.
+// This is used by server.go to attach the bus once it has been created.
+func (h *Handler) SetSyncBus(bus *internalsync.Bus) {
+	h.syncBus = bus
 }
 
 // ServeHTTP implements http.Handler.
@@ -203,6 +216,12 @@ func (h *Handler) routes() {
 
 	// Sync progress stream
 	h.mux.HandleFunc("/v1/sync/stream", h.withDeviceAuthMiddleware(h.handleSyncStream))
+
+	// Sync admin endpoints
+	h.mux.HandleFunc("/v1/sync/status", h.withDeviceAuthMiddleware(h.handleSyncStatus))
+	h.mux.HandleFunc("/v1/sync/log", h.withDeviceAuthMiddleware(h.handleSyncLog))
+	h.mux.HandleFunc("/v1/sync/pending", h.withDeviceAuthMiddleware(h.handleSyncPending))
+	h.mux.HandleFunc("/v1/sync/trigger", h.withDeviceAuthMiddleware(h.handleSyncTrigger))
 
 	// Search
 	h.mux.HandleFunc("/v1/search", h.withDeviceAuthMiddleware(h.routeSearch))

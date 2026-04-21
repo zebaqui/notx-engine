@@ -289,3 +289,35 @@ export interface ListOutboundLinksResponse {
 export interface ListExternalLinksResponse {
   links: ExternalLinkRecord[];
 }
+
+// ─── Sync ────────────────────────────────────────────────────────────────────
+
+export interface SyncStatus {
+  connected: boolean;
+  peer_authority: string;
+  connected_at?: string; // ISO-8601
+  last_ping_at?: string; // ISO-8601
+  pending_count: number;
+  cert_expiry?: string; // ISO-8601
+}
+
+export interface SyncLogEntry {
+  id: number;
+  note_urn: string;
+  direction: "push" | "pull";
+  event_count: number;
+  status: "ok" | "error";
+  error?: string;
+  synced_at: string; // ISO-8601
+}
+
+export interface SyncLogResponse {
+  entries: SyncLogEntry[];
+  next_page_token?: string;
+  total: number;
+}
+
+export interface SyncPendingResponse {
+  note_urns: string[];
+  count: number;
+}

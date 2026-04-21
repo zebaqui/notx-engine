@@ -600,3 +600,34 @@ export async function fetchMetrics(): Promise<ServerMetrics> {
     pending_devices: pendingDevices,
   };
 }
+
+// ─── Sync ─────────────────────────────────────────────────────────────────────
+
+export async function fetchSyncStatus(): Promise<import("./types").SyncStatus> {
+  const data = await http.get<import("./types").SyncStatus>("/v1/sync/status");
+  return data.data;
+}
+
+export async function fetchSyncLog(
+  pageSize = 50,
+  pageToken = "",
+): Promise<import("./types").SyncLogResponse> {
+  const qs = new URLSearchParams({ page_size: String(pageSize) });
+  if (pageToken) qs.set("page_token", pageToken);
+  const data = await http.get<import("./types").SyncLogResponse>(
+    `/v1/sync/log?${qs}`,
+  );
+  return data.data;
+}
+
+export async function fetchSyncPending(): Promise<
+  import("./types").SyncPendingResponse
+> {
+  const data =
+    await http.get<import("./types").SyncPendingResponse>("/v1/sync/pending");
+  return data.data;
+}
+
+export async function triggerSync(): Promise<void> {
+  await http.post("/v1/sync/trigger");
+}

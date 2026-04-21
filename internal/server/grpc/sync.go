@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"time"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
@@ -16,6 +17,13 @@ import (
 	syncsvc "github.com/zebaqui/notx-engine/internal/sync"
 	pb "github.com/zebaqui/notx-engine/proto"
 )
+
+// SyncLogWriter is called by SyncServer after each push or pull operation
+// completes (success or error) so the cloud can persist a sync_log row.
+type SyncLogWriter interface {
+	// WriteSyncLog records a completed sync operation for a specific namespace.
+	WriteSyncLog(namespace, noteURN, direction string, eventCount int, status, errStr string, syncedAt time.Time)
+}
 
 // serverNamespaceResolver maps a server URN to its owning namespace.
 type serverNamespaceResolver interface {
@@ -37,10 +45,11 @@ type NoteReceiver = syncsvc.NoteReceiver
 // engines can sync notes bidirectionally over a certificate-authenticated channel.
 type SyncServer struct {
 	pb.UnimplementedSyncServiceServer
-	registry *syncsvc.StreamRegistry
-	srvRepo  serverNamespaceResolver
-	provider TenantProvider // nil on local engine side (client-only)
-	log      *slog.Logger
+	registry  *syncsvc.StreamRegistry
+	srvRepo   serverNamespaceResolver
+	provider  TenantProvider // nil on local engine side (client-only)
+	logWriter SyncLogWriter  // optional; records push/pull outcomes to persistent storage
+	log       *slog.Logger
 }
 
 // NewSyncServer returns a ready-to-register SyncServer.
@@ -64,6 +73,13 @@ func NewSyncServer(
 		provider: provider,
 		log:      log,
 	}
+}
+
+// SetSyncLogWriter wires a SyncLogWriter so the server records push/pull
+// outcomes to persistent storage (e.g. engine_sync_log in postgres).
+// Safe to call after construction; not goroutine-safe during active streams.
+func (s *SyncServer) SetSyncLogWriter(w SyncLogWriter) {
+	s.logWriter = w
 }
 
 // SyncNotes is a bidirectional streaming RPC.
@@ -226,25 +242,31 @@ func (s *SyncServer) SyncStream(stream pb.SyncService_SyncStreamServer) error {
 // handleNotePush processes a note pushed by the local server over SyncStream.
 func (s *SyncServer) handleNotePush(ctx context.Context, ns string, push *pb.SyncNoteMessage) *pb.SyncNoteResult {
 	urn := push.GetHeader().GetUrn()
+	now := time.Now().UTC()
 
 	if s.provider == nil {
+		errStr := "sync server: no tenant provider configured"
+		s.writeSyncLog(ns, urn, "push", 0, "error", errStr, now)
 		return &pb.SyncNoteResult{
 			NoteUrn: urn,
-			Error:   "sync server: no tenant provider configured",
+			Error:   errStr,
 		}
 	}
 
 	note, events, err := protoToCore(push.GetHeader(), push.GetEvents())
 	if err != nil {
 		s.log.Warn("sync_stream: proto→core conversion failed", "urn", urn, "err", err)
+		s.writeSyncLog(ns, urn, "push", 0, "error", err.Error(), now)
 		return &pb.SyncNoteResult{NoteUrn: urn, Error: err.Error()}
 	}
 
 	if recvErr := s.provider.ForTenant(ns).ReceiveSharedNote(ctx, note, events); recvErr != nil {
 		s.log.Warn("sync_stream: receive_shared_note failed", "urn", urn, "err", recvErr)
+		s.writeSyncLog(ns, urn, "push", len(events), "error", recvErr.Error(), now)
 		return &pb.SyncNoteResult{NoteUrn: urn, Error: recvErr.Error()}
 	}
 
+	s.writeSyncLog(ns, urn, "push", len(events), "ok", "", now)
 	return &pb.SyncNoteResult{
 		NoteUrn:      urn,
 		EventsStored: int32(len(events)),
@@ -256,6 +278,7 @@ func (s *SyncServer) handleNotePush(ctx context.Context, ns string, push *pb.Syn
 func (s *SyncServer) handlePullRequest(ctx context.Context, ns string, stream pb.SyncService_SyncStreamServer, req *pb.SyncPullRequest) {
 	urn := req.GetNoteUrn()
 	fromSeq := int(req.GetFromSeq())
+	now := time.Now().UTC()
 
 	if s.provider == nil {
 		s.log.Warn("sync_stream: pull_request but no tenant provider", "urn", urn)
@@ -267,12 +290,14 @@ func (s *SyncServer) handlePullRequest(ctx context.Context, ns string, stream pb
 	note, err := nr.Get(ctx, urn)
 	if err != nil {
 		s.log.Warn("sync_stream: pull_request get note failed", "urn", urn, "err", err)
+		s.writeSyncLog(ns, urn, "pull", 0, "error", err.Error(), now)
 		return
 	}
 
 	events, err := nr.Events(ctx, urn, fromSeq)
 	if err != nil {
 		s.log.Warn("sync_stream: pull_request get events failed", "urn", urn, "err", err)
+		s.writeSyncLog(ns, urn, "pull", 0, "error", err.Error(), now)
 		return
 	}
 
@@ -288,7 +313,20 @@ func (s *SyncServer) handlePullRequest(ctx context.Context, ns string, stream pb
 	}
 	if sendErr := stream.Send(push); sendErr != nil {
 		s.log.Warn("sync_stream: pull_request send failed", "urn", urn, "err", sendErr)
+		s.writeSyncLog(ns, urn, "pull", len(events), "error", sendErr.Error(), now)
+		return
 	}
+
+	s.writeSyncLog(ns, urn, "pull", len(events), "ok", "", now)
+}
+
+// writeSyncLog calls the logWriter in a goroutine if one is configured.
+// Non-blocking and non-fatal — sync operations must never be blocked by logging.
+func (s *SyncServer) writeSyncLog(namespace, noteURN, direction string, eventCount int, status, errStr string, syncedAt time.Time) {
+	if s.logWriter == nil {
+		return
+	}
+	go s.logWriter.WriteSyncLog(namespace, noteURN, direction, eventCount, status, errStr, syncedAt)
 }
 
 // namespaceFromPeer extracts the namespace by reading the TLS peer certificate

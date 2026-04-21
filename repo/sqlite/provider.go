@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -118,6 +119,109 @@ func (p *Provider) ClearSyncPending(noteURN string) error {
 // It is a thin wrapper over ReceiveSharedNote and satisfies the BusRepo interface.
 func (p *Provider) ReceiveNote(ctx context.Context, note *core.Note, events []*core.Event) error {
 	return p.ReceiveSharedNote(ctx, note, events)
+}
+
+// AppendSyncLogEntry writes a completed sync operation to the sync_log table.
+// This satisfies repo.SyncRepository.
+func (p *Provider) AppendSyncLogEntry(entry repo.SyncLogEntry) error {
+	return p.write(func(db *sql.DB) error {
+		_, err := db.Exec(
+			`INSERT INTO sync_log(note_urn, direction, event_count, status, error, synced_at)
+			 VALUES(?, ?, ?, ?, ?, ?)`,
+			entry.NoteURN,
+			entry.Direction,
+			entry.EventCount,
+			entry.Status,
+			entry.Error,
+			toMs(entry.SyncedAt),
+		)
+		return err
+	})
+}
+
+// ListSyncLog returns paginated sync_log rows ordered by id DESC (newest first).
+// pageSize 0 defaults to 50, max 200.
+// pageToken is an opaque cursor (base64-encoded last-seen ID); pass "" for first page.
+// This satisfies repo.SyncRepository.
+func (p *Provider) ListSyncLog(pageSize int, pageToken string) ([]repo.SyncLogEntry, string, error) {
+	if pageSize <= 0 {
+		pageSize = 50
+	}
+	if pageSize > 200 {
+		pageSize = 200
+	}
+
+	var cursorID int64
+	if pageToken != "" {
+		decoded, err := base64.StdEncoding.DecodeString(pageToken)
+		if err == nil {
+			id, err2 := strconv.ParseInt(string(decoded), 10, 64)
+			if err2 == nil {
+				cursorID = id
+			}
+		}
+	}
+
+	var (
+		rows *sql.Rows
+		err  error
+	)
+	if cursorID == 0 {
+		rows, err = p.db.QueryContext(context.Background(),
+			`SELECT id, note_urn, direction, event_count, status, error, synced_at
+			 FROM sync_log
+			 ORDER BY id DESC
+			 LIMIT ?`,
+			pageSize+1,
+		)
+	} else {
+		rows, err = p.db.QueryContext(context.Background(),
+			`SELECT id, note_urn, direction, event_count, status, error, synced_at
+			 FROM sync_log
+			 WHERE id < ?
+			 ORDER BY id DESC
+			 LIMIT ?`,
+			cursorID, pageSize+1,
+		)
+	}
+	if err != nil {
+		return nil, "", fmt.Errorf("sqlite: list sync log: %w", err)
+	}
+	defer rows.Close()
+
+	var entries []repo.SyncLogEntry
+	for rows.Next() {
+		var e repo.SyncLogEntry
+		var syncedAtMs int64
+		if err := rows.Scan(&e.ID, &e.NoteURN, &e.Direction, &e.EventCount, &e.Status, &e.Error, &syncedAtMs); err != nil {
+			return nil, "", fmt.Errorf("sqlite: scan sync log: %w", err)
+		}
+		e.SyncedAt = fromMs(syncedAtMs)
+		entries = append(entries, e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, "", err
+	}
+
+	var nextToken string
+	if len(entries) > pageSize {
+		last := entries[pageSize-1]
+		entries = entries[:pageSize]
+		nextToken = base64.StdEncoding.EncodeToString([]byte(strconv.FormatInt(last.ID, 10)))
+	}
+
+	return entries, nextToken, nil
+}
+
+// SyncLogCount returns the total number of sync_log rows.
+// This satisfies repo.SyncRepository.
+func (p *Provider) SyncLogCount() (int, error) {
+	var count int
+	err := p.db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM sync_log`).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("sqlite: sync log count: %w", err)
+	}
+	return count, nil
 }
 
 func (p *Provider) ListSyncPending() ([]string, error) {
