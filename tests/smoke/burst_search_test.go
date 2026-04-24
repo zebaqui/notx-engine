@@ -38,7 +38,6 @@ func startSQLiteHTTPServer(t *testing.T) (baseURL string, stop func()) {
 	cfg.EnableGRPC = true
 	cfg.HTTPPort = httpPort
 	cfg.GRPCPort = grpcPort
-	cfg.DeviceOnboarding.AutoApprove = true
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
 		Level: slog.LevelError,
@@ -48,14 +47,10 @@ func startSQLiteHTTPServer(t *testing.T) (baseURL string, stop func()) {
 		cfg,
 		provider, // NoteRepository
 		provider, // ProjectRepository
-		provider, // DeviceRepository
-		provider, // UserRepository
-		provider, // ServerRepository
-		provider, // PairingSecretStore
 		provider, // ContextRepository  ← enables burst extraction + search
 		provider, // LinkRepository
 		log,
-		nil, // busRepo — sync bus not needed in smoke tests
+		nil, // plugins — no snip plugins in smoke tests
 	)
 	if err != nil {
 		provider.Close()
@@ -132,7 +127,6 @@ type burstSearchResponse struct {
 // Setup:
 //   - Start a SQLite-backed notx server (the memory provider does not implement
 //     ContextRepository / burst extraction).
-//   - Register a device (AutoApprove=true so it is immediately usable).
 //   - Create a normal note and append one event containing the word "Challenges".
 //     SQLite AppendEvent calls extractBurstsForEvent synchronously so bursts
 //     are visible immediately after the call returns.
@@ -146,11 +140,8 @@ func TestBurstSearch_CreateNoteAndFind(t *testing.T) {
 		authorURN = "urn:notx:usr:7f3e9c1a-2b4d-4e6f-8a0b-1c2d3e4f5a6b"
 	)
 
-	// ── Step 0: register a device ─────────────────────────────────────────────
-	deviceID := registerTestDevice(t, http.DefaultClient, baseURL)
-
 	// ── Step 1: create the note ───────────────────────────────────────────────
-	createResp := postJSONWithDeviceID(t, http.DefaultClient, baseURL+"/v1/notes", deviceID, createNoteRequest{
+	createResp := postJSON(t, baseURL+"/v1/notes", createNoteRequest{
 		URN:      noteURN,
 		Name:     noteName,
 		NoteType: "normal",
@@ -174,7 +165,7 @@ func TestBurstSearch_CreateNoteAndFind(t *testing.T) {
 		matchCharStart = 0  // byte offset in that line
 		matchCharEnd   = 10 // len("Challenges")
 	)
-	eventResp := postJSONWithDeviceID(t, http.DefaultClient, baseURL+"/v1/events", deviceID, appendEventRequest{
+	eventResp := postJSON(t, baseURL+"/v1/events", appendEventRequest{
 		NoteURN:   noteURN,
 		Sequence:  1,
 		AuthorURN: authorURN,
@@ -220,7 +211,7 @@ func TestBurstSearch_CreateNoteAndFind(t *testing.T) {
 		tc := tc // capture
 		t.Run(tc.name, func(t *testing.T) {
 			searchURL := fmt.Sprintf("%s/v1/context/bursts/search?q=%s", baseURL, tc.query)
-			searchReq, err := newGetRequestWithDeviceID(searchURL, deviceID)
+			searchReq, err := newGetRequest(searchURL)
 			if err != nil {
 				t.Fatalf("build search request: %v", err)
 			}
@@ -290,14 +281,7 @@ func TestBurstSearch_CreateNoteAndFind(t *testing.T) {
 	}
 }
 
-// newGetRequestWithDeviceID builds a GET *http.Request with an X-Device-ID header.
-func newGetRequestWithDeviceID(url, deviceID string) (*http.Request, error) {
-	req, err := http.NewRequest(http.MethodGet, url, nil) //nolint:noctx
-	if err != nil {
-		return nil, err
-	}
-	if deviceID != "" {
-		req.Header.Set("X-Device-ID", deviceID)
-	}
-	return req, nil
+// newGetRequest builds a GET *http.Request for the given URL.
+func newGetRequest(url string) (*http.Request, error) {
+	return http.NewRequest(http.MethodGet, url, nil) //nolint:noctx
 }

@@ -15,7 +15,7 @@ import (
 
 	"github.com/zebaqui/notx-engine/config"
 	"github.com/zebaqui/notx-engine/core"
-	grpcclient "github.com/zebaqui/notx-engine/internal/grpcclient"
+
 	"github.com/zebaqui/notx-engine/internal/server"
 	pb "github.com/zebaqui/notx-engine/proto"
 	"github.com/zebaqui/notx-engine/repo"
@@ -50,7 +50,6 @@ func startSQLiteServer(t *testing.T) (grpcAddr string, p *sqlite.Provider, stop 
 	cfg.EnableGRPC = true
 	cfg.HTTPPort = httpPort
 	cfg.GRPCPort = grpcPort
-	cfg.DeviceOnboarding.AutoApprove = true
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
 		Level: slog.LevelError,
@@ -60,14 +59,10 @@ func startSQLiteServer(t *testing.T) (grpcAddr string, p *sqlite.Provider, stop 
 		cfg,
 		provider, // NoteRepository
 		provider, // ProjectRepository
-		provider, // DeviceRepository
-		provider, // UserRepository
-		provider, // ServerRepository
-		provider, // PairingSecretStore
 		provider, // ContextRepository  ← enables ContextService
 		provider, // LinkRepository     ← enables LinkService
 		log,
-		nil, // busRepo — sync bus not needed in smoke tests
+		nil, // plugins — no snip plugins in smoke tests
 	)
 	if err != nil {
 		provider.Close()
@@ -105,15 +100,14 @@ func startSQLiteServer(t *testing.T) (grpcAddr string, p *sqlite.Provider, stop 
 
 // dialGRPC opens an insecure gRPC client connection to the given address and
 // registers a cleanup hook to close it when the test ends.
-func dialGRPC(t *testing.T, addr string) *grpcclient.Conn {
+func dialGRPC(t *testing.T, addr string) *grpc.ClientConn {
 	t.Helper()
 	cc, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		t.Fatalf("dialGRPC: %v", err)
 	}
-	conn := grpcclient.WrapConn(cc)
-	t.Cleanup(func() { conn.Close() })
-	return conn
+	t.Cleanup(func() { cc.Close() })
+	return cc
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -124,7 +118,7 @@ func dialGRPC(t *testing.T, addr string) *grpcclient.Conn {
 //   SQLite provider (burst extraction + BM25 scorer)
 //       → server.New (ContextService registered)
 //           → gRPC wire
-//               → grpcclient.Conn.Context() typed accessor
+//               → pb.NewContextServiceClient(conn)
 //                   → ContextService RPCs (ListBursts, ListCandidates,
 //                      GetCandidate, GetStats, DismissCandidate,
 //                      SetProjectConfig, GetProjectConfig)
@@ -150,9 +144,9 @@ func TestContextGRPC_ThreeNotes_BurstsAndCandidates(t *testing.T) {
 
 	ctx := context.Background()
 
-	notes := conn.Notes()
-	ctxSvc := conn.Context()
-	projects := conn.Projects()
+	notes := pb.NewNoteServiceClient(conn)
+	ctxSvc := pb.NewContextServiceClient(conn)
+	projects := pb.NewProjectServiceClient(conn)
 
 	// ── Shared identifiers ────────────────────────────────────────────────────
 
@@ -671,7 +665,7 @@ func TestContextGRPC_GetStats_Empty(t *testing.T) {
 	defer stop()
 
 	conn := dialGRPC(t, grpcAddr)
-	ctxSvc := conn.Context()
+	ctxSvc := pb.NewContextServiceClient(conn)
 
 	ctx := context.Background()
 
@@ -701,7 +695,7 @@ func TestContextGRPC_ListBursts_RequiresNoteURN(t *testing.T) {
 	defer stop()
 
 	conn := dialGRPC(t, grpcAddr)
-	ctxSvc := conn.Context()
+	ctxSvc := pb.NewContextServiceClient(conn)
 
 	_, err := ctxSvc.ListBursts(context.Background(), &pb.ListBurstsRequest{})
 	if err == nil {
@@ -724,7 +718,7 @@ func TestContextGRPC_GetBurst_NotFound(t *testing.T) {
 	defer stop()
 
 	conn := dialGRPC(t, grpcAddr)
-	ctxSvc := conn.Context()
+	ctxSvc := pb.NewContextServiceClient(conn)
 
 	_, err := ctxSvc.GetBurst(context.Background(), &pb.GetBurstRequest{
 		Id: "00000000-0000-7000-8000-000000000000",
@@ -751,7 +745,7 @@ func TestContextGRPC_SetProjectConfig_ResetToDefault(t *testing.T) {
 	defer stop()
 
 	conn := dialGRPC(t, grpcAddr)
-	ctxSvc := conn.Context()
+	ctxSvc := pb.NewContextServiceClient(conn)
 
 	ctx := context.Background()
 	const projURN = "urn:notx:proj:33333333-3333-7333-8333-333333333333"

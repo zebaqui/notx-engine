@@ -1,16 +1,18 @@
 package cli
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
-	"google.golang.org/protobuf/types/known/fieldmaskpb"
 
 	"github.com/zebaqui/notx-engine/internal/clientconfig"
-	"github.com/zebaqui/notx-engine/internal/grpcclient"
-	pb "github.com/zebaqui/notx-engine/proto"
 )
 
 var moveCmd = &cobra.Command{
@@ -69,76 +71,96 @@ func runMove(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("load config: %w", err)
 	}
 
-	grpcAddr := cfg.Client.GRPCAddr
-
-	dialOpts := grpcclient.Options{
-		Addr:     grpcAddr,
-		Insecure: cfg.Client.Insecure && !cfg.TLSEnabled(),
-	}
-	if cfg.TLSEnabled() {
-		dialOpts.CertFile = cfg.TLS.CertFile
-		dialOpts.KeyFile = cfg.TLS.KeyFile
-	}
-	if cfg.TLS.CAFile != "" {
-		dialOpts.CAFile = cfg.TLS.CAFile
-	}
-
-	conn, err := grpcclient.Dial(dialOpts)
-	if err != nil {
-		return fmt.Errorf("dial gRPC server at %s: %w", grpcAddr, err)
-	}
-	defer conn.Close()
+	base := resolveHTTPBase(cfg, "")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	notes := conn.Notes()
-
-	// Fetch the current note state so we can display the before/after project.
-	getResp, err := notes.GetNote(ctx, &pb.GetNoteRequest{Urn: noteURN})
+	// ── GET /v1/notes/{urn} — fetch current state ─────────────────────────────
+	getURL := fmt.Sprintf("%s/v1/notes/%s", base, percentEncodeURN(noteURN))
+	getReq, err := http.NewRequestWithContext(ctx, http.MethodGet, getURL, nil)
 	if err != nil {
-		return fmt.Errorf("fetch note: %w", err)
+		return fmt.Errorf("build GET request: %w", err)
 	}
 
-	oldProject := getResp.Header.GetProjectUrn()
+	getResp, err := http.DefaultClient.Do(getReq)
+	if err != nil {
+		return fmt.Errorf("GET %s: %w", getURL, err)
+	}
+	defer getResp.Body.Close()
+
+	getBody, _ := io.ReadAll(getResp.Body)
+	if getResp.StatusCode >= 400 {
+		return fmt.Errorf("fetch note (%d): %s", getResp.StatusCode, strings.TrimSpace(string(getBody)))
+	}
+
+	var noteState struct {
+		Header struct {
+			Name       string `json:"name"`
+			ProjectURN string `json:"project_urn"`
+		} `json:"header"`
+	}
+	if err := json.Unmarshal(getBody, &noteState); err != nil {
+		return fmt.Errorf("decode note response: %w", err)
+	}
+
+	oldProject := noteState.Header.ProjectURN
 	if oldProject == "" {
 		oldProject = "(none)"
 	}
 
 	clearing := moveFlags.projectURN == "CLEAR"
 
-	// Build the header and field mask.  We always include project_urn; we
-	// add folder_urn to the mask only when the flag was explicitly supplied.
-	header := &pb.NoteHeader{}
-	maskPaths := []string{"project_urn"}
-
+	// ── PATCH /v1/notes/{urn} — update project/folder ─────────────────────────
+	patchPayload := make(map[string]interface{})
 	if clearing {
-		header.ProjectUrn = ""
+		patchPayload["project_urn"] = ""
 	} else {
-		header.ProjectUrn = moveFlags.projectURN
+		patchPayload["project_urn"] = moveFlags.projectURN
 	}
-
 	if moveFlags.folderURN != "" {
-		header.FolderUrn = moveFlags.folderURN
-		maskPaths = append(maskPaths, "folder_urn")
+		patchPayload["folder_urn"] = moveFlags.folderURN
 	}
 
-	updateResp, err := notes.UpdateNote(ctx, &pb.UpdateNoteRequest{
-		Urn:        noteURN,
-		Header:     header,
-		UpdateMask: &fieldmaskpb.FieldMask{Paths: maskPaths},
-	})
+	patchBytes, err := json.Marshal(patchPayload)
 	if err != nil {
-		return fmt.Errorf("update note: %w", err)
+		return fmt.Errorf("marshal patch request: %w", err)
 	}
 
-	h := updateResp.GetHeader()
+	patchURL := fmt.Sprintf("%s/v1/notes/%s", base, percentEncodeURN(noteURN))
+	patchReq, err := http.NewRequestWithContext(ctx, http.MethodPatch, patchURL, bytes.NewReader(patchBytes))
+	if err != nil {
+		return fmt.Errorf("build PATCH request: %w", err)
+	}
+	patchReq.Header.Set("Content-Type", "application/json")
 
-	noteName := ""
-	if h != nil {
-		noteName = h.GetName()
+	patchResp, err := http.DefaultClient.Do(patchReq)
+	if err != nil {
+		return fmt.Errorf("PATCH %s: %w", patchURL, err)
+	}
+	defer patchResp.Body.Close()
+
+	patchBody, _ := io.ReadAll(patchResp.Body)
+	if patchResp.StatusCode >= 400 {
+		return fmt.Errorf("update note (%d): %s", patchResp.StatusCode, strings.TrimSpace(string(patchBody)))
 	}
 
+	var patchResult struct {
+		Header *struct {
+			Name string `json:"name"`
+		} `json:"header,omitempty"`
+		Name string `json:"name,omitempty"`
+	}
+	_ = json.Unmarshal(patchBody, &patchResult)
+
+	noteName := noteState.Header.Name
+	if patchResult.Header != nil && patchResult.Header.Name != "" {
+		noteName = patchResult.Header.Name
+	} else if patchResult.Name != "" {
+		noteName = patchResult.Name
+	}
+
+	// ── Success output ────────────────────────────────────────────────────────
 	fmt.Printf("\n  \033[1;32m✓\033[0m  Note moved\n")
 	fmt.Printf("     urn     : %s\n", noteURN)
 	fmt.Printf("     name    : %s\n", noteName)

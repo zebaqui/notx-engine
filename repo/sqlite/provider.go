@@ -8,17 +8,17 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
+
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
-	"golang.org/x/crypto/bcrypt"
+
 	_ "modernc.org/sqlite"
 
 	"github.com/zebaqui/notx-engine/core"
-	pairing "github.com/zebaqui/notx-engine/internal/pairing"
+
 	"github.com/zebaqui/notx-engine/repo"
 )
 
@@ -65,12 +65,6 @@ type writeRequest struct {
 // Provider
 // ─────────────────────────────────────────────────────────────────────────────
 
-// SyncNotifier is implemented by the real-time sync bus. Calling Notify
-// triggers an immediate push attempt for the given note URN.
-type SyncNotifier interface {
-	Notify(noteURN string)
-}
-
 // Provider is a SQLite-backed implementation of all repository interfaces.
 type Provider struct {
 	dataDir            string
@@ -85,161 +79,6 @@ type Provider struct {
 	inferenceCh        chan<- string      // channel to send note URNs for metadata inference
 	inferenceCtxCancel context.CancelFunc // cancels the inference runner goroutine
 	burstCfg           core.BurstConfig   // burst extraction config
-	syncBus            SyncNotifier       // optional real-time sync bus; may be nil
-}
-
-// SetSyncBus registers the real-time sync bus. Must be called before the first
-// AppendEvent call if immediate push-on-write is desired.
-func (p *Provider) SetSyncBus(bus SyncNotifier) {
-	p.syncBus = bus
-}
-
-// MarkSyncPending upserts a row into pending_sync for the given note URN.
-func (p *Provider) MarkSyncPending(noteURN string) error {
-	return p.write(func(db *sql.DB) error {
-		_, err := db.Exec(
-			`INSERT INTO pending_sync(note_urn, updated_at) VALUES(?, ?)
-			 ON CONFLICT(note_urn) DO UPDATE SET updated_at=excluded.updated_at`,
-			noteURN, toMs(time.Now()),
-		)
-		return err
-	})
-}
-
-// ClearSyncPending removes the pending_sync row for the given note URN.
-func (p *Provider) ClearSyncPending(noteURN string) error {
-	return p.write(func(db *sql.DB) error {
-		_, err := db.Exec(`DELETE FROM pending_sync WHERE note_urn=?`, noteURN)
-		return err
-	})
-}
-
-// ListSyncPending returns all note URNs that have pending sync rows.
-// ReceiveNote stores a note and its events received from the cloud.
-// It is a thin wrapper over ReceiveSharedNote and satisfies the BusRepo interface.
-func (p *Provider) ReceiveNote(ctx context.Context, note *core.Note, events []*core.Event) error {
-	return p.ReceiveSharedNote(ctx, note, events)
-}
-
-// AppendSyncLogEntry writes a completed sync operation to the sync_log table.
-// This satisfies repo.SyncRepository.
-func (p *Provider) AppendSyncLogEntry(entry repo.SyncLogEntry) error {
-	return p.write(func(db *sql.DB) error {
-		_, err := db.Exec(
-			`INSERT INTO sync_log(note_urn, direction, event_count, status, error, synced_at)
-			 VALUES(?, ?, ?, ?, ?, ?)`,
-			entry.NoteURN,
-			entry.Direction,
-			entry.EventCount,
-			entry.Status,
-			entry.Error,
-			toMs(entry.SyncedAt),
-		)
-		return err
-	})
-}
-
-// ListSyncLog returns paginated sync_log rows ordered by id DESC (newest first).
-// pageSize 0 defaults to 50, max 200.
-// pageToken is an opaque cursor (base64-encoded last-seen ID); pass "" for first page.
-// This satisfies repo.SyncRepository.
-func (p *Provider) ListSyncLog(pageSize int, pageToken string) ([]repo.SyncLogEntry, string, error) {
-	if pageSize <= 0 {
-		pageSize = 50
-	}
-	if pageSize > 200 {
-		pageSize = 200
-	}
-
-	var cursorID int64
-	if pageToken != "" {
-		decoded, err := base64.StdEncoding.DecodeString(pageToken)
-		if err == nil {
-			id, err2 := strconv.ParseInt(string(decoded), 10, 64)
-			if err2 == nil {
-				cursorID = id
-			}
-		}
-	}
-
-	var (
-		rows *sql.Rows
-		err  error
-	)
-	if cursorID == 0 {
-		rows, err = p.db.QueryContext(context.Background(),
-			`SELECT id, note_urn, direction, event_count, status, error, synced_at
-			 FROM sync_log
-			 ORDER BY id DESC
-			 LIMIT ?`,
-			pageSize+1,
-		)
-	} else {
-		rows, err = p.db.QueryContext(context.Background(),
-			`SELECT id, note_urn, direction, event_count, status, error, synced_at
-			 FROM sync_log
-			 WHERE id < ?
-			 ORDER BY id DESC
-			 LIMIT ?`,
-			cursorID, pageSize+1,
-		)
-	}
-	if err != nil {
-		return nil, "", fmt.Errorf("sqlite: list sync log: %w", err)
-	}
-	defer rows.Close()
-
-	var entries []repo.SyncLogEntry
-	for rows.Next() {
-		var e repo.SyncLogEntry
-		var syncedAtMs int64
-		if err := rows.Scan(&e.ID, &e.NoteURN, &e.Direction, &e.EventCount, &e.Status, &e.Error, &syncedAtMs); err != nil {
-			return nil, "", fmt.Errorf("sqlite: scan sync log: %w", err)
-		}
-		e.SyncedAt = fromMs(syncedAtMs)
-		entries = append(entries, e)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, "", err
-	}
-
-	var nextToken string
-	if len(entries) > pageSize {
-		last := entries[pageSize-1]
-		entries = entries[:pageSize]
-		nextToken = base64.StdEncoding.EncodeToString([]byte(strconv.FormatInt(last.ID, 10)))
-	}
-
-	return entries, nextToken, nil
-}
-
-// SyncLogCount returns the total number of sync_log rows.
-// This satisfies repo.SyncRepository.
-func (p *Provider) SyncLogCount() (int, error) {
-	var count int
-	err := p.db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM sync_log`).Scan(&count)
-	if err != nil {
-		return 0, fmt.Errorf("sqlite: sync log count: %w", err)
-	}
-	return count, nil
-}
-
-func (p *Provider) ListSyncPending() ([]string, error) {
-	rows, err := p.db.QueryContext(context.Background(),
-		`SELECT note_urn FROM pending_sync ORDER BY updated_at ASC`)
-	if err != nil {
-		return nil, fmt.Errorf("sqlite: list pending sync: %w", err)
-	}
-	defer rows.Close()
-	var urns []string
-	for rows.Next() {
-		var urn string
-		if err := rows.Scan(&urn); err != nil {
-			return nil, fmt.Errorf("sqlite: scan pending sync: %w", err)
-		}
-		urns = append(urns, urn)
-	}
-	return urns, rows.Err()
 }
 
 // New opens (or creates) the SQLite index and starts the writer goroutine.
@@ -278,6 +117,10 @@ func New(dataDir string, rebuild func(ctx context.Context, notesDir string, db *
 }
 
 // Close shuts down the writer goroutine and closes the database connection.
+// DB returns the underlying SQLite database handle. Used by snip plugins
+// to run their own migrations and per-type index queries.
+func (p *Provider) DB() *sql.DB { return p.db }
+
 func (p *Provider) Close() error {
 	p.closeOnce.Do(func() {
 		if p.scorerCtxCancel != nil {
@@ -455,12 +298,17 @@ func (p *Provider) Create(ctx context.Context, note *core.Note) error {
 	if note.FolderURN != nil {
 		folderURN = note.FolderURN.String()
 	}
+	parentURN := ""
+	if note.ParentURN != nil {
+		parentURN = note.ParentURN.String()
+	}
 	return p.write(func(db *sql.DB) error {
 		_, err := db.Exec(
-			`INSERT INTO notes(urn, project_urn, folder_urn, note_type, title, preview, head_seq, deleted, created_at, updated_at)
-			 VALUES(?, ?, ?, ?, ?, '', 0, 0, ?, ?)`,
+			`INSERT INTO notes(urn, project_urn, folder_urn, note_type, title, preview, head_seq, deleted, created_at, updated_at, snip_type, parent_anchor, parent_urn)
+			 VALUES(?, ?, ?, ?, ?, '', 0, 0, ?, ?, ?, ?, ?)`,
 			urn, projectURN, folderURN, note.NoteType.String(), note.Name,
 			toMs(note.CreatedAt), toMs(note.UpdatedAt),
+			nilableString(note.SnipType), nilableString(note.ParentAnchor), parentURN,
 		)
 		if err != nil {
 			if isSQLiteConstraintUnique(err) {
@@ -486,7 +334,8 @@ func (p *Provider) Get(ctx context.Context, urn string) (*core.Note, error) {
 	row := p.db.QueryRowContext(ctx,
 		`SELECT n.urn, n.project_urn, n.folder_urn, n.note_type, n.title,
 		        COALESCE(nc.content, '') AS content, n.head_seq, n.deleted,
-		        n.created_at, n.updated_at
+		        n.created_at, n.updated_at,
+		        COALESCE(n.snip_type, ''), COALESCE(n.parent_anchor, ''), COALESCE(n.parent_urn, '')
 		 FROM notes n LEFT JOIN note_content nc ON nc.urn = n.urn
 		 WHERE n.urn = ?`, urn)
 	return scanNote(row)
@@ -497,19 +346,22 @@ func scanNote(row *sql.Row) (*core.Note, error) {
 	var headSeq int
 	var deleted bool
 	var createdAtMs, updatedAtMs int64
+	var snipType, parentAnchor, parentURN string
 	if err := row.Scan(&urnStr, &projectURNStr, &folderURNStr, &noteTypeStr, &title,
-		&content, &headSeq, &deleted, &createdAtMs, &updatedAtMs); err != nil {
+		&content, &headSeq, &deleted, &createdAtMs, &updatedAtMs,
+		&snipType, &parentAnchor, &parentURN); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, repo.ErrNotFound
 		}
 		return nil, fmt.Errorf("sqlite: scan note: %w", err)
 	}
 	return buildNote(urnStr, projectURNStr, folderURNStr, noteTypeStr, title, content,
-		headSeq, deleted, createdAtMs, updatedAtMs)
+		headSeq, deleted, createdAtMs, updatedAtMs, snipType, parentAnchor, parentURN)
 }
 
 func buildNote(urnStr, projectURNStr, folderURNStr, noteTypeStr, title, content string,
-	headSeq int, deleted bool, createdAtMs, updatedAtMs int64) (*core.Note, error) {
+	headSeq int, deleted bool, createdAtMs, updatedAtMs int64,
+	snipType, parentAnchor, parentURN string) (*core.Note, error) {
 	noteURN, err := core.ParseURN(urnStr)
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: parse note URN %q: %w", urnStr, err)
@@ -539,6 +391,20 @@ func buildNote(urnStr, projectURNStr, folderURNStr, noteTypeStr, title, content 
 			note.FolderURN = &u
 		}
 	}
+	if snipType != "" {
+		s := snipType
+		note.SnipType = &s
+	}
+	if parentAnchor != "" {
+		a := parentAnchor
+		note.ParentAnchor = &a
+	}
+	if parentURN != "" {
+		u, err := core.ParseURN(parentURN)
+		if err == nil {
+			note.ParentURN = &u
+		}
+	}
 	_ = headSeq
 	return note, nil
 }
@@ -546,6 +412,18 @@ func buildNote(urnStr, projectURNStr, folderURNStr, noteTypeStr, title, content 
 // ─────────────────────────────────────────────────────────────────────────────
 // NoteRepository — List
 // ─────────────────────────────────────────────────────────────────────────────
+
+// ListSnips returns a paginated list of snip-typed notes matching opts.
+func (p *Provider) ListSnips(ctx context.Context, opts repo.ListSnipsOptions) (*repo.ListResult, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	notes, nextToken, err := querySnips(ctx, p.db, opts)
+	if err != nil {
+		return nil, err
+	}
+	return &repo.ListResult{Notes: notes, NextPageToken: nextToken}, nil
+}
 
 func (p *Provider) List(ctx context.Context, opts repo.ListOptions) (*repo.ListResult, error) {
 	if err := ctx.Err(); err != nil {
@@ -728,9 +606,7 @@ func (p *Provider) AppendEvent(ctx context.Context, event *core.Event, opts repo
 	if err != nil {
 		return err
 	}
-	if p.syncBus != nil {
-		p.syncBus.Notify(noteURN)
-	}
+
 	return nil
 }
 
@@ -1063,107 +939,6 @@ func (p *Provider) Events(ctx context.Context, noteURN string, fromSequence int)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// NoteRepository — UpdateEventWrappedKeys
-// ─────────────────────────────────────────────────────────────────────────────
-
-func (p *Provider) UpdateEventWrappedKeys(ctx context.Context, noteURN string, wrappedKeys map[string][]byte) (int, error) {
-	if err := ctx.Err(); err != nil {
-		return 0, err
-	}
-	// Wrapped keys require a dedicated event_wrapped_keys table not yet in the
-	// schema. Return 0 updated keys for now.
-	return 0, nil
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// NoteRepository — ReceiveSharedNote
-// ─────────────────────────────────────────────────────────────────────────────
-
-func (p *Provider) ReceiveSharedNote(ctx context.Context, note *core.Note, events []*core.Event) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	noteURN := note.URN.String()
-	projectURN := ""
-	if note.ProjectURN != nil {
-		projectURN = note.ProjectURN.String()
-	}
-	folderURN := ""
-	if note.FolderURN != nil {
-		folderURN = note.FolderURN.String()
-	}
-	return p.write(func(db *sql.DB) error {
-		_, err := db.Exec(
-			`INSERT INTO notes(urn, project_urn, folder_urn, note_type, title, preview, head_seq, deleted, created_at, updated_at)
-			 VALUES(?, ?, ?, ?, ?, '', 0, ?, ?, ?)
-			 ON CONFLICT(urn) DO UPDATE SET
-			 	project_urn=excluded.project_urn,
-			 	folder_urn=excluded.folder_urn,
-			 	title=excluded.title,
-			 	deleted=excluded.deleted,
-			 	updated_at=excluded.updated_at`,
-			noteURN, projectURN, folderURN, note.NoteType.String(), note.Name,
-			boolToInt(note.Deleted), toMs(note.CreatedAt), toMs(note.UpdatedAt),
-		)
-		if err != nil {
-			return fmt.Errorf("sqlite: receive shared note upsert: %w", err)
-		}
-		if note.NoteType == core.NoteTypeNormal {
-			_, _ = db.Exec(`INSERT OR IGNORE INTO note_content(urn, content) VALUES(?, '')`, noteURN)
-		}
-
-		var headSeq int
-		var noteTypeStr string
-		_ = db.QueryRow(`SELECT head_seq, note_type FROM notes WHERE urn=?`, noteURN).
-			Scan(&headSeq, &noteTypeStr)
-		noteType, _ := core.ParseNoteType(noteTypeStr)
-
-		var content string
-		if noteType == core.NoteTypeNormal {
-			_ = db.QueryRow(`SELECT content FROM note_content WHERE urn=?`, noteURN).Scan(&content)
-		}
-
-		for _, ev := range events {
-			if ev.Sequence <= headSeq {
-				continue
-			}
-			payloadJSON, _ := json.Marshal(ev.Entries)
-			authorURN := ev.AuthorURN.String()
-			evURNStr := ev.URN.String()
-			if evURNStr == "" || evURNStr == (core.URN{}).String() {
-				ev.URN = core.NewURN(core.ObjectTypeEvent)
-				evURNStr = ev.URN.String()
-			}
-			_, err = db.Exec(
-				`INSERT OR IGNORE INTO events(urn, note_urn, sequence, author_urn, label, payload, created_at)
-				 VALUES(?, ?, ?, ?, ?, ?, ?)`,
-				evURNStr, noteURN, ev.Sequence, authorURN, ev.Label, string(payloadJSON), toMs(ev.CreatedAt),
-			)
-			if err != nil {
-				return fmt.Errorf("sqlite: receive shared note insert event: %w", err)
-			}
-			if noteType == core.NoteTypeNormal {
-				content = applyEntriesToContent(content, ev.Entries)
-			}
-			headSeq = ev.Sequence
-		}
-
-		if noteType == core.NoteTypeNormal {
-			_, err = db.Exec(
-				`INSERT INTO note_content(urn, content) VALUES(?, ?)
-				 ON CONFLICT(urn) DO UPDATE SET content=excluded.content`,
-				noteURN, content,
-			)
-			if err != nil {
-				return fmt.Errorf("sqlite: receive shared note update content: %w", err)
-			}
-		}
-		_, err = db.Exec(`UPDATE notes SET head_seq=? WHERE urn=?`, headSeq, noteURN)
-		return err
-	})
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 // NoteRepository — Search
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -1334,346 +1109,17 @@ func (p *Provider) DeleteFolder(ctx context.Context, urn string) error {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// DeviceRepository
-// ─────────────────────────────────────────────────────────────────────────────
-
-func (p *Provider) RegisterDevice(ctx context.Context, d *core.Device) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	urn := d.URN.String()
-	ownerURN := d.OwnerURN.String()
-	return p.write(func(db *sql.DB) error {
-		_, err := db.Exec(
-			`INSERT INTO devices(urn, name, owner_urn, public_key_b64, role, approval_status, revoked, registered_at, last_seen_at)
-			 VALUES(?, ?, ?, ?, ?, ?, 0, ?, 0)`,
-			urn, d.Name, ownerURN, d.PublicKeyB64, string(d.Role), string(d.ApprovalStatus),
-			toMs(d.RegisteredAt),
-		)
-		if err != nil {
-			if isSQLiteConstraintUnique(err) {
-				return fmt.Errorf("%w: %s", repo.ErrAlreadyExists, urn)
-			}
-			return fmt.Errorf("sqlite: register device: %w", err)
-		}
-		return nil
-	})
-}
-
-func (p *Provider) GetDevice(ctx context.Context, urn string) (*core.Device, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	return queryDevice(ctx, p.db, urn)
-}
-
-func (p *Provider) ListDevices(ctx context.Context, opts repo.DeviceListOptions) (*repo.DeviceListResult, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	return queryDevices(ctx, p.db, opts)
-}
-
-func (p *Provider) UpdateDevice(ctx context.Context, d *core.Device) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	urn := d.URN.String()
-	return p.write(func(db *sql.DB) error {
-		res, err := db.Exec(
-			`UPDATE devices SET name=?, approval_status=?, revoked=?, last_seen_at=? WHERE urn=?`,
-			d.Name, string(d.ApprovalStatus), boolToInt(d.Revoked), toMs(d.LastSeenAt), urn,
-		)
-		if err != nil {
-			return fmt.Errorf("sqlite: update device: %w", err)
-		}
-		n, _ := res.RowsAffected()
-		if n == 0 {
-			return fmt.Errorf("%w: %s", repo.ErrNotFound, urn)
-		}
-		return nil
-	})
-}
-
-func (p *Provider) RevokeDevice(ctx context.Context, urn string) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	return p.write(func(db *sql.DB) error {
-		res, err := db.Exec(`UPDATE devices SET revoked=1 WHERE urn=?`, urn)
-		if err != nil {
-			return fmt.Errorf("sqlite: revoke device: %w", err)
-		}
-		n, _ := res.RowsAffected()
-		if n == 0 {
-			return fmt.Errorf("%w: %s", repo.ErrNotFound, urn)
-		}
-		return nil
-	})
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// UserRepository
-// ─────────────────────────────────────────────────────────────────────────────
-
-func (p *Provider) CreateUser(ctx context.Context, u *core.User) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	urn := u.URN.String()
-	return p.write(func(db *sql.DB) error {
-		_, err := db.Exec(
-			`INSERT INTO users(urn, display_name, email, deleted, created_at, updated_at) VALUES(?, ?, ?, 0, ?, ?)`,
-			urn, u.DisplayName, u.Email, toMs(u.CreatedAt), toMs(u.UpdatedAt),
-		)
-		if err != nil {
-			if isSQLiteConstraintUnique(err) {
-				return fmt.Errorf("%w: %s", repo.ErrAlreadyExists, urn)
-			}
-			return fmt.Errorf("sqlite: create user: %w", err)
-		}
-		return nil
-	})
-}
-
-func (p *Provider) GetUser(ctx context.Context, urn string) (*core.User, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	return queryUser(ctx, p.db, urn)
-}
-
-func (p *Provider) ListUsers(ctx context.Context, opts repo.UserListOptions) (*repo.UserListResult, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	return queryUsers(ctx, p.db, opts)
-}
-
-func (p *Provider) UpdateUser(ctx context.Context, u *core.User) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	urn := u.URN.String()
-	return p.write(func(db *sql.DB) error {
-		res, err := db.Exec(
-			`UPDATE users SET display_name=?, email=?, deleted=?, updated_at=? WHERE urn=?`,
-			u.DisplayName, u.Email, boolToInt(u.Deleted), toMs(u.UpdatedAt), urn,
-		)
-		if err != nil {
-			return fmt.Errorf("sqlite: update user: %w", err)
-		}
-		n, _ := res.RowsAffected()
-		if n == 0 {
-			return fmt.Errorf("%w: %s", repo.ErrNotFound, urn)
-		}
-		return nil
-	})
-}
-
-func (p *Provider) DeleteUser(ctx context.Context, urn string) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	return p.write(func(db *sql.DB) error {
-		res, err := db.Exec(
-			`UPDATE users SET deleted=1, updated_at=? WHERE urn=?`,
-			toMs(time.Now().UTC()), urn,
-		)
-		if err != nil {
-			return fmt.Errorf("sqlite: delete user: %w", err)
-		}
-		n, _ := res.RowsAffected()
-		if n == 0 {
-			return fmt.Errorf("%w: %s", repo.ErrNotFound, urn)
-		}
-		return nil
-	})
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// ServerRepository
-// ─────────────────────────────────────────────────────────────────────────────
-
-func (p *Provider) RegisterServer(ctx context.Context, s *core.Server) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	urn := s.URN.String()
-	return p.write(func(db *sql.DB) error {
-		_, err := db.Exec(
-			`INSERT INTO servers(urn, name, endpoint, cert_pem, cert_serial, revoked, registered_at, expires_at, last_seen_at)
-			 VALUES(?, ?, ?, ?, ?, 0, ?, ?, 0)`,
-			urn, s.Name, s.Endpoint, string(s.CertPEM), s.CertSerial,
-			toMs(s.RegisteredAt), toMs(s.ExpiresAt),
-		)
-		if err != nil {
-			if isSQLiteConstraintUnique(err) {
-				return fmt.Errorf("%w: %s", repo.ErrAlreadyExists, urn)
-			}
-			return fmt.Errorf("sqlite: register server: %w", err)
-		}
-		return nil
-	})
-}
-
-func (p *Provider) GetServer(ctx context.Context, urn string) (*core.Server, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	return queryServer(ctx, p.db, urn)
-}
-
-func (p *Provider) ListServers(ctx context.Context, opts repo.ServerListOptions) (*repo.ServerListResult, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	return queryServers(ctx, p.db, opts)
-}
-
-func (p *Provider) UpdateServer(ctx context.Context, s *core.Server) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	urn := s.URN.String()
-	return p.write(func(db *sql.DB) error {
-		res, err := db.Exec(
-			`UPDATE servers SET name=?, endpoint=?, cert_pem=?, cert_serial=?, last_seen_at=? WHERE urn=?`,
-			s.Name, s.Endpoint, string(s.CertPEM), s.CertSerial, toMs(s.LastSeenAt), urn,
-		)
-		if err != nil {
-			return fmt.Errorf("sqlite: update server: %w", err)
-		}
-		n, _ := res.RowsAffected()
-		if n == 0 {
-			return fmt.Errorf("%w: %s", repo.ErrNotFound, urn)
-		}
-		return nil
-	})
-}
-
-func (p *Provider) RevokeServer(ctx context.Context, urn string) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	return p.write(func(db *sql.DB) error {
-		res, err := db.Exec(`UPDATE servers SET revoked=1 WHERE urn=?`, urn)
-		if err != nil {
-			return fmt.Errorf("sqlite: revoke server: %w", err)
-		}
-		n, _ := res.RowsAffected()
-		if n == 0 {
-			return fmt.Errorf("%w: %s", repo.ErrNotFound, urn)
-		}
-		return nil
-	})
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// PairingSecretStore
-// ─────────────────────────────────────────────────────────────────────────────
-
-func (p *Provider) AddSecret(ctx context.Context, s *repo.PairingSecret) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	return p.write(func(db *sql.DB) error {
-		_, err := db.Exec(
-			`INSERT INTO pairing_secrets(id, label, hash_bcrypt, expires_at) VALUES(?, ?, ?, ?)`,
-			s.ID, s.LabelHint, s.HashBcrypt, toMs(s.ExpiresAt),
-		)
-		if err != nil {
-			return fmt.Errorf("sqlite: add pairing secret: %w", err)
-		}
-		return nil
-	})
-}
-
-func (p *Provider) ConsumeSecret(ctx context.Context, plaintext string) (*repo.PairingSecret, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-
-	// O(1) lookup: extract the ID from the token instead of scanning the table.
-	id, ok := pairing.ExtractSecretID(plaintext)
-	if !ok {
-		return nil, fmt.Errorf("%w: malformed pairing secret token", repo.ErrNotFound)
-	}
-
-	now := time.Now().UTC()
-	nowMs := toMs(now)
-
-	// Single-row primary key read — no table scan.
-	var label, hashBcrypt string
-	var expiresMs int64
-	err := p.db.QueryRowContext(ctx,
-		`SELECT label, hash_bcrypt, expires_at FROM pairing_secrets
-		 WHERE id = ? AND used_at IS NULL AND expires_at > ?`,
-		id, nowMs,
-	).Scan(&label, &hashBcrypt, &expiresMs)
-	if err == sql.ErrNoRows {
-		return nil, fmt.Errorf("%w: pairing secret not found or expired", repo.ErrNotFound)
-	}
-	if err != nil {
-		return nil, fmt.Errorf("sqlite: query pairing secret: %w", err)
-	}
-
-	// One bcrypt call, not N.
-	if err := bcrypt.CompareHashAndPassword([]byte(hashBcrypt), []byte(plaintext)); err != nil {
-		return nil, fmt.Errorf("%w: pairing secret invalid", repo.ErrNotFound)
-	}
-
-	// Write the used_at timestamp via the serialised write channel.
-	var rowsAffected int64
-	if err := p.write(func(db *sql.DB) error {
-		res, err := db.Exec(
-			`UPDATE pairing_secrets SET used_at=? WHERE id=? AND used_at IS NULL`,
-			nowMs, id,
-		)
-		if err != nil {
-			return fmt.Errorf("sqlite: mark pairing secret used: %w", err)
-		}
-		rowsAffected, err = res.RowsAffected()
-		return err
-	}); err != nil {
-		return nil, err
-	}
-
-	// If another concurrent request already consumed this secret, rowsAffected
-	// will be 0 — treat it as not found.
-	if rowsAffected == 0 {
-		return nil, fmt.Errorf("%w: pairing secret already used", repo.ErrNotFound)
-	}
-
-	expiresAt := fromMs(expiresMs)
-	return &repo.PairingSecret{
-		ID:         id,
-		LabelHint:  label,
-		HashBcrypt: hashBcrypt,
-		ExpiresAt:  expiresAt,
-		UsedAt:     &now,
-	}, nil
-}
-
-func (p *Provider) PruneExpired(ctx context.Context) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	return p.write(func(db *sql.DB) error {
-		_, err := db.Exec(
-			`DELETE FROM pairing_secrets WHERE expires_at <= ?`,
-			toMs(time.Now().UTC()),
-		)
-		if err != nil {
-			return fmt.Errorf("sqlite: prune expired secrets: %w", err)
-		}
-		return nil
-	})
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 // Utility helpers
 // ─────────────────────────────────────────────────────────────────────────────
+
+// nilableString converts a *string to an interface{} suitable for a nullable
+// SQL TEXT column: nil pointer → NULL, non-nil → the string value.
+func nilableString(s *string) interface{} {
+	if s == nil {
+		return nil
+	}
+	return *s
+}
 
 func boolToInt(b bool) int {
 	if b {

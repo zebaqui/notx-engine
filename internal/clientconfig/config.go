@@ -215,7 +215,7 @@ func Default() *Config {
 //	notx:device:<uuidv4>
 //	notx:usr:<uuidv4>
 func generateAdminURNs() (deviceURN, ownerURN string) {
-	deviceURN = core.NewURN(core.ObjectTypeDevice).String()
+	deviceURN = core.NewURN(core.ObjectType("device")).String()
 	ownerURN = core.NewURN(core.ObjectTypeUser).String()
 	return deviceURN, ownerURN
 }

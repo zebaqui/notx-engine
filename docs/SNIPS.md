@@ -493,6 +493,15 @@ func (s *NoteService) dispatchSnipHook(ctx context.Context, note *core.Note, eve
 Plugin hooks that return errors are logged but **never fail the write**. The note/snip is
 always persisted; the plugin index update is best-effort and self-healing on next startup.
 
+**Todo plugin hook behavior:**
+
+- `OnNoteCreated` (sequence = 1): the todo plugin performs a **full checkbox scan** of the
+  note content via `syncCheckboxes`, seeding the index with one row per checkbox found.
+  Each new row gets `status: backlog`.
+- `OnEventAppended` (sequence > 1): the todo plugin performs **surgical index updates** via
+  `applyEventToIndex`, walking `event.Entries` directly rather than rescanning the full
+  content. Each entry type maps to a targeted SQL operation (see §8.2 for details).
+
 ### 6.5 Engine Wiring in `server.go`
 
 ```go
@@ -580,6 +589,16 @@ CREATE INDEX notes_parent_anchor ON notes(parent_anchor) WHERE parent_anchor IS 
 Each plugin creates its own type-specific index table in its `Init` migration. These tables
 hold promoted body fields as real columns, enabling efficient board and stats queries without
 touching the event stream.
+
+> **Cloud/Postgres deployment note:** In the cloud (Postgres) deployment, plugin index tables
+> are owned by the platform migration system (e.g. migration 032 for `engine_snips_todo`),
+> not created by the plugin at runtime. `Init` is a no-op in that environment — it stores the
+> `PluginEnv` and returns immediately without executing any DDL.
+>
+> The Postgres todo table uses `(namespace, note_urn, text)` as its composite primary key,
+> where `text` is the checkbox label and is the **stable identity** of a todo item. The
+> `line_number` column is a mutable sort column updated on every shift operation — it is
+> **not** part of the primary key and must not be used as a stable identifier.
 
 ```sql
 -- Created by TodoPlugin.Init
@@ -697,8 +716,13 @@ SnipSchema{
 
 ### 8.2 Scanner
 
-Runs as a background goroutine started in `TodoPlugin.Start`. Uses `PluginEnv.NoteRepo`
-for all reads and writes:
+The todo plugin indexes checkboxes through two distinct code paths depending on whether a
+note is being created for the first time or an event is being appended to an existing note.
+
+#### Initial scan (`OnNoteCreated`)
+
+Triggered when a new note is created (sequence = 1). The plugin calls `syncCheckboxes`,
+which performs a full parse of the note content:
 
 1. Walks all `.notx` project files in configured directories using `NoteRepo.ListNotes`
 2. For each `- [ ]` / `- [x]` line found:
@@ -712,6 +736,31 @@ for all reads and writes:
 3. For todos that have disappeared: appends a soft-delete event
 4. `fsnotify` watcher triggers immediate re-scan of changed files
 5. Full re-scan on a configurable interval (default: 5 minutes)
+
+#### Incremental updates (`OnEventAppended`)
+
+Triggered on every subsequent event (sequence > 1). Instead of rescanning the full note
+content, the plugin calls `applyEventToIndex`, which walks `event.Entries` in order and
+applies targeted SQL for each entry:
+
+| Entry type                     | Content type        | SQL operations                                                                                           |
+| ------------------------------ | ------------------- | -------------------------------------------------------------------------------------------------------- |
+| `LineOpInsert`                 | checkbox line       | Shift all rows with `line_number >= N` down by 1, then INSERT a new todo row at N with `status: backlog` |
+| `LineOpInsert`                 | plain text          | Shift all rows with `line_number >= N` down by 1 only (no new todo row)                                  |
+| `LineOpDelete`                 | any                 | DELETE the todo row at line N (if any), then shift all rows with `line_number > N` up by 1               |
+| `LineOpSet` / `LineOpSetEmpty` | checkbox → checkbox | UPDATE `text` and `checkbox_state` for the row at line N; `status` is preserved                          |
+| `LineOpSet` / `LineOpSetEmpty` | checkbox → plain    | DELETE the todo row at line N                                                                            |
+| `LineOpSet` / `LineOpSetEmpty` | plain → checkbox    | INSERT a new todo row at line N with `status: backlog`                                                   |
+| `LineOpSet` / `LineOpSetEmpty` | plain → plain       | No-op (no index row exists or is affected)                                                               |
+
+The offset counter from streaming semantics applies here too: each entry's effective line
+number is `entry.LineNumber + offset`, where `offset` starts at 0 and is incremented by
+`LineOpInsert` (+1) and decremented by `LineOpDelete` (-1) as entries are processed.
+
+> **Important:** `status` (`backlog` / `doing` / `done`) is **never modified by scanner
+> operations** — only the initial INSERT seeds it as `backlog`. All subsequent scanner
+> updates preserve the current status. This ensures that board moves made by the user are
+> never overwritten by a content scan.
 
 ### 8.3 gRPC Service
 

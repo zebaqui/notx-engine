@@ -3,9 +3,9 @@ package cli
 import (
 	"bufio"
 	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -13,19 +13,15 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
-	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/zebaqui/notx-engine/core"
 	"github.com/zebaqui/notx-engine/internal/clientconfig"
-	"github.com/zebaqui/notx-engine/internal/cloud"
-	"github.com/zebaqui/notx-engine/internal/grpcclient"
-	pb "github.com/zebaqui/notx-engine/proto"
 )
 
 var addNoteCmd = &cobra.Command{
 	Use:   "add [file]",
 	Short: "Create a new note from a file, or update an existing one",
-	Long: `Create a new note by sending it to the running notx gRPC server,
+	Long: `Create a new note by sending it to the running notx HTTP server,
 or update an existing note's content when --urn is provided.
 
 When --urn is given the file content is diffed against the note's current
@@ -33,7 +29,7 @@ state on the server. Only changed lines are written as a new event — the
 full document is never re-stored verbatim.
 
 The note name is derived from the file's base name (without extension).
-The server address is read from ~/.notx/config.json (client.grpc_addr).
+The server address is read from ~/.notx/config.json (server.http_addr).
 Override it for a single invocation with --addr.
 
 Examples:
@@ -47,14 +43,14 @@ Examples:
   notx add secrets.txt --secure -d
 
   # Point at a non-default server for this invocation
-  notx add todo.md --addr localhost:9000
+  notx add todo.md --addr http://localhost:7430
 `,
 	Args: cobra.ExactArgs(1),
 	RunE: runAddNote,
 }
 
 var addNoteFlags struct {
-	addr       string // override client.grpc_addr for this invocation
+	addr       string // override HTTP server address for this invocation
 	urn        string // when set, update an existing note instead of creating
 	delete     bool
 	secure     bool
@@ -65,7 +61,7 @@ var addNoteFlags struct {
 func init() {
 	f := addNoteCmd.Flags()
 	f.StringVar(&addNoteFlags.addr, "addr", "",
-		"gRPC server address to dial (overrides config client.grpc_addr)")
+		"HTTP server address to dial (overrides config server.http_addr)")
 	f.StringVar(&addNoteFlags.urn, "urn", "",
 		"URN of an existing note to update (skips creation, diffs and appends an event)")
 	f.BoolVarP(&addNoteFlags.delete, "delete", "d", false,
@@ -131,12 +127,6 @@ func runAddNote(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("load config: %w", err)
 	}
 
-	// ── Load client.json to determine connection mode ─────────────────────────
-	clientJSON, err := clientconfig.LoadClientJSON()
-	if err != nil {
-		return fmt.Errorf("load client.json: %w", err)
-	}
-
 	// ── Derive note name from filename ────────────────────────────────────────
 	base := filepath.Base(absPath)
 	ext := filepath.Ext(base)
@@ -147,278 +137,142 @@ func runAddNote(cmd *cobra.Command, args []string) error {
 
 	lines := splitContentLines(content)
 
-	// ── Dispatch based on connection mode ────────────────────────────────────
-	switch clientJSON.Settings.Source {
-	case "cloud":
-		return runAddNoteCloud(cmd, args, clientJSON, absPath, content, noteName, lines)
-	case "remote":
-		// Remote mode: honour remoteUrl from client.json when --addr is not
-		// explicitly set. The grpcPort in client.json takes precedence over
-		// whatever is stored in config.json.
-		if addNoteFlags.addr == "" && clientJSON.Settings.RemoteURL != "" {
-			// Strip scheme to get host, then append the gRPC port.
-			host := clientJSON.Settings.RemoteURL
-			host = strings.TrimPrefix(host, "http://")
-			host = strings.TrimPrefix(host, "https://")
-			// Strip any existing port or path.
-			if idx := strings.Index(host, "/"); idx != -1 {
-				host = host[:idx]
-			}
-			if idx := strings.LastIndex(host, ":"); idx != -1 {
-				host = host[:idx]
-			}
-			if clientJSON.Settings.GRPCPort > 0 {
-				cfg.Client.GRPCAddr = fmt.Sprintf("%s:%d", host, clientJSON.Settings.GRPCPort)
-			}
-		}
-	}
-
 	// ── If --urn is set, push a content update via HTTP ───────────────────────
 	if addNoteFlags.urn != "" {
 		return runUpdateContent(absPath, addNoteFlags.urn, content, cfg)
 	}
 
-	// --addr flag overrides the config value for this invocation.
-	grpcAddr := cfg.Client.GRPCAddr
-	if addNoteFlags.addr != "" {
-		grpcAddr = addNoteFlags.addr
-	}
+	// ── Resolve the HTTP base URL ─────────────────────────────────────────────
+	httpAddr := resolveHTTPBase(cfg, addNoteFlags.addr)
 
-	// ── Dial the gRPC server ──────────────────────────────────────────────────
-	dialOpts := grpcclient.Options{
-		Addr:     grpcAddr,
-		Insecure: cfg.Client.Insecure && !cfg.TLSEnabled(),
-	}
-	if cfg.TLSEnabled() {
-		dialOpts.CertFile = cfg.TLS.CertFile
-		dialOpts.KeyFile = cfg.TLS.KeyFile
-	}
-	if cfg.TLS.CAFile != "" {
-		dialOpts.CAFile = cfg.TLS.CAFile
-	}
-
-	conn, err := grpcclient.Dial(dialOpts)
-	if err != nil {
-		return fmt.Errorf("dial gRPC server at %s: %w", grpcAddr, err)
-	}
-	defer conn.Close()
-
-	client := conn.Notes()
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	// ── Build and send CreateNote ─────────────────────────────────────────────
+	// ── Derive note URN and type ──────────────────────────────────────────────
 	noteURNStr := core.NewURN(core.ObjectTypeNote).String()
 
-	noteType := pb.NoteType_NOTE_TYPE_NORMAL
-	if addNoteFlags.secure {
-		noteType = pb.NoteType_NOTE_TYPE_SECURE
-	}
-
-	now := timestamppb.Now()
-
-	createResp, err := client.CreateNote(ctx, &pb.CreateNoteRequest{
-		Header: &pb.NoteHeader{
-			Urn:        noteURNStr,
-			Name:       noteName,
-			NoteType:   noteType,
-			ProjectUrn: addNoteFlags.projectURN,
-			FolderUrn:  addNoteFlags.folderURN,
-			CreatedAt:  now,
-			UpdatedAt:  now,
-		},
-	})
-	if err != nil {
-		return fmt.Errorf("create note on server: %w", err)
-	}
-
-	// ── Append initial content event (only for non-empty files) ───────────────
-	if len(lines) > 0 {
-		entries := make([]*pb.LineEntry, 0, len(lines))
-		for i, line := range lines {
-			lineNum := int32(i + 1)
-			if line == "" {
-				entries = append(entries, &pb.LineEntry{
-					Op:         1, // LineOpSetEmpty
-					LineNumber: lineNum,
-				})
-			} else {
-				entries = append(entries, &pb.LineEntry{
-					Op:         0, // LineOpSet
-					LineNumber: lineNum,
-					Content:    line,
-				})
-			}
-		}
-
-		eventURNStr := core.NewURN(core.ObjectTypeEvent).String()
-		// Use the persisted admin owner URN from config so ExtractBursts does
-		// not skip this event via the anon guard. Fall back to anon only when
-		// the config has not been initialised yet.
-		authorURNStr := core.AnonURN().String()
-		if cfg.Admin.AdminOwnerURN != "" {
-			authorURNStr = cfg.Admin.AdminOwnerURN
-		}
-
-		_, err = client.AppendEvent(ctx, &pb.AppendEventRequest{
-			Event: &pb.Event{
-				Urn:       eventURNStr,
-				NoteUrn:   noteURNStr,
-				Sequence:  1,
-				AuthorUrn: authorURNStr,
-				CreatedAt: now,
-				Entries:   entries,
-			},
-		})
-		if err != nil {
-			return fmt.Errorf("append content event: %w", err)
-		}
-	}
-
-	// ── Success output ────────────────────────────────────────────────────────
-	typeLabel := "normal"
-	if addNoteFlags.secure {
-		typeLabel = "secure"
-	}
-
-	urn := noteURNStr
-	if createResp.Header != nil {
-		urn = createResp.Header.Urn
-	}
-
-	// Build the web URL for the note. For local/remote the UI is served from
-	// the same host as the gRPC addr but on the HTTP port from config.
-	httpBase := cfg.Server.HTTPAddr
-	if strings.HasPrefix(httpBase, ":") {
-		httpBase = "localhost" + httpBase
-	}
-	if clientJSON.Settings.Source == "remote" && clientJSON.Settings.RemoteURL != "" {
-		httpBase = strings.TrimRight(clientJSON.Settings.RemoteURL, "/")
-	}
-	if !strings.HasPrefix(httpBase, "http") {
-		httpBase = "http://" + httpBase
-	}
-	noteURL := fmt.Sprintf("%s/n/%s", httpBase, urn)
-
-	fmt.Printf("\n  \033[1;32m✓\033[0m  Note created\n")
-	fmt.Printf("     name   : %s\n", noteName)
-	fmt.Printf("     urn    : %s\n", urn)
-	fmt.Printf("     type   : %s\n", typeLabel)
-	fmt.Printf("     lines  : %d\n", len(lines))
-	if addNoteFlags.projectURN != "" {
-		fmt.Printf("     project: %s\n", addNoteFlags.projectURN)
-	}
-	fmt.Printf("     url    : %s\n", noteURL)
-	fmt.Printf("     server : %s\n\n", grpcAddr)
-
-	// ── Optionally delete the source file ─────────────────────────────────────
-	if addNoteFlags.delete {
-		if err := os.Remove(absPath); err != nil {
-			return fmt.Errorf("delete source file %q: %w", absPath, err)
-		}
-		fmt.Printf("  \033[1;33m✓\033[0m  Deleted source file: %s\n\n", absPath)
-	}
-
-	return nil
-}
-
-// runAddNoteCloud handles note creation and updates when source mode is "cloud".
-// It obtains a valid JWT via cloud.EnsureToken, then uses cloud.NoteClient to
-// talk to the notx cloud REST API instead of gRPC.
-func runAddNoteCloud(
-	_ *cobra.Command,
-	_ []string,
-	clientJSON *clientconfig.ClientJSON,
-	absPath, content, noteName string,
-	lines []string,
-) error {
-	token, err := cloud.EnsureToken(clientJSON)
-	if err != nil {
-		return fmt.Errorf("cloud auth: %w", err)
-	}
-
-	noteClient := cloud.NewNoteClient(token)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	serverLabel := cloud.CloudBaseURL()
-
-	// ── Update existing note ──────────────────────────────────────────────────
-	if addNoteFlags.urn != "" {
-		sequence, changed, err := noteClient.ReplaceContent(ctx, addNoteFlags.urn, content, "")
-		if err != nil {
-			return fmt.Errorf("cloud update note: %w", err)
-		}
-
-		cloudUpdateURL := fmt.Sprintf("%s/n/%s", cloud.WebBaseURL(), addNoteFlags.urn)
-
-		if !changed {
-			fmt.Printf("\n  \033[1;33m–\033[0m  No changes detected\n")
-			fmt.Printf("     urn      : %s\n", addNoteFlags.urn)
-			fmt.Printf("     sequence : %d (unchanged)\n", sequence)
-			fmt.Printf("     url      : %s\n", cloudUpdateURL)
-			fmt.Printf("     server   : %s\n\n", serverLabel)
-		} else {
-			fmt.Printf("\n  \033[1;32m✓\033[0m  Note updated\n")
-			fmt.Printf("     urn      : %s\n", addNoteFlags.urn)
-			fmt.Printf("     sequence : %d\n", sequence)
-			fmt.Printf("     lines    : %d\n", len(lines))
-			fmt.Printf("     url      : %s\n", cloudUpdateURL)
-			fmt.Printf("     server   : %s\n\n", serverLabel)
-		}
-
-		if addNoteFlags.delete {
-			if err := os.Remove(absPath); err != nil {
-				return fmt.Errorf("delete source file %q: %w", absPath, err)
-			}
-			fmt.Printf("  \033[1;33m✓\033[0m  Deleted source file: %s\n\n", absPath)
-		}
-
-		return nil
-	}
-
-	// ── Create new note ───────────────────────────────────────────────────────
 	noteType := "normal"
 	if addNoteFlags.secure {
 		noteType = "secure"
 	}
 
-	noteURNStr := core.NewURN(core.ObjectTypeNote).String()
+	nowStr := time.Now().UTC().Format(time.RFC3339)
 
-	urn, err := noteClient.CreateNote(
-		ctx,
-		noteURNStr,
-		noteName,
-		noteType,
-		addNoteFlags.projectURN,
-		addNoteFlags.folderURN,
-	)
-	if err != nil {
-		return fmt.Errorf("cloud create note: %w", err)
+	// ── POST /v1/notes ────────────────────────────────────────────────────────
+	createBody := struct {
+		URN        string `json:"urn"`
+		Name       string `json:"name"`
+		NoteType   string `json:"note_type"`
+		ProjectURN string `json:"project_urn,omitempty"`
+		FolderURN  string `json:"folder_urn,omitempty"`
+		CreatedAt  string `json:"created_at"`
+		UpdatedAt  string `json:"updated_at"`
+	}{
+		URN:        noteURNStr,
+		Name:       noteName,
+		NoteType:   noteType,
+		ProjectURN: addNoteFlags.projectURN,
+		FolderURN:  addNoteFlags.folderURN,
+		CreatedAt:  nowStr,
+		UpdatedAt:  nowStr,
 	}
 
-	// Append initial content (only for non-empty files).
+	createBodyBytes, err := json.Marshal(createBody)
+	if err != nil {
+		return fmt.Errorf("marshal create request: %w", err)
+	}
+
+	createURL := httpAddr + "/v1/notes"
+	createResp, err := http.Post(createURL, "application/json", bytes.NewReader(createBodyBytes)) //nolint:noctx
+	if err != nil {
+		return fmt.Errorf("POST %s: %w", createURL, err)
+	}
+	defer createResp.Body.Close()
+
+	createRespBody, _ := io.ReadAll(createResp.Body)
+	if createResp.StatusCode >= 400 {
+		var errBody struct {
+			Error string `json:"error"`
+		}
+		_ = json.Unmarshal(createRespBody, &errBody)
+		msg := errBody.Error
+		if msg == "" {
+			msg = strings.TrimSpace(string(createRespBody))
+		}
+		return fmt.Errorf("create note (%d): %s", createResp.StatusCode, msg)
+	}
+
+	// Parse the response to get the canonical URN back from the server.
+	var createResult struct {
+		URN  string `json:"urn"`
+		Name string `json:"name"`
+		// Some servers wrap in a header sub-object.
+		Header *struct {
+			URN  string `json:"urn"`
+			Name string `json:"name"`
+		} `json:"header,omitempty"`
+	}
+	if err := json.Unmarshal(createRespBody, &createResult); err == nil {
+		if createResult.Header != nil && createResult.Header.URN != "" {
+			noteURNStr = createResult.Header.URN
+		} else if createResult.URN != "" {
+			noteURNStr = createResult.URN
+		}
+	}
+
+	// ── POST /v1/notes/{urn}/content (only for non-empty files) ───────────────
 	if len(lines) > 0 {
-		_, _, err = noteClient.ReplaceContent(ctx, urn, content, "")
+		authorURN := core.AnonURN().String()
+		if cfg.Admin.AdminOwnerURN != "" {
+			authorURN = cfg.Admin.AdminOwnerURN
+		}
+
+		contentBody := struct {
+			Content   string `json:"content"`
+			AuthorURN string `json:"author_urn,omitempty"`
+		}{
+			Content:   content,
+			AuthorURN: authorURN,
+		}
+
+		contentBodyBytes, err := json.Marshal(contentBody)
 		if err != nil {
-			return fmt.Errorf("cloud set note content: %w", err)
+			return fmt.Errorf("marshal content request: %w", err)
+		}
+
+		contentURL := fmt.Sprintf("%s/v1/notes/%s/content", httpAddr, percentEncodeURN(noteURNStr))
+		contentResp, err := http.Post(contentURL, "application/json", bytes.NewReader(contentBodyBytes)) //nolint:noctx
+		if err != nil {
+			return fmt.Errorf("POST %s: %w", contentURL, err)
+		}
+		defer contentResp.Body.Close()
+
+		contentRespBody, _ := io.ReadAll(contentResp.Body)
+		if contentResp.StatusCode >= 400 {
+			var errBody struct {
+				Error string `json:"error"`
+			}
+			_ = json.Unmarshal(contentRespBody, &errBody)
+			msg := errBody.Error
+			if msg == "" {
+				msg = strings.TrimSpace(string(contentRespBody))
+			}
+			return fmt.Errorf("set note content (%d): %s", contentResp.StatusCode, msg)
 		}
 	}
 
 	// ── Success output ────────────────────────────────────────────────────────
-	cloudCreateURL := fmt.Sprintf("%s/n/%s", cloud.WebBaseURL(), urn)
+	noteURL := fmt.Sprintf("%s/n/%s", httpAddr, noteURNStr)
 
 	fmt.Printf("\n  \033[1;32m✓\033[0m  Note created\n")
 	fmt.Printf("     name   : %s\n", noteName)
-	fmt.Printf("     urn    : %s\n", urn)
+	fmt.Printf("     urn    : %s\n", noteURNStr)
 	fmt.Printf("     type   : %s\n", noteType)
 	fmt.Printf("     lines  : %d\n", len(lines))
 	if addNoteFlags.projectURN != "" {
 		fmt.Printf("     project: %s\n", addNoteFlags.projectURN)
 	}
-	fmt.Printf("     url    : %s\n", cloudCreateURL)
-	fmt.Printf("     server : notx cloud (%s)\n\n", serverLabel)
+	fmt.Printf("     url    : %s\n", noteURL)
+	fmt.Printf("     server : %s\n\n", httpAddr)
 
+	// ── Optionally delete the source file ─────────────────────────────────────
 	if addNoteFlags.delete {
 		if err := os.Remove(absPath); err != nil {
 			return fmt.Errorf("delete source file %q: %w", absPath, err)
@@ -433,15 +287,7 @@ func runAddNoteCloud(
 // The server diffs against the current state and appends only the changed lines
 // as a new event — nothing is stored twice.
 func runUpdateContent(srcPath, noteURN, content string, cfg *clientconfig.Config) error {
-	httpAddr := cfg.Server.HTTPAddr
-	if addNoteFlags.addr != "" {
-		// --addr was passed; assume it is the HTTP base when --urn is used.
-		httpAddr = addNoteFlags.addr
-	}
-	// Normalise: strip leading colon so ":4060" → "localhost:4060".
-	if strings.HasPrefix(httpAddr, ":") {
-		httpAddr = "localhost" + httpAddr
-	}
+	httpAddr := resolveHTTPBase(cfg, addNoteFlags.addr)
 
 	// Use the persisted admin owner URN from config so burst extraction is not
 	// skipped by the anon guard in core.ExtractBursts. Fall back to anon only
@@ -464,8 +310,7 @@ func runUpdateContent(srcPath, noteURN, content string, cfg *clientconfig.Config
 		return fmt.Errorf("marshal request: %w", err)
 	}
 
-	url := fmt.Sprintf("http://%s/v1/notes/%s/content",
-		httpAddr, percentEncodeURN(noteURN))
+	url := fmt.Sprintf("%s/v1/notes/%s/content", httpAddr, percentEncodeURN(noteURN))
 
 	resp, err := http.Post(url, "application/json", bytes.NewReader(bodyBytes)) //nolint:noctx
 	if err != nil {
@@ -489,11 +334,7 @@ func runUpdateContent(srcPath, noteURN, content string, cfg *clientconfig.Config
 
 	lines := splitContentLines(content)
 
-	updateBase := httpAddr
-	if !strings.HasPrefix(updateBase, "http") {
-		updateBase = "http://" + updateBase
-	}
-	updateNoteURL := fmt.Sprintf("%s/n/%s", updateBase, noteURN)
+	updateNoteURL := fmt.Sprintf("%s/n/%s", httpAddr, noteURN)
 
 	if !result.Changed {
 		fmt.Printf("\n  \033[1;33m–\033[0m  No changes detected\n")
@@ -518,6 +359,27 @@ func runUpdateContent(srcPath, noteURN, content string, cfg *clientconfig.Config
 	}
 
 	return nil
+}
+
+// resolveHTTPBase returns the HTTP base URL to use for requests.
+// Resolution order: --addr flag > config server.http_addr > default.
+func resolveHTTPBase(cfg *clientconfig.Config, addrOverride string) string {
+	addr := cfg.Server.HTTPAddr
+	if addrOverride != "" {
+		addr = addrOverride
+	}
+	if addr == "" {
+		return "http://127.0.0.1:7430"
+	}
+	// Already a full URL — return as-is (trimmed).
+	if strings.HasPrefix(addr, "http://") || strings.HasPrefix(addr, "https://") {
+		return strings.TrimRight(addr, "/")
+	}
+	// ":port" → "http://127.0.0.1:port"
+	if strings.HasPrefix(addr, ":") {
+		return "http://127.0.0.1" + addr
+	}
+	return "http://" + addr
 }
 
 // percentEncodeURN replaces ':' with '%3A' for safe use in URL path segments.

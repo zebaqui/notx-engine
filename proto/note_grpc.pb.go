@@ -30,6 +30,7 @@ const (
 	NoteService_ReplaceContent_FullMethodName    = "/notx.v1.NoteService/ReplaceContent"
 	NoteService_ShareSecureNote_FullMethodName   = "/notx.v1.NoteService/ShareSecureNote"
 	NoteService_ReceiveSharedNote_FullMethodName = "/notx.v1.NoteService/ReceiveSharedNote"
+	NoteService_ListSnips_FullMethodName         = "/notx.v1.NoteService/ListSnips"
 )
 
 // NoteServiceClient is the client API for NoteService service.
@@ -69,6 +70,9 @@ type NoteServiceClient interface {
 	// ReceiveSharedNote stores a note header and event stream forwarded from a
 	// paired server. Idempotent: only events beyond the local head are written.
 	ReceiveSharedNote(ctx context.Context, in *ReceiveSharedNoteRequest, opts ...grpc.CallOption) (*ReceiveSharedNoteResponse, error)
+	// ListSnips returns notes with snip_type set. Regular notes are never returned.
+	// This is the only entry point for listing snips regardless of plugin state.
+	ListSnips(ctx context.Context, in *ListSnipsRequest, opts ...grpc.CallOption) (*ListSnipsResponse, error)
 }
 
 type noteServiceClient struct {
@@ -201,6 +205,15 @@ func (c *noteServiceClient) ReceiveSharedNote(ctx context.Context, in *ReceiveSh
 	return out, nil
 }
 
+func (c *noteServiceClient) ListSnips(ctx context.Context, in *ListSnipsRequest, opts ...grpc.CallOption) (*ListSnipsResponse, error) {
+	out := new(ListSnipsResponse)
+	err := c.cc.Invoke(ctx, NoteService_ListSnips_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // NoteServiceServer is the server API for NoteService service.
 // All implementations must embed UnimplementedNoteServiceServer
 // for forward compatibility
@@ -238,6 +251,9 @@ type NoteServiceServer interface {
 	// ReceiveSharedNote stores a note header and event stream forwarded from a
 	// paired server. Idempotent: only events beyond the local head are written.
 	ReceiveSharedNote(context.Context, *ReceiveSharedNoteRequest) (*ReceiveSharedNoteResponse, error)
+	// ListSnips returns notes with snip_type set. Regular notes are never returned.
+	// This is the only entry point for listing snips regardless of plugin state.
+	ListSnips(context.Context, *ListSnipsRequest) (*ListSnipsResponse, error)
 	mustEmbedUnimplementedNoteServiceServer()
 }
 
@@ -277,6 +293,9 @@ func (UnimplementedNoteServiceServer) ShareSecureNote(context.Context, *ShareSec
 }
 func (UnimplementedNoteServiceServer) ReceiveSharedNote(context.Context, *ReceiveSharedNoteRequest) (*ReceiveSharedNoteResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ReceiveSharedNote not implemented")
+}
+func (UnimplementedNoteServiceServer) ListSnips(context.Context, *ListSnipsRequest) (*ListSnipsResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ListSnips not implemented")
 }
 func (UnimplementedNoteServiceServer) mustEmbedUnimplementedNoteServiceServer() {}
 
@@ -492,6 +511,24 @@ func _NoteService_ReceiveSharedNote_Handler(srv interface{}, ctx context.Context
 	return interceptor(ctx, in, info, handler)
 }
 
+func _NoteService_ListSnips_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListSnipsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(NoteServiceServer).ListSnips(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: NoteService_ListSnips_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(NoteServiceServer).ListSnips(ctx, req.(*ListSnipsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // NoteService_ServiceDesc is the grpc.ServiceDesc for NoteService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -538,6 +575,10 @@ var NoteService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ReceiveSharedNote",
 			Handler:    _NoteService_ReceiveSharedNote_Handler,
+		},
+		{
+			MethodName: "ListSnips",
+			Handler:    _NoteService_ListSnips_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

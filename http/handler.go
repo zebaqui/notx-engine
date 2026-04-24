@@ -2,8 +2,6 @@ package http
 
 import (
 	"context"
-	"crypto/tls"
-	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,7 +10,6 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"os"
 	"strconv"
 	"time"
 
@@ -21,8 +18,8 @@ import (
 
 	"github.com/zebaqui/notx-engine/config"
 	grpcsvc "github.com/zebaqui/notx-engine/internal/server/grpc"
-	internalsync "github.com/zebaqui/notx-engine/internal/sync"
-	"github.com/zebaqui/notx-engine/repo"
+	pb "github.com/zebaqui/notx-engine/proto"
+	"github.com/zebaqui/notx-engine/snip"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -34,75 +31,53 @@ import (
 // All business logic is delegated to the gRPC service structs — the HTTP layer
 // is a pure translation layer: decode JSON → call gRPC method → encode JSON.
 type Handler struct {
-	cfg            *config.Config
-	noteSvc        *grpcsvc.NoteServer
-	projSvc        *grpcsvc.ProjectServer
-	folderSvc      *grpcsvc.FolderServer
-	deviceSvc      *grpcsvc.DeviceServer
-	deviceAdminSvc *grpcsvc.DeviceAdminServer
-	userSvc        *grpcsvc.UserServer
-	pairing        *grpcsvc.PairingServer
-	secretStore    repo.PairingSecretStore
-	relaySvc       *grpcsvc.RelayServer
-	contextSvc     *grpcsvc.ContextServer
-	linkSvc        *grpcsvc.LinkServer
-	syncRepo       SyncAdminRepo
-	syncBus        *internalsync.Bus
+	cfg        *config.Config
+	noteSvc    pb.NoteServiceServer
+	projSvc    pb.ProjectServiceServer
+	folderSvc  pb.FolderServiceServer
+	contextSvc *grpcsvc.ContextServer // optional
+	linkSvc    *grpcsvc.LinkServer    // optional
+	plugins    []snip.SnipPlugin
 
 	log    *slog.Logger
 	mux    *http.ServeMux
-	server *http.Server
+	server *http.Server // initialised in New(); never written after that
 }
 
 // New creates a new Handler, registers all routes, and returns it.
 // The caller must call Serve to start accepting connections.
-// pairingSvc and secretStore may be nil when server pairing is disabled;
-// the relevant endpoints will return 503 in that case.
-// relaySvc may be nil when the relay engine is not available; the relay
-// endpoints will return 503 in that case.
 func New(
 	cfg *config.Config,
-	noteSvc *grpcsvc.NoteServer,
-	projSvc *grpcsvc.ProjectServer,
-	folderSvc *grpcsvc.FolderServer,
-	deviceSvc *grpcsvc.DeviceServer,
-	deviceAdminSvc *grpcsvc.DeviceAdminServer,
-	userSvc *grpcsvc.UserServer,
-	log *slog.Logger,
-	pairingSvc *grpcsvc.PairingServer,
-	secretStore repo.PairingSecretStore,
-	relaySvc *grpcsvc.RelayServer,
+	noteSvc pb.NoteServiceServer,
+	projSvc pb.ProjectServiceServer,
+	folderSvc pb.FolderServiceServer,
 	contextSvc *grpcsvc.ContextServer,
 	linkSvc *grpcsvc.LinkServer,
-	syncRepo SyncAdminRepo,
-	syncBus *internalsync.Bus,
+	log *slog.Logger,
+	plugins []snip.SnipPlugin,
 ) *Handler {
+	addr := fmt.Sprintf("127.0.0.1:%d", cfg.HTTPPort)
 	h := &Handler{
-		cfg:            cfg,
-		noteSvc:        noteSvc,
-		projSvc:        projSvc,
-		folderSvc:      folderSvc,
-		deviceSvc:      deviceSvc,
-		deviceAdminSvc: deviceAdminSvc,
-		userSvc:        userSvc,
-		pairing:        pairingSvc,
-		secretStore:    secretStore,
-		relaySvc:       relaySvc,
-		contextSvc:     contextSvc,
-		linkSvc:        linkSvc,
-		syncRepo:       syncRepo,
-		syncBus:        syncBus,
-		log:            log,
-		mux:            http.NewServeMux(),
+		cfg:        cfg,
+		noteSvc:    noteSvc,
+		projSvc:    projSvc,
+		folderSvc:  folderSvc,
+		contextSvc: contextSvc,
+		linkSvc:    linkSvc,
+		plugins:    plugins,
+		log:        log,
+		mux:        http.NewServeMux(),
+	}
+	h.server = &http.Server{
+		Addr:         addr,
+		Handler:      h,
+		ReadTimeout:  15 * time.Second,
+		WriteTimeout: 30 * time.Second,
+		IdleTimeout:  60 * time.Second,
+		ErrorLog:     newDiscardLogger(),
 	}
 	h.routes()
 	return h
-}
-
-// SetSyncBus wires a Bus into the handler after construction.
-// This is used by server.go to attach the bus once it has been created.
-func (h *Handler) SetSyncBus(bus *internalsync.Bus) {
-	h.syncBus = bus
 }
 
 // ServeHTTP implements http.Handler.
@@ -110,45 +85,18 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.mux.ServeHTTP(w, r)
 }
 
-// Serve starts the HTTP server on the configured address. It blocks until
-// the server shuts down. Call Shutdown to trigger a graceful stop.
-//
-// If TLS is configured (TLSCertFile + TLSKeyFile) the listener is wrapped with
-// a tls.Config that enforces TLS 1.3 as the minimum version. When mTLS is also
-// configured (TLSCAFile) the server additionally requires and verifies a client
-// certificate signed by that CA.
+// Serve starts the HTTP server on 127.0.0.1:<port> (plaintext only).
+// It blocks until the server shuts down. Call Shutdown to trigger a graceful stop.
+// h.server is initialised in New() so Shutdown() can safely read it from any goroutine.
 func (h *Handler) Serve() error {
-	h.server = &http.Server{
-		Addr:         h.cfg.HTTPAddr(),
-		Handler:      h,
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 30 * time.Second,
-		IdleTimeout:  60 * time.Second,
-		// Suppress the default "http: TLS handshake error" log lines that
-		// http.Server emits for every rejected client connection. Those are
-		// expected during mTLS enforcement and would pollute test output.
-		ErrorLog: newDiscardLogger(),
-	}
+	addr := h.server.Addr
 
-	ln, err := net.Listen("tcp", h.cfg.HTTPAddr())
+	ln, err := net.Listen("tcp", addr)
 	if err != nil {
-		return fmt.Errorf("http: listen on %s: %w", h.cfg.HTTPAddr(), err)
+		return fmt.Errorf("http: listen on %s: %w", addr, err)
 	}
 
-	if h.cfg.TLSEnabled() {
-		tlsCfg, err := buildTLSConfig(h.cfg)
-		if err != nil {
-			return fmt.Errorf("http: build TLS config: %w", err)
-		}
-		ln = tls.NewListener(ln, tlsCfg)
-		h.log.Info("http server listening",
-			"addr", h.cfg.HTTPAddr(),
-			"tls", true,
-			"mtls", h.cfg.MTLSEnabled(),
-		)
-	} else {
-		h.log.Info("http server listening", "addr", h.cfg.HTTPAddr())
-	}
+	h.log.Info("http server listening", "addr", addr)
 
 	if err := h.server.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return fmt.Errorf("http: serve: %w", err)
@@ -158,33 +106,6 @@ func (h *Handler) Serve() error {
 
 func newDiscardLogger() *stdlog.Logger {
 	return stdlog.New(io.Discard, "", 0)
-}
-
-func buildTLSConfig(cfg *config.Config) (*tls.Config, error) {
-	cert, err := tls.LoadX509KeyPair(cfg.TLSCertFile, cfg.TLSKeyFile)
-	if err != nil {
-		return nil, fmt.Errorf("load cert/key: %w", err)
-	}
-
-	tlsCfg := &tls.Config{
-		Certificates: []tls.Certificate{cert},
-		MinVersion:   tls.VersionTLS13,
-	}
-
-	if cfg.MTLSEnabled() {
-		caPEM, err := os.ReadFile(cfg.TLSCAFile)
-		if err != nil {
-			return nil, fmt.Errorf("read CA file %q: %w", cfg.TLSCAFile, err)
-		}
-		pool := x509.NewCertPool()
-		if !pool.AppendCertsFromPEM(caPEM) {
-			return nil, fmt.Errorf("parse CA PEM: no valid blocks found")
-		}
-		tlsCfg.ClientCAs = pool
-		tlsCfg.ClientAuth = tls.RequireAndVerifyClientCert
-	}
-
-	return tlsCfg, nil
 }
 
 // Shutdown gracefully stops the HTTP server, waiting up to 30 seconds for
@@ -205,106 +126,61 @@ func (h *Handler) routes() {
 	h.mux.HandleFunc("/healthz", h.handleHealthz)
 	h.mux.HandleFunc("/readyz", h.handleReadyz)
 
+	// Snips — typed notes
+	h.mux.HandleFunc("/v1/snips", h.withMiddleware(h.routeSnips))
+
 	// Notes
-	h.mux.HandleFunc("/v1/notes", h.withDeviceAuthMiddleware(h.routeNotes))
-	// /v1/notes/receive/ is a server-to-server push endpoint — no device auth.
-	h.mux.HandleFunc("/v1/notes/receive/", h.withMiddleware(h.routeNoteReceiveOpen))
-	h.mux.HandleFunc("/v1/notes/", h.withDeviceAuthMiddleware(h.routeNote))
+	h.mux.HandleFunc("/v1/notes", h.withMiddleware(h.routeNotes))
+	h.mux.HandleFunc("/v1/notes/", h.withMiddleware(h.routeNote))
 
 	// Events
-	h.mux.HandleFunc("/v1/events", h.withDeviceAuthMiddleware(h.routeAppendEvent))
-
-	// Sync progress stream
-	h.mux.HandleFunc("/v1/sync/stream", h.withDeviceAuthMiddleware(h.handleSyncStream))
-
-	// Sync admin endpoints
-	h.mux.HandleFunc("/v1/sync/status", h.withDeviceAuthMiddleware(h.handleSyncStatus))
-	h.mux.HandleFunc("/v1/sync/log", h.withDeviceAuthMiddleware(h.handleSyncLog))
-	h.mux.HandleFunc("/v1/sync/pending", h.withDeviceAuthMiddleware(h.handleSyncPending))
-	h.mux.HandleFunc("/v1/sync/trigger", h.withDeviceAuthMiddleware(h.handleSyncTrigger))
+	h.mux.HandleFunc("/v1/events", h.withMiddleware(h.routeAppendEvent))
 
 	// Search
-	h.mux.HandleFunc("/v1/search", h.withDeviceAuthMiddleware(h.routeSearch))
+	h.mux.HandleFunc("/v1/search", h.withMiddleware(h.routeSearch))
 
 	// Projects & folders
-	h.mux.HandleFunc("/v1/projects", h.withDeviceAuthMiddleware(h.routeProjects))
-	h.mux.HandleFunc("/v1/projects/", h.withDeviceAuthMiddleware(h.routeProject))
-	h.mux.HandleFunc("/v1/folders", h.withDeviceAuthMiddleware(h.routeFolders))
-	h.mux.HandleFunc("/v1/folders/", h.withDeviceAuthMiddleware(h.routeFolder))
-
-	// Devices — POST /v1/devices (registration) is intentionally open so a
-	// new device can bootstrap itself without a pre-existing identity.
-	// All other device routes (GET, PATCH, DELETE) require a valid device.
-	h.mux.HandleFunc("/v1/devices", h.withMiddleware(h.routeDevicesOpen))
-	// /v1/devices/ is a single catch-all. The dispatcher (routeDeviceDispatch)
-	// applies the lighter existence-only auth for status/status/stream sub-paths
-	// (so a pending device can poll its own approval state) and the full
-	// approval-gated auth for every other device sub-path.
-	h.mux.HandleFunc("/v1/devices/", h.withMiddleware(h.routeDeviceDispatch))
-
-	// Users
-	h.mux.HandleFunc("/v1/users", h.withDeviceAuthMiddleware(h.routeUsers))
-	h.mux.HandleFunc("/v1/users/", h.withDeviceAuthMiddleware(h.routeUser))
-
-	// Server pairing — /v1/servers/ca is intentionally public (returns CA cert only).
-	// All write/admin routes require device auth.
-	h.mux.HandleFunc("/v1/servers/ca", h.withMiddleware(h.routeServersCA))
-	h.mux.HandleFunc("/v1/pairing-secrets", h.withDeviceAuthMiddleware(h.routePairingSecrets))
-	h.mux.HandleFunc("/v1/servers/outbound-pair", h.withDeviceAuthMiddleware(h.routeOutboundPair))
-	h.mux.HandleFunc("/v1/servers", h.withDeviceAuthMiddleware(h.routeServers))
-	h.mux.HandleFunc("/v1/servers/", h.withDeviceAuthMiddleware(h.routeServer))
-
-	// Server info
-	h.mux.HandleFunc("/v1/info", h.withMiddleware(h.routeServerInfo))
+	h.mux.HandleFunc("/v1/projects", h.withMiddleware(h.routeProjects))
+	h.mux.HandleFunc("/v1/projects/", h.withMiddleware(h.routeProject))
+	h.mux.HandleFunc("/v1/folders", h.withMiddleware(h.routeFolders))
+	h.mux.HandleFunc("/v1/folders/", h.withMiddleware(h.routeFolder))
 
 	// Ports — public, no auth needed; returns all active service ports
 	h.mux.HandleFunc("/v1/ports", h.withMiddleware(h.handlePorts))
 
-	// Relay
-	if h.relaySvc != nil {
-		h.routeRelay(h.relaySvc)
-	}
+	// AI credential management
+	h.mux.HandleFunc("/v1/ai/credentials", h.withMiddleware(h.routeAICredentials))
+	h.mux.HandleFunc("/v1/ai/credentials/", h.withMiddleware(h.routeAICredential))
 
 	// Context graph — bursts, candidates, promote/dismiss, config
-	h.mux.HandleFunc("/v1/context/stats", h.withDeviceAuthMiddleware(h.routeContextStats))
-	h.mux.HandleFunc("/v1/context/candidates", h.withDeviceAuthMiddleware(h.routeContextCandidates))
-	h.mux.HandleFunc("/v1/context/candidates/", h.withDeviceAuthMiddleware(h.routeContextCandidate))
-	h.mux.HandleFunc("/v1/context/bursts", h.withDeviceAuthMiddleware(h.routeContextBursts))
-	h.mux.HandleFunc("/v1/context/bursts/search", h.withDeviceAuthMiddleware(h.routeContextBurstSearch))
-	h.mux.HandleFunc("/v1/context/bursts/", h.withDeviceAuthMiddleware(h.routeContextBurst))
-	h.mux.HandleFunc("/v1/context/config/", h.withDeviceAuthMiddleware(h.routeContextConfig))
-	h.mux.HandleFunc("/v1/context/inferences", h.withDeviceAuthMiddleware(h.routeContextInferences))
-	h.mux.HandleFunc("/v1/context/inferences/", h.withDeviceAuthMiddleware(h.routeContextInference))
+	h.mux.HandleFunc("/v1/context/stats", h.withMiddleware(h.routeContextStats))
+	h.mux.HandleFunc("/v1/context/candidates", h.withMiddleware(h.routeContextCandidates))
+	h.mux.HandleFunc("/v1/context/candidates/", h.withMiddleware(h.routeContextCandidate))
+	h.mux.HandleFunc("/v1/context/bursts", h.withMiddleware(h.routeContextBursts))
+	h.mux.HandleFunc("/v1/context/bursts/search", h.withMiddleware(h.routeContextBurstSearch))
+	h.mux.HandleFunc("/v1/context/bursts/", h.withMiddleware(h.routeContextBurst))
+	h.mux.HandleFunc("/v1/context/config/", h.withMiddleware(h.routeContextConfig))
+	h.mux.HandleFunc("/v1/context/inferences", h.withMiddleware(h.routeContextInferences))
+	h.mux.HandleFunc("/v1/context/inferences/", h.withMiddleware(h.routeContextInference))
+
+	// Register snip plugin HTTP routes
+	for _, p := range h.plugins {
+		p.RegisterHTTP(h.mux, h.withMiddleware)
+	}
 
 	// Links — anchors, backlinks, external links
-	h.mux.HandleFunc("/v1/links/anchors", h.withDeviceAuthMiddleware(h.routeLinkAnchors))
-	h.mux.HandleFunc("/v1/links/anchors/", h.withDeviceAuthMiddleware(h.routeLinkAnchor))
-	h.mux.HandleFunc("/v1/links/backlinks/recent", h.withDeviceAuthMiddleware(h.handleRecentBacklinks))
-	h.mux.HandleFunc("/v1/links/backlinks", h.withDeviceAuthMiddleware(h.routeLinkBacklinks))
-	h.mux.HandleFunc("/v1/links/outbound", h.withDeviceAuthMiddleware(h.routeLinkOutbound))
-	h.mux.HandleFunc("/v1/links/referrers", h.withDeviceAuthMiddleware(h.routeLinkReferrers))
-	h.mux.HandleFunc("/v1/links/external", h.withDeviceAuthMiddleware(h.routeLinkExternal))
+	h.mux.HandleFunc("/v1/links/anchors", h.withMiddleware(h.routeLinkAnchors))
+	h.mux.HandleFunc("/v1/links/anchors/", h.withMiddleware(h.routeLinkAnchor))
+	h.mux.HandleFunc("/v1/links/backlinks/recent", h.withMiddleware(h.handleRecentBacklinks))
+	h.mux.HandleFunc("/v1/links/backlinks", h.withMiddleware(h.routeLinkBacklinks))
+	h.mux.HandleFunc("/v1/links/outbound", h.withMiddleware(h.routeLinkOutbound))
+	h.mux.HandleFunc("/v1/links/referrers", h.withMiddleware(h.routeLinkReferrers))
+	h.mux.HandleFunc("/v1/links/external", h.withMiddleware(h.routeLinkExternal))
 }
 
-func (h *Handler) withMiddleware(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		// Inject a request-scoped logger.
-		log := h.log.With(
-			"method", r.Method,
-			"path", r.URL.Path,
-		)
-		ctx := context.WithValue(r.Context(), ctxKeyLogger{}, log)
-		next(w, r.WithContext(ctx))
-	}
-}
-
-type ctxKeyLogger struct{}
-
-func loggerFromCtx(ctx context.Context, fallback *slog.Logger) *slog.Logger {
-	if l, ok := ctx.Value(ctxKeyLogger{}).(*slog.Logger); ok && l != nil {
-		return l
-	}
-	return fallback
+// Mux returns the HTTP mux so plugins can register their routes.
+func (h *Handler) Mux() *http.ServeMux {
+	return h.mux
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -319,17 +195,14 @@ func (h *Handler) handleReadyz(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
 }
 
-// portsResponse lists every TCP port currently bound by this server instance.
-// Fields are omitted when the corresponding service is disabled.
+// portsResponse lists the TCP port currently bound by the HTTP server.
 type portsResponse struct {
-	HTTP             *int `json:"http,omitempty"`
-	GRPC             *int `json:"grpc,omitempty"`
-	PairingBootstrap *int `json:"pairing_bootstrap,omitempty"`
+	HTTP *int `json:"http,omitempty"`
 }
 
 // handlePorts handles GET /v1/ports.
-// It is intentionally public (no device auth) so clients and operators can
-// discover service addresses without needing a registered device.
+// It is intentionally public (no auth) so clients and operators can
+// discover service addresses without any credentials.
 func (h *Handler) handlePorts(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -341,16 +214,6 @@ func (h *Handler) handlePorts(w http.ResponseWriter, r *http.Request) {
 	if h.cfg.EnableHTTP {
 		p := h.cfg.HTTPPort
 		resp.HTTP = &p
-	}
-
-	if h.cfg.EnableGRPC {
-		p := h.cfg.GRPCPort
-		resp.GRPC = &p
-	}
-
-	if h.cfg.Pairing.Enabled {
-		p := h.cfg.Pairing.BootstrapPort
-		resp.PairingBootstrap = &p
 	}
 
 	writeJSON(w, http.StatusOK, resp)

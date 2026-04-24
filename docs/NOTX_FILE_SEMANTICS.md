@@ -161,6 +161,20 @@ Each line entry describes a change to a specific line in the document.
 
 The special sequence `|-` (pipe followed by hyphen with no space between) indicates deletion. This is distinct from setting a line to the string `-` (which would be `| -` with a space).
 
+**Insert marker:**
+
+```
+N |+ content
+N |+
+```
+
+The special sequence `|+` (pipe followed by plus) indicates insertion. A new line is inserted
+at position N, shifting all existing lines at positions >= N down by one. Content follows
+after a single space. An empty insert (`N |+`) inserts a blank line.
+
+This is distinct from `LineOpSet` (`N | content`), which replaces an existing line in-place
+without shifting any other lines.
+
 ### Encrypted Event Entries (Secure Notes)
 
 For files with `note_type: secure`, the normal `N | content` line entries inside an event are replaced with an **encrypted block**. The `!encrypted` marker must be the first line after the `->` separator:
@@ -193,14 +207,47 @@ See [NOTX_SECURITY_MODEL.md](./NOTX_SECURITY_MODEL.md) for the full encryption s
 
 ### Event Semantics
 
-Within a single event, line entries are processed in the order they appear. However, **all line numbers are interpreted relative to the document state before the event began**.
+Within a single event, line entries are processed in declaration order using
+**streaming + offset semantics**:
 
-**Critical rule:** When processing deletions within an event, implementations have two valid approaches:
+- An `offset` counter starts at 0 for each event.
+- For each entry, the effective line number is `entry.LineNumber + offset` (1-based),
+  reflecting shifts from prior entries in the same event.
+- `LineOpInsert` increments `offset` by 1 after insertion.
+- `LineOpDelete` decrements `offset` by 1 after deletion.
+- `LineOpSet` and `LineOpSetEmpty` do not change `offset`.
 
-1. **Index-shifting approach** — Apply each entry in order, adjusting subsequent line numbers as deletions occur within the same event.
-2. **Batch approach** — Parse all entries first, then apply deletions in reverse order (highest line number first) to avoid index shifting within the event.
+This means line numbers within a single event are expressed as positions in the **evolving
+document** — not the pre-event document. This allows clients to emit a minimal,
+human-readable event: inserting one line requires only one entry regardless of document
+length.
 
-Both approaches produce the same result if implemented correctly. Choose the approach that is simplest for your implementation.
+**Example** — deleting line 3 from a 5-line document:
+
+```
+3 |-
+```
+
+Only one entry is needed. The client does not need to re-emit lines 4 and 5.
+
+**Example** — inserting a new line at position 2:
+
+```
+2 |+ new content here
+```
+
+One entry. All existing lines at positions >= 2 shift down by one automatically.
+
+**Example** — mixed insert and set in one event:
+
+```
+2 |+ inserted line
+4 | updated content
+```
+
+The insert at line 2 shifts the document. Then line 4 (in the already-shifted document) is
+updated. The offset counter is 1 when processing the second entry, so `4` refers to position
+4 in the post-insert document.
 
 ### Event Sequencing
 

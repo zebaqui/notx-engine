@@ -111,7 +111,6 @@ func TestSyncPolicy_String(t *testing.T) {
 		want string
 	}{
 		{SyncPolicyAuto, "auto"},
-		{SyncPolicyExplicitRelay, "explicit-relay"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.want, func(t *testing.T) {
@@ -152,8 +151,8 @@ func TestNoteSecurityPolicy_Secure(t *testing.T) {
 	if p.NoteType != NoteTypeSecure {
 		t.Errorf("NoteType: got %v, want NoteTypeSecure", p.NoteType)
 	}
-	if p.SyncPolicy != SyncPolicyExplicitRelay {
-		t.Errorf("SyncPolicy: got %v, want SyncPolicyExplicitRelay", p.SyncPolicy)
+	if p.SyncPolicy != SyncPolicyAuto {
+		t.Errorf("SyncPolicy: got %v, want SyncPolicyAuto", p.SyncPolicy)
 	}
 	if !p.IsE2EE {
 		t.Error("IsE2EE should be true for secure notes")
@@ -232,54 +231,19 @@ func TestNote_SecurityPolicy_Secure(t *testing.T) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// URN — ObjectTypeDevice
+// URN — forward-compatibility (unknown types)
 // ─────────────────────────────────────────────────────────────────────────────
 
-func TestParseURN_DeviceType(t *testing.T) {
-	raw := "urn:notx:device:4a5b6c7d-8e9f-0a1b-2c3d-4e5f6a7b8c9d"
-	u, err := ParseURN(raw)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if u.ObjectType != ObjectTypeDevice {
-		t.Errorf("ObjectType: got %q, want %q", u.ObjectType, ObjectTypeDevice)
-	}
-	if u.ID != "4a5b6c7d-8e9f-0a1b-2c3d-4e5f6a7b8c9d" {
-		t.Errorf("ID: got %q", u.ID)
-	}
-}
-
-func TestURN_DeviceType_IsKnownType(t *testing.T) {
-	u := MustParseURN("urn:notx:device:4a5b6c7d-8e9f-0a1b-2c3d-4e5f6a7b8c9d")
-	if !u.IsKnownType() {
-		t.Error("device URN should be a known type")
-	}
-}
-
-func TestURN_DeviceType_String_RoundTrip(t *testing.T) {
+// TestParseURN_UnknownTypeParsesAsForwardCompat verifies that URNs carrying an
+// unrecognised object-type segment (e.g. "device") still round-trip correctly
+// through the parser.  This documents forward-compatibility: URNs written by a
+// newer version of the engine that introduces new types must survive being read
+// by an older version without data loss or a parse error.
+func TestParseURN_UnknownTypeParsesAsForwardCompat(t *testing.T) {
 	raw := "urn:notx:device:4a5b6c7d-8e9f-0a1b-2c3d-4e5f6a7b8c9d"
 	u := MustParseURN(raw)
 	if u.String() != raw {
 		t.Errorf("round-trip: got %q, want %q", u.String(), raw)
-	}
-}
-
-// Device URNs must not accept the "anon" sentinel (devices are always
-// identified, never anonymous).
-func TestParseURN_DeviceType_RejectsAnon(t *testing.T) {
-	_, err := ParseURN("urn:notx:device:anon")
-	if err != nil {
-		// anon is rejected at the UUID validation level — this is acceptable
-		// behaviour since the device type should never be anonymous.
-		// The test simply documents this constraint.
-		t.Logf("correctly rejected anon device URN: %v", err)
-		return
-	}
-	// If we get here the URN was accepted; verify the anon flag is set so
-	// callers can detect and reject it at a higher layer.
-	u := MustParseURN("urn:notx:device:anon")
-	if !u.IsAnon() {
-		t.Error("device:anon URN should report IsAnon() == true")
 	}
 }
 
@@ -504,7 +468,7 @@ func TestSecurityPolicy_SecureNote_ServerBlind(t *testing.T) {
 	if p.ServerCanReadContent {
 		t.Error("server must not be able to read secure note content")
 	}
-	if p.SyncPolicy != SyncPolicyExplicitRelay {
-		t.Errorf("secure notes must use SyncPolicyExplicitRelay, got %v", p.SyncPolicy)
+	if p.SyncPolicy != SyncPolicyAuto {
+		t.Errorf("secure notes must use SyncPolicyAuto, got %v", p.SyncPolicy)
 	}
 }

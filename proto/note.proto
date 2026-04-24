@@ -30,6 +30,10 @@ message NoteHeader {
 
   google.protobuf.Timestamp created_at = 7;
   google.protobuf.Timestamp updated_at = 8;
+
+  string snip_type = 9; // empty for regular notes; snip type string for snips
+  string parent_urn = 10; // URN of parent note (sidecar binding); empty if none
+  string parent_anchor = 11; // anchor ID within parent note; empty if none
 }
 
 // LineEntry mirrors core.LineEntry.
@@ -124,6 +128,10 @@ service NoteService {
   // ReceiveSharedNote stores a note header and event stream forwarded from a
   // paired server. Idempotent: only events beyond the local head are written.
   rpc ReceiveSharedNote(ReceiveSharedNoteRequest) returns (ReceiveSharedNoteResponse);
+
+  // ListSnips returns notes with snip_type set. Regular notes are never returned.
+  // This is the only entry point for listing snips regardless of plugin state.
+  rpc ListSnips(ListSnipsRequest) returns (ListSnipsResponse);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -158,6 +166,25 @@ message ListNotesRequest {
 message ListNotesResponse {
   repeated NoteHeader notes = 1;
   string next_page_token = 2; // empty = last page
+}
+
+// --- ListSnips ---
+
+message ListSnipsRequest {
+  // snip_type filters to one registered type (e.g. "todo", "bash_history").
+  // Empty = return all snip types, including unknown ones.
+  string snip_type = 1;
+  string project_urn = 2;
+  string parent_urn = 3; // filter to sidecar snips of one note
+  string parent_anchor = 4; // filter to one specific anchor
+  bool include_deleted = 5;
+  int32 page_size = 6;
+  string page_token = 7;
+}
+
+message ListSnipsResponse {
+  repeated NoteHeader snips = 1; // NoteHeader.snip_type is populated
+  string next_page_token = 2;
 }
 
 // --- CreateNote ---

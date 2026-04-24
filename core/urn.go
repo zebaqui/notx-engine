@@ -19,19 +19,6 @@ const (
 	ObjectTypeOrg     ObjectType = "org"
 	ObjectTypeProject ObjectType = "proj"
 	ObjectTypeFolder  ObjectType = "folder"
-	// ObjectTypeDevice identifies a registered user device in the notx
-	// security model. Device URNs are used exclusively for cryptographic
-	// identity — specifically for per-device CEK wrapping in secure notes.
-	//
-	// Format: urn:notx:device:<uuidv7>
-	// Example: urn:notx:device:019063a5-1f67-7a42-afd3-5543f01e93c3
-	ObjectTypeDevice ObjectType = "device"
-	// ObjectTypeServer identifies a trusted peer notx server instance that
-	// has been paired with this authority via the ServerPairingService.
-	//
-	// Format: urn:notx:srv:<uuidv7>
-	// Example: urn:notx:srv:019063a5-2b34-7c81-bfe2-1a2b3c4d5e6f
-	ObjectTypeServer ObjectType = "srv"
 )
 
 // sentinelAnon is the special ID value for the anonymous/unknown author sentinel.
@@ -57,8 +44,6 @@ var (
 		ObjectTypeOrg:     {},
 		ObjectTypeProject: {},
 		ObjectTypeFolder:  {},
-		ObjectTypeDevice:  {},
-		ObjectTypeServer:  {},
 	}
 )
 

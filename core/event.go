@@ -17,6 +17,10 @@ const (
 	// LineOpDelete removes the line at the given number, shifting subsequent
 	// lines up by one.
 	LineOpDelete
+	// LineOpInsert inserts a new line at LineNumber, shifting all existing lines
+	// at positions >= LineNumber down by one. The new line's content is Content.
+	// Wire format: N |+ content
+	LineOpInsert
 )
 
 // LineEntry represents a single line-level change within an event.
@@ -26,6 +30,7 @@ const (
 //	N | content    → LineOpSet,      Content = "content"
 //	N |            → LineOpSetEmpty, Content = ""
 //	N |-           → LineOpDelete,   Content = ""
+//	N |+ content   → LineOpInsert,   Content = "content"
 type LineEntry struct {
 	// LineNumber is the 1-based target line number, interpreted relative to the
 	// document state before the event began.
@@ -111,6 +116,12 @@ func (e *Event) Payload() string {
 			fmt.Fprintf(&sb, "%d |-", entry.LineNumber)
 		case LineOpSetEmpty:
 			fmt.Fprintf(&sb, "%d |", entry.LineNumber)
+		case LineOpInsert:
+			if entry.Content == "" {
+				fmt.Fprintf(&sb, "%d |+", entry.LineNumber)
+			} else {
+				fmt.Fprintf(&sb, "%d |+ %s", entry.LineNumber, entry.Content)
+			}
 		default: // LineOpSet
 			fmt.Fprintf(&sb, "%d | %s", entry.LineNumber, entry.Content)
 		}

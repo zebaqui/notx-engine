@@ -2,7 +2,6 @@ package cli
 
 import (
 	"bufio"
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -17,11 +16,9 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
-	"golang.org/x/crypto/bcrypt"
 
 	"github.com/zebaqui/notx-engine/config"
 	"github.com/zebaqui/notx-engine/internal/clientconfig"
-	pairingsecret "github.com/zebaqui/notx-engine/internal/pairing"
 	"github.com/zebaqui/notx-engine/internal/server"
 	"github.com/zebaqui/notx-engine/repo/sqlite"
 )
@@ -69,21 +66,17 @@ func removePID() { os.Remove(pidFilePath()) }
 // ─────────────────────────────────────────────────────────────────────────────
 
 // serverPorts is written to ~/.notx/server.ports when the daemon worker starts
-// so that other commands (e.g. sync) can discover which ports the server is
-// actually listening on, regardless of what flags were passed.
+// so that other commands can discover which ports the server is actually
+// listening on, regardless of what flags were passed.
 type serverPorts struct {
-	HTTPPort      int    `json:"http_port"`
-	GRPCPort      int    `json:"grpc_port"`
-	PeerCertDir   string `json:"peer_cert_dir,omitempty"`
-	PeerAuthority string `json:"peer_authority,omitempty"`
+	HTTPPort int `json:"http_port"`
+	GRPCPort int `json:"grpc_port"`
 }
 
-func writePorts(httpPort, grpcPort int, peerCertDir, peerAuthority string) error {
+func writePorts(httpPort, grpcPort int) error {
 	data, err := json.Marshal(serverPorts{
-		HTTPPort:      httpPort,
-		GRPCPort:      grpcPort,
-		PeerCertDir:   peerCertDir,
-		PeerAuthority: peerAuthority,
+		HTTPPort: httpPort,
+		GRPCPort: grpcPort,
 	})
 	if err != nil {
 		return err
@@ -92,7 +85,7 @@ func writePorts(httpPort, grpcPort int, peerCertDir, peerAuthority string) error
 }
 
 // ReadServerPorts reads ~/.notx/server.ports and returns the ports the running
-// server is listening on.  Returns an error when the file does not exist (i.e.
+// server is listening on. Returns an error when the file does not exist (i.e.
 // no server has been started yet).
 func ReadServerPorts() (serverPorts, error) {
 	data, err := os.ReadFile(portsFilePath())
@@ -119,22 +112,6 @@ func processAlive(pid int) bool {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Admin URN helper (unchanged from previous version)
-// ─────────────────────────────────────────────────────────────────────────────
-
-func adminURNsFromConfig(fileCfg *clientconfig.Config) (deviceURN, ownerURN string) {
-	deviceURN = fileCfg.Admin.AdminDeviceURN
-	ownerURN = fileCfg.Admin.AdminOwnerURN
-	if deviceURN == "" {
-		deviceURN = config.DefaultAdminDeviceURN
-	}
-	if ownerURN == "" {
-		ownerURN = config.DefaultAdminOwnerURN
-	}
-	return deviceURN, ownerURN
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 // serverFlags — shared by the daemon worker invocation
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -148,20 +125,7 @@ var serverFlags struct {
 
 	dataDir string
 
-	tlsCert string
-	tlsKey  string
-	tlsCA   string
-
 	logLevel string
-
-	deviceAutoApprove bool
-	adminPassphrase   string
-
-	pairingEnabled   bool
-	pairingPort      int
-	peeringAuthority string
-	peerSecret       string
-	peerCertDir      string
 
 	// internal — set when this process is the background worker itself
 	daemon bool
@@ -181,37 +145,23 @@ var serverCmd = &cobra.Command{
 	Long: `Start and manage the notx server as a background daemon.
 
 Running "notx server" (with no sub-command) starts the server in the
-background and returns immediately.  The server process writes its PID to
+background and returns immediately. The server process writes its PID to
 ~/.notx/server.pid and all output to ~/.notx/server.log.
 
 Sub-commands:
-  status          — show whether the server is running
-  stop            — gracefully stop the running server
-  restart         — stop then start the server
-  logs            — print the server log (--tail to follow)
-  pairing         — manage server-to-server pairing
-
-Pairing sub-commands (notx server pairing ...):
-  add-secret      — generate a new NTXP-... pairing secret (authority)
+  status   — show whether the server is running
+  stop     — gracefully stop the running server
+  restart  — stop then start the server
+  logs     — print the server log (--tail to follow)
 
 Examples:
-  notx server                        # start in background
+  notx server                  # start in background
   notx server status
   notx server stop
   notx server restart
   notx server logs
   notx server logs --tail
-
-  # Authority mode — enable pairing service + bootstrap listener
-  notx server --pairing
-
-  # Generate a secret for a joining server
-  notx server pairing add-secret --label "dc-b" --data-dir /var/notx/data
-
-  # Joining server mode — pair with an authority on first startup
-  notx server --peer-authority grpc.authority.example.com:50052 \
-              --peer-secret "NTXP-ABCDE-FGHIJ-KLMNO-PQRST-UVWXY-Z" \
-              --peer-cert-dir /var/notx/certs
+  notx server --foreground     # run in foreground (container mode)
 `,
 	RunE: runServerStart,
 }
@@ -227,46 +177,22 @@ func init() {
 
 	httpPort := portFromAddr(fileCfg.Server.HTTPAddr, config.DefaultHTTPPort)
 	grpcPort := portFromAddr(fileCfg.Server.GRPCAddr, config.DefaultGRPCPort)
-	host := hostFromAddr(fileCfg.Server.HTTPAddr, "")
+	host := hostFromAddr(fileCfg.Server.HTTPAddr, "127.0.0.1")
 
 	f.IntVar(&serverFlags.httpPort, "http-port", httpPort,
 		fmt.Sprintf("TCP port for the HTTP server (default from config: %d)", httpPort))
 	f.IntVar(&serverFlags.grpcPort, "grpc-port", grpcPort,
 		fmt.Sprintf("TCP port for the gRPC server (default from config: %d)", grpcPort))
 	f.StringVar(&serverFlags.host, "host", host,
-		"Bind address for both servers (default: all interfaces)")
+		"Bind address for both servers (default: 127.0.0.1)")
 
 	f.StringVar(&serverFlags.dataDir, "data-dir", fileCfg.Storage.DataDir,
-		"Root directory for note files and the Badger index")
-
-	f.StringVar(&serverFlags.tlsCert, "tls-cert", fileCfg.TLS.CertFile,
-		"Path to the PEM-encoded server TLS certificate (leave empty to disable TLS)")
-	f.StringVar(&serverFlags.tlsKey, "tls-key", fileCfg.TLS.KeyFile,
-		"Path to the PEM-encoded server TLS private key")
-	f.StringVar(&serverFlags.tlsCA, "tls-ca", fileCfg.TLS.CAFile,
-		"Path to the PEM-encoded CA certificate for mTLS client verification")
+		"Root directory for note files and the SQLite index")
 
 	f.StringVar(&serverFlags.logLevel, "log-level", fileCfg.EffectiveLogLevel(fileCfg.Server.LogLevel),
 		"Log verbosity: debug, info, warn, error")
 
-	f.BoolVar(&serverFlags.deviceAutoApprove, "device-auto-approve", false,
-		"Automatically approve newly registered devices")
-
-	f.StringVar(&serverFlags.adminPassphrase, "admin-passphrase", "",
-		"Passphrase required to register an admin device from a remote machine")
-
-	// Hidden flag — used internally when this process is the daemon worker.
-	f.BoolVar(&serverFlags.pairingEnabled, "pairing", false,
-		"Enable the ServerPairingService on this instance (authority mode)")
-	f.IntVar(&serverFlags.pairingPort, "pairing-port", 50052,
-		"Bootstrap listener port for server pairing")
-	f.StringVar(&serverFlags.peeringAuthority, "peer-authority", "",
-		"Authority gRPC endpoint this server should pair with (joining server mode)")
-	f.StringVar(&serverFlags.peerSecret, "peer-secret", "",
-		"Pairing secret for initial registration (used once, then ignored)")
-	f.StringVar(&serverFlags.peerCertDir, "peer-cert-dir", "",
-		"Directory to store this server's client cert and key")
-
+	// Hidden internal flag — set when this process is the daemon worker.
 	f.BoolVar(&serverFlags.daemon, "daemon", false, "run as background worker (internal use)")
 	f.MarkHidden("daemon") //nolint:errcheck
 
@@ -363,7 +289,7 @@ func spawnDaemon(cmd *cobra.Command) error {
 // Daemon worker — the actual server process
 // ─────────────────────────────────────────────────────────────────────────────
 
-func runDaemonWorker(cmd *cobra.Command, args []string) error {
+func runDaemonWorker(cmd *cobra.Command, _ []string) error {
 	if created, err := clientconfig.EnsureConfig(); err != nil {
 		fmt.Fprintf(os.Stderr, "  \033[33m⚠\033[0m  Could not write default config: %v\n", err)
 	} else if created {
@@ -382,28 +308,7 @@ func runDaemonWorker(cmd *cobra.Command, args []string) error {
 	cfg.GRPCPort = serverFlags.grpcPort
 	cfg.Host = serverFlags.host
 	cfg.DataDir = serverFlags.dataDir
-	cfg.TLSCertFile = serverFlags.tlsCert
-	cfg.TLSKeyFile = serverFlags.tlsKey
-	cfg.TLSCAFile = serverFlags.tlsCA
 	cfg.LogLevel = serverFlags.logLevel
-	cfg.DeviceOnboarding.AutoApprove = serverFlags.deviceAutoApprove
-
-	fileCfg, _ := clientconfig.Load()
-	cfg.Admin.DeviceURN, cfg.Admin.OwnerURN = adminURNsFromConfig(fileCfg)
-
-	if serverFlags.adminPassphrase != "" {
-		hash, err := bcrypt.GenerateFromPassword([]byte(serverFlags.adminPassphrase), bcrypt.DefaultCost)
-		if err != nil {
-			return fmt.Errorf("hash admin passphrase: %w", err)
-		}
-		cfg.Admin.AdminPassphraseHash = string(hash)
-	}
-
-	cfg.Pairing.Enabled = serverFlags.pairingEnabled
-	cfg.Pairing.BootstrapPort = serverFlags.pairingPort
-	cfg.Pairing.PeerAuthority = serverFlags.peeringAuthority
-	cfg.Pairing.PeerSecret = serverFlags.peerSecret
-	cfg.Pairing.PeerCertDir = serverFlags.peerCertDir
 
 	if err := cfg.Validate(); err != nil {
 		return err
@@ -415,16 +320,11 @@ func runDaemonWorker(cmd *cobra.Command, args []string) error {
 		"http_addr", cfg.HTTPAddr(),
 		"grpc", cfg.EnableGRPC,
 		"grpc_addr", cfg.GRPCAddr(),
-		"authority_mode", cfg.Pairing.Enabled,
-		"pairing_bootstrap_addr", cfg.PairingBootstrapAddr(),
 		"data_dir", cfg.DataDir,
-		"tls", cfg.TLSEnabled(),
-		"mtls", cfg.MTLSEnabled(),
-		"device_auto_approve", cfg.DeviceOnboarding.AutoApprove,
 	)
 
-	// Write the ports file so other commands (e.g. sync) can find the server.
-	if err := writePorts(cfg.HTTPPort, cfg.GRPCPort, cfg.Pairing.PeerCertDir, cfg.Pairing.PeerAuthority); err != nil {
+	// Write the ports file so other commands can find the server.
+	if err := writePorts(cfg.HTTPPort, cfg.GRPCPort); err != nil {
 		log.Warn("could not write server.ports file", "err", err)
 	}
 
@@ -438,14 +338,9 @@ func runDaemonWorker(cmd *cobra.Command, args []string) error {
 		}
 	}()
 
-	srv, err := server.New(cfg, provider, provider, provider, provider, provider, provider, provider, provider, log, provider)
+	srv, err := server.New(cfg, provider, provider, provider, provider, log, nil)
 	if err != nil {
 		return fmt.Errorf("build server: %w", err)
-	}
-
-	// Wire the sync bus back into the provider so AppendEvent notifies it.
-	if srv.Bus() != nil {
-		provider.SetSyncBus(srv.Bus())
 	}
 
 	runErr := srv.Run()
@@ -483,8 +378,8 @@ var serverStatusCmd = &cobra.Command{
 		fmt.Fprintf(os.Stdout, "  \033[1;32m✓\033[0m  notx server is \033[1;32mrunning\033[0m \033[2m(pid %d)\033[0m\n", pid)
 		fmt.Fprintf(os.Stdout, "       Log file → \033[36m%s\033[0m\n", logFilePath())
 		if p, err := ReadServerPorts(); err == nil {
-			fmt.Fprintf(os.Stdout, "       HTTP     → \033[36mhttp://localhost:%d\033[0m\n", p.HTTPPort)
-			fmt.Fprintf(os.Stdout, "       gRPC     → \033[36mlocalhost:%d\033[0m\n", p.GRPCPort)
+			fmt.Fprintf(os.Stdout, "       HTTP     → \033[36mhttp://127.0.0.1:%d\033[0m\n", p.HTTPPort)
+			fmt.Fprintf(os.Stdout, "       gRPC     → \033[36m127.0.0.1:%d\033[0m\n", p.GRPCPort)
 		}
 		return nil
 	},
@@ -624,83 +519,7 @@ func init() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// notx server pairing — pairing management subcommands
-// ─────────────────────────────────────────────────────────────────────────────
-
-var pairingCmd = &cobra.Command{
-	Use:   "pairing",
-	Short: "Manage server-to-server pairing",
-	Long: `Manage server-to-server pairing on this notx instance.
-
-Use 'add-secret' to generate a registration token for a joining server.
-
-The pairing service must be enabled with --pairing when starting the server.`,
-}
-
-var pairingAddSecretFlags struct {
-	label   string
-	ttl     time.Duration
-	dataDir string
-}
-
-var pairingAddSecretCmd = &cobra.Command{
-	Use:   "add-secret",
-	Short: "Generate a new NTXP-... pairing secret",
-	Long: `Generate a new pairing secret and print it once to stdout.
-The plaintext is never stored — only the bcrypt hash is persisted.
-
-The generated secret must be passed to the joining server via --peer-secret.`,
-	RunE: func(cmd *cobra.Command, args []string) error {
-		dataDir := pairingAddSecretFlags.dataDir
-		if dataDir == "" {
-			dataDir = serverFlags.dataDir
-		}
-		if dataDir == "" {
-			cfg, _ := clientconfig.Load()
-			dataDir = cfg.Storage.DataDir
-		}
-		if dataDir == "" {
-			dataDir = "./data"
-		}
-
-		secretsDir := filepath.Join(dataDir, "pairing_secrets")
-		store, err := pairingsecret.NewFileSecretStore(secretsDir)
-		if err != nil {
-			return fmt.Errorf("open secret store: %w", err)
-		}
-
-		ttl := pairingAddSecretFlags.ttl
-		if ttl == 0 {
-			ttl = 15 * time.Minute
-		}
-
-		plaintext, record, err := pairingsecret.GenerateSecret(pairingAddSecretFlags.label, ttl)
-		if err != nil {
-			return fmt.Errorf("generate secret: %w", err)
-		}
-		if err := store.AddSecret(context.Background(), record); err != nil {
-			return fmt.Errorf("store secret: %w", err)
-		}
-
-		fmt.Printf("\n  Pairing secret (copy this — it will NOT be shown again):\n\n")
-		fmt.Printf("    %s\n\n", plaintext)
-		fmt.Printf("  Label:   %s\n", record.LabelHint)
-		fmt.Printf("  Expires: %s\n\n", record.ExpiresAt.Format(time.RFC3339))
-		return nil
-	},
-}
-
-func init() {
-	pairingAddSecretCmd.Flags().StringVar(&pairingAddSecretFlags.label, "label", "", "Human-readable label for audit logs")
-	pairingAddSecretCmd.Flags().DurationVar(&pairingAddSecretFlags.ttl, "ttl", 15*time.Minute, "How long the secret is valid")
-	pairingAddSecretCmd.Flags().StringVar(&pairingAddSecretFlags.dataDir, "data-dir", "", "Root data directory (defaults to server --data-dir or config value)")
-
-	pairingCmd.AddCommand(pairingAddSecretCmd)
-	serverCmd.AddCommand(pairingCmd)
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Address helpers (unchanged)
+// Address helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
 func portFromAddr(addr string, fallback int) int {
@@ -736,7 +555,7 @@ func hostFromAddr(addr string, fallback string) string {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Logger (unchanged)
+// Logger
 // ─────────────────────────────────────────────────────────────────────────────
 
 func buildLogger(level string) *slog.Logger {

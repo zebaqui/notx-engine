@@ -6,12 +6,8 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"time"
-
-	"golang.org/x/crypto/bcrypt"
 
 	"github.com/zebaqui/notx-engine/core"
-	pairing "github.com/zebaqui/notx-engine/internal/pairing"
 	"github.com/zebaqui/notx-engine/repo"
 )
 
@@ -21,14 +17,10 @@ import (
 // of the Provider instance. All operations are safe for concurrent use.
 type Provider struct {
 	mu       sync.RWMutex
-	notes    map[string]*core.Note          // urn → note (header + applied events)
-	events   map[string][]*core.Event       // urn → ordered event slice
-	projects map[string]*core.Project       // urn → project
-	folders  map[string]*core.Folder        // urn → folder
-	devices  map[string]*core.Device        // urn → device
-	users    map[string]*core.User          // urn → user
-	servers  map[string]*core.Server        // urn → server
-	secrets  map[string]*repo.PairingSecret // id → pairing secret
+	notes    map[string]*core.Note    // urn → note (header + applied events)
+	events   map[string][]*core.Event // urn → ordered event slice
+	projects map[string]*core.Project // urn → project
+	folders  map[string]*core.Folder  // urn → folder
 }
 
 // New returns an empty, ready-to-use in-memory Provider.
@@ -38,10 +30,6 @@ func New() *Provider {
 		events:   make(map[string][]*core.Event),
 		projects: make(map[string]*core.Project),
 		folders:  make(map[string]*core.Folder),
-		devices:  make(map[string]*core.Device),
-		users:    make(map[string]*core.User),
-		servers:  make(map[string]*core.Server),
-		secrets:  make(map[string]*repo.PairingSecret),
 	}
 }
 
@@ -94,6 +82,87 @@ func (p *Provider) Get(ctx context.Context, urn string) (*core.Note, error) {
 }
 
 // List returns a filtered, paginated list of note headers.
+func (p *Provider) ListSnips(ctx context.Context, opts repo.ListSnipsOptions) (*repo.ListResult, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	urns := make([]string, 0, len(p.notes))
+	for urn := range p.notes {
+		urns = append(urns, urn)
+	}
+	sort.Strings(urns)
+
+	pageSize := opts.PageSize
+	if pageSize <= 0 {
+		pageSize = 50
+	}
+
+	startIdx := 0
+	if opts.PageToken != "" {
+		for i, urn := range urns {
+			if urn == opts.PageToken {
+				startIdx = i + 1
+				break
+			}
+		}
+	}
+
+	var results []*core.Note
+	for _, urn := range urns[startIdx:] {
+		n := p.notes[urn]
+
+		// Only snip notes (SnipType must be non-nil).
+		if n.SnipType == nil {
+			continue
+		}
+		if !opts.IncludeDeleted && n.Deleted {
+			continue
+		}
+		if opts.SnipType != "" && *n.SnipType != opts.SnipType {
+			continue
+		}
+		if opts.ProjectURN != "" {
+			if n.ProjectURN == nil || n.ProjectURN.String() != opts.ProjectURN {
+				continue
+			}
+		}
+		if opts.ParentURN != "" {
+			if n.ParentURN == nil || n.ParentURN.String() != opts.ParentURN {
+				continue
+			}
+		}
+		if opts.ParentAnchor != "" {
+			if n.ParentAnchor == nil || *n.ParentAnchor != opts.ParentAnchor {
+				continue
+			}
+		}
+
+		results = append(results, cloneHeader(n))
+
+		if len(results) >= pageSize {
+			break
+		}
+	}
+
+	nextToken := ""
+	if len(results) == pageSize {
+		nextToken = results[len(results)-1].URN.String()
+	}
+
+	if results == nil {
+		results = []*core.Note{}
+	}
+
+	return &repo.ListResult{
+		Notes:         results,
+		NextPageToken: nextToken,
+	}, nil
+}
+
 func (p *Provider) List(ctx context.Context, opts repo.ListOptions) (*repo.ListResult, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -257,86 +326,6 @@ func (p *Provider) AppendEvent(ctx context.Context, event *core.Event, opts repo
 	}
 
 	p.events[noteURN] = append(p.events[noteURN], event)
-	return nil
-}
-
-// UpdateEventWrappedKeys merges wrappedKeys into every event's WrappedKeys map
-// for the given secure note without decrypting anything.
-func (p *Provider) UpdateEventWrappedKeys(ctx context.Context, noteURN string, wrappedKeys map[string][]byte) (int, error) {
-	if err := ctx.Err(); err != nil {
-		return 0, err
-	}
-
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	if _, ok := p.notes[noteURN]; !ok {
-		return 0, fmt.Errorf("%w: %s", repo.ErrNotFound, noteURN)
-	}
-
-	count := 0
-	for _, ev := range p.events[noteURN] {
-		if ev.WrappedKeys == nil {
-			ev.WrappedKeys = make(map[string][]byte, len(wrappedKeys))
-		}
-		for deviceURN, key := range wrappedKeys {
-			ev.WrappedKeys[deviceURN] = key
-		}
-		count++
-	}
-	return count, nil
-}
-
-// ReceiveSharedNote stores a note header and its full event stream forwarded
-// from a paired server. Idempotent: if the note already exists the header is
-// updated and only new events (sequence > current head) are appended.
-func (p *Provider) ReceiveSharedNote(ctx context.Context, note *core.Note, events []*core.Event) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-
-	noteURN := note.URN.String()
-
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	if existing, ok := p.notes[noteURN]; ok {
-		// Update mutable header fields.
-		existing.Name = note.Name
-		existing.Deleted = note.Deleted
-		existing.UpdatedAt = note.UpdatedAt
-		if note.ProjectURN != nil {
-			urn := *note.ProjectURN
-			existing.ProjectURN = &urn
-		}
-		if note.FolderURN != nil {
-			urn := *note.FolderURN
-			existing.FolderURN = &urn
-		}
-		// Append only events that come after the current head.
-		currentHead := len(p.events[noteURN])
-		for _, ev := range events {
-			if ev.Sequence > currentHead {
-				if err := existing.ApplyEvent(ev); err != nil {
-					return fmt.Errorf("memory provider: receive shared note apply event seq %d: %w", ev.Sequence, err)
-				}
-				p.events[noteURN] = append(p.events[noteURN], ev)
-				currentHead = ev.Sequence
-			}
-		}
-		return nil
-	}
-
-	// Brand-new note on this server.
-	clone := cloneHeader(note)
-	p.notes[noteURN] = clone
-	p.events[noteURN] = make([]*core.Event, 0, len(events))
-	for _, ev := range events {
-		if err := clone.ApplyEvent(ev); err != nil {
-			return fmt.Errorf("memory provider: receive shared note replay seq %d: %w", ev.Sequence, err)
-		}
-		p.events[noteURN] = append(p.events[noteURN], ev)
-	}
 	return nil
 }
 
@@ -679,210 +668,6 @@ func (p *Provider) DeleteFolder(ctx context.Context, urn string) error {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// DeviceRepository
-// ─────────────────────────────────────────────────────────────────────────────
-
-func (p *Provider) RegisterDevice(ctx context.Context, d *core.Device) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	urn := d.URN.String()
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if _, exists := p.devices[urn]; exists {
-		return fmt.Errorf("%w: %s", repo.ErrAlreadyExists, urn)
-	}
-	clone := *d
-	p.devices[urn] = &clone
-	return nil
-}
-
-func (p *Provider) GetDevice(ctx context.Context, urn string) (*core.Device, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	d, ok := p.devices[urn]
-	if !ok {
-		return nil, fmt.Errorf("%w: %s", repo.ErrNotFound, urn)
-	}
-	clone := *d
-	return &clone, nil
-}
-
-func (p *Provider) ListDevices(ctx context.Context, opts repo.DeviceListOptions) (*repo.DeviceListResult, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-
-	urns := make([]string, 0, len(p.devices))
-	for urn := range p.devices {
-		urns = append(urns, urn)
-	}
-	sort.Strings(urns)
-
-	var results []*core.Device
-	for _, urn := range urns {
-		d := p.devices[urn]
-		if !opts.IncludeRevoked && d.Revoked {
-			continue
-		}
-		if opts.OwnerURN != "" && d.OwnerURN.String() != opts.OwnerURN {
-			continue
-		}
-		clone := *d
-		results = append(results, &clone)
-	}
-	if results == nil {
-		results = []*core.Device{}
-	}
-	return &repo.DeviceListResult{Devices: results}, nil
-}
-
-func (p *Provider) UpdateDevice(ctx context.Context, d *core.Device) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	urn := d.URN.String()
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if _, ok := p.devices[urn]; !ok {
-		return fmt.Errorf("%w: %s", repo.ErrNotFound, urn)
-	}
-	clone := *d
-	p.devices[urn] = &clone
-	return nil
-}
-
-func (p *Provider) RevokeDevice(ctx context.Context, urn string) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	d, ok := p.devices[urn]
-	if !ok {
-		return fmt.Errorf("%w: %s", repo.ErrNotFound, urn)
-	}
-	d.Revoked = true
-	return nil
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// UserRepository
-// ─────────────────────────────────────────────────────────────────────────────
-
-func (p *Provider) CreateUser(ctx context.Context, u *core.User) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	urn := u.URN.String()
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if _, exists := p.users[urn]; exists {
-		return fmt.Errorf("%w: %s", repo.ErrAlreadyExists, urn)
-	}
-	clone := *u
-	p.users[urn] = &clone
-	return nil
-}
-
-func (p *Provider) GetUser(ctx context.Context, urn string) (*core.User, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	u, ok := p.users[urn]
-	if !ok {
-		return nil, fmt.Errorf("%w: %s", repo.ErrNotFound, urn)
-	}
-	clone := *u
-	return &clone, nil
-}
-
-func (p *Provider) ListUsers(ctx context.Context, opts repo.UserListOptions) (*repo.UserListResult, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-
-	urns := make([]string, 0, len(p.users))
-	for urn := range p.users {
-		urns = append(urns, urn)
-	}
-	sort.Strings(urns)
-
-	// Pagination: use URN string as cursor.
-	startIdx := 0
-	if opts.PageToken != "" {
-		for i, urn := range urns {
-			if urn > opts.PageToken {
-				startIdx = i
-				break
-			}
-		}
-	}
-
-	pageSize := opts.PageSize
-	if pageSize <= 0 {
-		pageSize = 50
-	}
-
-	var results []*core.User
-	var nextToken string
-	for i := startIdx; i < len(urns); i++ {
-		u := p.users[urns[i]]
-		if !opts.IncludeDeleted && u.Deleted {
-			continue
-		}
-		if len(results) == pageSize {
-			nextToken = urns[i]
-			break
-		}
-		clone := *u
-		results = append(results, &clone)
-	}
-	if results == nil {
-		results = []*core.User{}
-	}
-	return &repo.UserListResult{Users: results, NextPageToken: nextToken}, nil
-}
-
-func (p *Provider) UpdateUser(ctx context.Context, u *core.User) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	urn := u.URN.String()
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if _, ok := p.users[urn]; !ok {
-		return fmt.Errorf("%w: %s", repo.ErrNotFound, urn)
-	}
-	clone := *u
-	p.users[urn] = &clone
-	return nil
-}
-
-func (p *Provider) DeleteUser(ctx context.Context, urn string) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	u, ok := p.users[urn]
-	if !ok {
-		return fmt.Errorf("%w: %s", repo.ErrNotFound, urn)
-	}
-	u.Deleted = true
-	return nil
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 // Internal helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -911,126 +696,6 @@ func cloneHeader(n *core.Note) *core.Note {
 	}
 	return clone
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// ServerRepository
-// ─────────────────────────────────────────────────────────────────────────────
-
-func (p *Provider) RegisterServer(_ context.Context, s *core.Server) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	key := s.URN.String()
-	cp := *s
-	p.servers[key] = &cp
-	return nil
-}
-
-func (p *Provider) GetServer(_ context.Context, urn string) (*core.Server, error) {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	sv, ok := p.servers[urn]
-	if !ok {
-		return nil, fmt.Errorf("%w: server %q", repo.ErrNotFound, urn)
-	}
-	cp := *sv
-	return &cp, nil
-}
-
-func (p *Provider) ListServers(_ context.Context, opts repo.ServerListOptions) (*repo.ServerListResult, error) {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	var out []*core.Server
-	for _, sv := range p.servers {
-		if sv.Revoked && !opts.IncludeRevoked {
-			continue
-		}
-		cp := *sv
-		out = append(out, &cp)
-	}
-	return &repo.ServerListResult{Servers: out}, nil
-}
-
-func (p *Provider) UpdateServer(_ context.Context, s *core.Server) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	key := s.URN.String()
-	if _, ok := p.servers[key]; !ok {
-		return fmt.Errorf("%w: server %q", repo.ErrNotFound, key)
-	}
-	cp := *s
-	p.servers[key] = &cp
-	return nil
-}
-
-func (p *Provider) RevokeServer(_ context.Context, urn string) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	sv, ok := p.servers[urn]
-	if !ok {
-		return fmt.Errorf("%w: server %q", repo.ErrNotFound, urn)
-	}
-	sv.Revoked = true
-	return nil
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// PairingSecretStore
-// ─────────────────────────────────────────────────────────────────────────────
-
-func (p *Provider) AddSecret(_ context.Context, s *repo.PairingSecret) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	cp := *s
-	p.secrets[s.ID] = &cp
-	return nil
-}
-
-func (p *Provider) ConsumeSecret(_ context.Context, plaintext string) (*repo.PairingSecret, error) {
-	// Extract the ID from the token — O(1) map lookup instead of iterating all secrets.
-	id, ok := pairing.ExtractSecretID(plaintext)
-	if !ok {
-		return nil, fmt.Errorf("%w: malformed pairing secret token", repo.ErrNotFound)
-	}
-
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	s, found := p.secrets[id]
-	if !found {
-		return nil, fmt.Errorf("%w: pairing secret not found", repo.ErrNotFound)
-	}
-
-	now := timeNow()
-
-	if s.UsedAt != nil {
-		return nil, fmt.Errorf("%w: pairing secret already used", repo.ErrNotFound)
-	}
-	if now.After(s.ExpiresAt) {
-		return nil, fmt.Errorf("%w: pairing secret expired", repo.ErrNotFound)
-	}
-	if err := bcrypt.CompareHashAndPassword([]byte(s.HashBcrypt), []byte(plaintext)); err != nil {
-		return nil, fmt.Errorf("%w: pairing secret invalid", repo.ErrNotFound)
-	}
-
-	s.UsedAt = &now
-	cp := *s
-	return &cp, nil
-}
-
-func (p *Provider) PruneExpired(_ context.Context) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	now := timeNow()
-	for id, s := range p.secrets {
-		if now.After(s.ExpiresAt) {
-			delete(p.secrets, id)
-		}
-	}
-	return nil
-}
-
-// timeNow is a package-level variable so tests can override it.
-var timeNow = func() time.Time { return time.Now().UTC() }
 
 func cloneNoteWithEvents(base *core.Note, evts []*core.Event) (*core.Note, error) {
 	n := cloneHeader(base)

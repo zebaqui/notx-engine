@@ -47,6 +47,11 @@ func del(line int) LineEntry {
 	return LineEntry{LineNumber: line, Op: LineOpDelete}
 }
 
+// ins is a shorthand for a LineOpInsert entry.
+func ins(line int, content string) LineEntry {
+	return LineEntry{LineNumber: line, Op: LineOpInsert, Content: content}
+}
+
 // mustApply calls ApplyEvent and fails the test on error.
 func mustApply(t *testing.T, n *Note, e *Event) {
 	t.Helper()
@@ -921,5 +926,177 @@ func TestNote_SoftDelete(t *testing.T) {
 	n.Deleted = true
 	if !n.Deleted {
 		t.Error("Deleted flag not set")
+	}
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// LineOpInsert
+// ──────────────────────────────────────────────────────────────────────────────
+
+func TestApplyEvent_InsertShiftsLines(t *testing.T) {
+	n := newNote()
+	// Seed: lines 1="a", 2="b", 3="c"
+	mustApply(t, n, makeEvent(1, testAuthorURN, testT0,
+		set(1, "a"), set(2, "b"), set(3, "c"),
+	))
+	// Insert "X" at line 2 → lines should be: 1="a", 2="X", 3="b", 4="c"
+	mustApply(t, n, makeEvent(2, testAuthorURN, testT0,
+		ins(2, "X"),
+	))
+	got := n.Content()
+	want := "a\nX\nb\nc"
+	if got != want {
+		t.Errorf("InsertShiftsLines: got %q, want %q", got, want)
+	}
+}
+
+func TestApplyEvent_InsertAtEnd(t *testing.T) {
+	n := newNote()
+	mustApply(t, n, makeEvent(1, testAuthorURN, testT0, set(1, "a")))
+	mustApply(t, n, makeEvent(2, testAuthorURN, testT0,
+		ins(2, "b"),
+	))
+	if got := n.Content(); got != "a\nb" {
+		t.Errorf("InsertAtEnd: got %q, want %q", got, "a\nb")
+	}
+}
+
+func TestApplyEvent_InsertThenSet(t *testing.T) {
+	n := newNote()
+	mustApply(t, n, makeEvent(1, testAuthorURN, testT0,
+		set(1, "a"), set(2, "b"),
+	))
+	// Pre-event doc: ["a","b"]. Line numbers use offset (pre-event) semantics:
+	// ins(1,"X"): inserts before pre-event line 1 ("a"), offset becomes +1.
+	// set(2,"B"): pre-event position 2 ("b"), idx = 2-1+1 = 2 in evolving doc
+	//             → sets "b" (now at index 2) to "B".
+	// Result: ["X","a","B"]
+	mustApply(t, n, makeEvent(2, testAuthorURN, testT0,
+		ins(1, "X"),
+		set(2, "B"),
+	))
+	if got := n.Content(); got != "X\na\nB" {
+		t.Errorf("InsertThenSet: got %q, want %q", got, "X\na\nB")
+	}
+}
+
+func TestApplyEvent_InsertAtLine1(t *testing.T) {
+	n := newNote()
+	mustApply(t, n, makeEvent(1, testAuthorURN, testT0,
+		set(1, "first"), set(2, "second"),
+	))
+	mustApply(t, n, makeEvent(2, testAuthorURN, testT0,
+		ins(1, "new first"),
+	))
+	lines, _ := n.LinesAt(2)
+	if len(lines) != 3 {
+		t.Fatalf("expected 3 lines, got %d: %v", len(lines), lines)
+	}
+	if lines[0] != "new first" || lines[1] != "first" || lines[2] != "second" {
+		t.Errorf("unexpected lines after insert at 1: %v", lines)
+	}
+}
+
+func TestApplyEvent_MultipleInsertsInOneEvent(t *testing.T) {
+	n := newNote()
+	mustApply(t, n, makeEvent(1, testAuthorURN, testT0,
+		set(1, "a"), set(2, "b"),
+	))
+	// Pre-event doc: ["a","b"]. Line numbers use offset (pre-event) semantics:
+	// ins(1,"X"): inserts before pre-event line 1 ("a"), offset becomes +1.
+	// ins(2,"Y"): pre-event position 2 ("b"), idx = 2-1+1 = 2 in evolving doc
+	//             → inserts "Y" before "b", giving ["X","a","Y","b"].
+	mustApply(t, n, makeEvent(2, testAuthorURN, testT0,
+		ins(1, "X"),
+		ins(2, "Y"),
+	))
+	if got := n.Content(); got != "X\na\nY\nb" {
+		t.Errorf("MultipleInserts: got %q, want %q", got, "X\na\nY\nb")
+	}
+}
+
+func TestApplyEvent_InsertEmptyLine(t *testing.T) {
+	n := newNote()
+	mustApply(t, n, makeEvent(1, testAuthorURN, testT0,
+		set(1, "a"), set(2, "b"),
+	))
+	mustApply(t, n, makeEvent(2, testAuthorURN, testT0,
+		LineEntry{LineNumber: 2, Op: LineOpInsert, Content: ""},
+	))
+	lines, _ := n.LinesAt(2)
+	if len(lines) != 3 {
+		t.Fatalf("expected 3 lines, got %d", len(lines))
+	}
+	if lines[0] != "a" || lines[1] != "" || lines[2] != "b" {
+		t.Errorf("unexpected lines after empty insert: %v", lines)
+	}
+}
+
+func TestEventPayload_InsertLine(t *testing.T) {
+	e := &Event{
+		Sequence: 1,
+		Entries: []LineEntry{
+			ins(3, "hello"),
+		},
+	}
+	want := "3 |+ hello"
+	if got := e.Payload(); got != want {
+		t.Errorf("Payload() for insert: got %q, want %q", got, want)
+	}
+}
+
+func TestEventPayload_InsertEmptyLine(t *testing.T) {
+	e := &Event{
+		Sequence: 1,
+		Entries: []LineEntry{
+			{LineNumber: 2, Op: LineOpInsert, Content: ""},
+		},
+	}
+	want := "2 |+"
+	if got := e.Payload(); got != want {
+		t.Errorf("Payload() for empty insert: got %q, want %q", got, want)
+	}
+}
+
+func TestEventPayload_InsertRoundTrip(t *testing.T) {
+	// Verify that Payload() output for LineOpInsert is re-parseable by ParserV1.
+	cases := []struct {
+		lineNum int
+		content string
+		wantRaw string
+	}{
+		{1, "hello world", "1 |+ hello world"},
+		{5, "", "5 |+"},
+		{99, "  leading spaces", "99 |+   leading spaces"},
+	}
+
+	for _, tc := range cases {
+		e := &Event{
+			Sequence: 1,
+			Entries:  []LineEntry{{LineNumber: tc.lineNum, Op: LineOpInsert, Content: tc.content}},
+		}
+		payload := e.Payload()
+		if payload != tc.wantRaw {
+			t.Errorf("Payload(%d, %q) = %q, want %q", tc.lineNum, tc.content, payload, tc.wantRaw)
+		}
+
+		// Re-parse via parser.
+		parsed, _, err := new(ParserV1).parseEventEntries([]string{payload, ""}, 0)
+		if err != nil {
+			t.Fatalf("parseEventEntries(%q): %v", payload, err)
+		}
+		if len(parsed) != 1 {
+			t.Fatalf("parseEventEntries(%q): got %d entries, want 1", payload, len(parsed))
+		}
+		got := parsed[0]
+		if got.Op != LineOpInsert {
+			t.Errorf("Op: got %v, want LineOpInsert", got.Op)
+		}
+		if got.LineNumber != tc.lineNum {
+			t.Errorf("LineNumber: got %d, want %d", got.LineNumber, tc.lineNum)
+		}
+		if got.Content != tc.content {
+			t.Errorf("Content: got %q, want %q", got.Content, tc.content)
+		}
 	}
 }

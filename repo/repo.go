@@ -77,6 +77,37 @@ type ListResult struct {
 	NextPageToken string
 }
 
+// ListSnipsOptions filters and paginates the snip index query.
+type ListSnipsOptions struct {
+	// SnipType, if non-empty, restricts results to snips of this type.
+	// An empty string returns snips of all registered types.
+	SnipType string
+
+	// ProjectURN, if non-empty, restricts results to snips belonging to this
+	// project.
+	ProjectURN string
+
+	// ParentURN, if non-empty, restricts results to sidecar snips whose
+	// ParentURN matches this value.
+	ParentURN string
+
+	// ParentAnchor, if non-empty, restricts results to snips bound to this
+	// specific anchor within their parent note. Only meaningful when ParentURN
+	// is also set.
+	ParentAnchor string
+
+	// IncludeDeleted includes soft-deleted snips in the result set when true.
+	IncludeDeleted bool
+
+	// PageSize is the maximum number of snips to return.
+	// A value of 0 means "use the provider's default".
+	PageSize int
+
+	// PageToken is an opaque continuation token returned by a previous
+	// ListSnips call. Pass the empty string to start from the beginning.
+	PageToken string
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Search options
 // ─────────────────────────────────────────────────────────────────────────────
@@ -156,7 +187,12 @@ type NoteRepository interface {
 
 	// List returns a filtered, paginated list of notes.
 	// Implementations must never include secure note content in index lookups.
+	// Regular notes with a nil snip_type are returned; snips are never included.
 	List(ctx context.Context, opts ListOptions) (*ListResult, error)
+
+	// ListSnips returns notes that have a snip_type set. Regular notes
+	// (snip_type IS NULL) are never returned. List never returns snips.
+	ListSnips(ctx context.Context, opts ListSnipsOptions) (*ListResult, error)
 
 	// Update persists changes to a note's mutable header fields (Name,
 	// ProjectURN, FolderURN, ParentURN, NodeLinks, Deleted).
@@ -192,28 +228,6 @@ type NoteRepository interface {
 	//
 	// Returns ErrNotFound if the note does not exist.
 	Events(ctx context.Context, noteURN string, fromSequence int) ([]*core.Event, error)
-
-	// UpdateEventWrappedKeys merges the provided wrappedKeys map into the
-	// WrappedKeys field of every event belonging to the given secure note.
-	// Keys present in wrappedKeys overwrite existing values; keys absent from
-	// wrappedKeys are left unchanged.
-	//
-	// This is the server-side half of the share-secure-note protocol: the
-	// client re-wraps the Content Encryption Key (CEK) for each recipient
-	// device and uploads the wrapped keys; the server stores them against the
-	// encrypted event blobs without ever seeing the plaintext CEK.
-	//
-	// Returns ErrNotFound if the note does not exist.
-	UpdateEventWrappedKeys(ctx context.Context, noteURN string, wrappedKeys map[string][]byte) (int, error)
-
-	// ReceiveSharedNote stores a note header and its full event stream that
-	// have been forwarded from a paired server. It is idempotent: if the note
-	// already exists the header is updated and any events with sequences higher
-	// than the current head are appended.
-	//
-	// This is used by the cross-server note-sharing flow: Server A pushes a
-	// note to Server B so that Client B (registered on Server B) can read it.
-	ReceiveSharedNote(ctx context.Context, note *core.Note, events []*core.Event) error
 
 	// ── Search ──────────────────────────────────────────────────────────────
 
@@ -253,6 +267,10 @@ type IndexEntry struct {
 	UpdatedAt  time.Time     `json:"updated_at"`
 	// HeadSequence is the sequence number of the last persisted event.
 	HeadSequence int `json:"head_sequence"`
+	// SnipType, when non-nil, mirrors Note.SnipType. Nil for regular notes.
+	SnipType *string `json:"snip_type,omitempty"`
+	// ParentAnchor, when non-nil, mirrors Note.ParentAnchor for sidecar snips.
+	ParentAnchor *string `json:"parent_anchor,omitempty"`
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -342,97 +360,6 @@ type ProjectRepository interface {
 	// DeleteFolder soft-deletes a folder by setting its Deleted flag.
 	// Returns ErrNotFound if the folder does not exist.
 	DeleteFolder(ctx context.Context, urn string) error
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// DeviceListOptions / DeviceListResult
-// ─────────────────────────────────────────────────────────────────────────────
-
-// DeviceListOptions controls filtering for DeviceRepository.ListDevices.
-type DeviceListOptions struct {
-	// OwnerURN, if non-empty, restricts results to devices owned by this user.
-	OwnerURN string
-	// IncludeRevoked includes revoked devices in the result when true.
-	IncludeRevoked bool
-}
-
-// DeviceListResult is the return value of DeviceRepository.ListDevices.
-type DeviceListResult struct {
-	Devices []*core.Device
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// DeviceRepository — storage for registered devices
-// ─────────────────────────────────────────────────────────────────────────────
-
-// DeviceRepository is the storage abstraction for client devices.
-// Implementations must be safe for concurrent use.
-type DeviceRepository interface {
-	// RegisterDevice persists a new device.
-	// Returns ErrAlreadyExists if a device with the same URN already exists.
-	RegisterDevice(ctx context.Context, d *core.Device) error
-
-	// GetDevice retrieves a device by URN.
-	// Returns ErrNotFound if no device with that URN exists.
-	GetDevice(ctx context.Context, urn string) (*core.Device, error)
-
-	// ListDevices returns devices, optionally filtered by owner.
-	ListDevices(ctx context.Context, opts DeviceListOptions) (*DeviceListResult, error)
-
-	// UpdateDevice persists changes to mutable fields (Name, LastSeenAt).
-	// Returns ErrNotFound if the device does not exist.
-	UpdateDevice(ctx context.Context, d *core.Device) error
-
-	// RevokeDevice permanently revokes a device by setting Revoked=true.
-	// Returns ErrNotFound if the device does not exist.
-	RevokeDevice(ctx context.Context, urn string) error
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// UserListOptions / UserListResult
-// ─────────────────────────────────────────────────────────────────────────────
-
-// UserListOptions controls filtering and pagination for UserRepository.ListUsers.
-type UserListOptions struct {
-	// IncludeDeleted includes soft-deleted users when true.
-	IncludeDeleted bool
-	// PageSize is the maximum number of users to return. 0 means provider default.
-	PageSize int
-	// PageToken is the opaque continuation token from a previous call.
-	PageToken string
-}
-
-// UserListResult is the return value of UserRepository.ListUsers.
-type UserListResult struct {
-	Users         []*core.User
-	NextPageToken string
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// UserRepository — storage for human users
-// ─────────────────────────────────────────────────────────────────────────────
-
-// UserRepository is the storage abstraction for user records.
-// Implementations must be safe for concurrent use.
-type UserRepository interface {
-	// CreateUser persists a new user.
-	// Returns ErrAlreadyExists if a user with the same URN already exists.
-	CreateUser(ctx context.Context, u *core.User) error
-
-	// GetUser retrieves a user by URN.
-	// Returns ErrNotFound if no user with that URN exists.
-	GetUser(ctx context.Context, urn string) (*core.User, error)
-
-	// ListUsers returns a paginated list of users.
-	ListUsers(ctx context.Context, opts UserListOptions) (*UserListResult, error)
-
-	// UpdateUser persists changes to mutable fields (DisplayName, Email, Deleted).
-	// Returns ErrNotFound if the user does not exist.
-	UpdateUser(ctx context.Context, u *core.User) error
-
-	// DeleteUser soft-deletes a user by setting Deleted=true.
-	// Returns ErrNotFound if the user does not exist.
-	DeleteUser(ctx context.Context, urn string) error
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

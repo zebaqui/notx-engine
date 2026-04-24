@@ -5,15 +5,14 @@
 // server directly — without going through the HTTP layer or the notx
 // application CLI.
 //
-// Global connection flags (--addr, --insecure, --cert, --key, --ca) are
-// resolved once at the root level and passed down to every sub-command via the
-// rootContext type stored in cobra's context.
+// Global connection flags (--addr, --insecure) are resolved once at the root
+// level and passed down to every sub-command via the rootContext type stored
+// in cobra's context.
 //
 // Output is printed in one of three formats selected by --output / -o:
 //
 //	table  (default) — human-readable, aligned columns
 //	json             — pretty-printed JSON
-//	yaml             — YAML (via simple JSON→YAML conversion)
 package notxctl
 
 import (
@@ -26,9 +25,11 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 
 	"github.com/zebaqui/notx-engine/internal/buildinfo"
-	"github.com/zebaqui/notx-engine/internal/grpcclient"
+	pb "github.com/zebaqui/notx-engine/proto"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -36,13 +37,72 @@ import (
 // ─────────────────────────────────────────────────────────────────────────────
 
 var globalFlags struct {
-	addr     string
-	insecure bool
-	certFile string
-	keyFile  string
-	caFile   string
-	output   string // "table" | "json"
-	timeout  time.Duration
+	addr    string
+	output  string // "table" | "json"
+	timeout time.Duration
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// notxConn — thin wrapper around *grpc.ClientConn that provides typed service
+// accessors matching the API previously exposed by grpcclient.Conn.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// notxConn wraps a *grpc.ClientConn and exposes per-service client constructors
+// so that sub-command files can call conn.Notes(), conn.Projects(), etc. without
+// needing to import the proto package or construct clients themselves.
+type notxConn struct {
+	cc *grpc.ClientConn
+}
+
+// grpcDial opens a plain insecure gRPC connection to addr and returns a
+// *notxConn ready for use. The caller is responsible for calling Close().
+func grpcDial(addr string, timeout time.Duration) (*notxConn, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	cc, err := grpc.DialContext( //nolint:staticcheck // DialContext is fine for our use case
+		ctx,
+		addr,
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithBlock(),
+	)
+	if err != nil {
+		return nil, err
+	}
+	return &notxConn{cc: cc}, nil
+}
+
+// Close closes the underlying gRPC connection.
+func (c *notxConn) Close() error {
+	if c == nil || c.cc == nil {
+		return nil
+	}
+	return c.cc.Close()
+}
+
+// Notes returns a NoteServiceClient backed by this connection.
+func (c *notxConn) Notes() pb.NoteServiceClient {
+	return pb.NewNoteServiceClient(c.cc)
+}
+
+// Projects returns a ProjectServiceClient backed by this connection.
+func (c *notxConn) Projects() pb.ProjectServiceClient {
+	return pb.NewProjectServiceClient(c.cc)
+}
+
+// Folders returns a FolderServiceClient backed by this connection.
+func (c *notxConn) Folders() pb.FolderServiceClient {
+	return pb.NewFolderServiceClient(c.cc)
+}
+
+// Context returns a ContextServiceClient backed by this connection.
+func (c *notxConn) Context() pb.ContextServiceClient {
+	return pb.NewContextServiceClient(c.cc)
+}
+
+// Links returns a LinkServiceClient backed by this connection.
+func (c *notxConn) Links() pb.LinkServiceClient {
+	return pb.NewLinkServiceClient(c.cc)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -52,17 +112,17 @@ var globalFlags struct {
 type rootCtxKey struct{}
 
 // rootContext is injected into every command's context so sub-commands can
-// obtain a ready-to-use *grpcclient.Conn without re-parsing flags.
+// obtain a ready-to-use *notxConn without re-parsing flags.
 type rootContext struct {
-	conn   *grpcclient.Conn
+	conn   *notxConn
 	output string
 }
 
-// connFromCtx retrieves the shared *grpcclient.Conn from cmd's context.
+// connFromCtx retrieves the shared *notxConn from cmd's context.
 // It panics if called before the root PersistentPreRunE has run — which
 // can only happen if a sub-command overrides PersistentPreRunE without
 // calling parent hooks.
-func connFromCtx(cmd *cobra.Command) *grpcclient.Conn {
+func connFromCtx(cmd *cobra.Command) *notxConn {
 	rc, ok := cmd.Context().Value(rootCtxKey{}).(*rootContext)
 	if !ok || rc == nil {
 		panic("notxctl: rootContext not found in command context — this is a bug")
@@ -94,11 +154,7 @@ the notx application CLI.
 
 CONNECTION FLAGS (apply to every sub-command):
 
-  --addr       host:port of the notx gRPC server  (default: localhost:50051)
-  --insecure   disable transport security (plaintext)
-  --cert       path to PEM client certificate (mTLS)
-  --key        path to PEM client private key  (mTLS)
-  --ca         path to PEM CA certificate (custom CA / self-signed)
+  --addr       host:port of the notx gRPC server  (default: 127.0.0.1:50051)
 
 OUTPUT FLAGS:
 
@@ -111,16 +167,6 @@ EXAMPLES:
 
   # get a specific note as JSON
   notxctl notes get notx:note:… -o json
-
-  # connect to a remote TLS server
-  notxctl --addr grpc.example.com:50051 --ca /etc/notx/ca.crt notes list
-
-  # mTLS
-  notxctl --addr grpc.example.com:50051 \
-          --cert /etc/notx/client.crt   \
-          --key  /etc/notx/client.key   \
-          --ca   /etc/notx/ca.crt       \
-          pairing list
 
   # version
   notxctl version`,
@@ -136,16 +182,7 @@ EXAMPLES:
 			return nil
 		}
 
-		opts := grpcclient.Options{
-			Addr:        globalFlags.addr,
-			Insecure:    globalFlags.insecure,
-			CertFile:    globalFlags.certFile,
-			KeyFile:     globalFlags.keyFile,
-			CAFile:      globalFlags.caFile,
-			DialTimeout: globalFlags.timeout,
-		}
-
-		conn, err := grpcclient.Dial(opts)
+		conn, err := grpcDial(globalFlags.addr, globalFlags.timeout)
 		if err != nil {
 			return fmt.Errorf("connect to %s: %w", globalFlags.addr, err)
 		}
@@ -183,16 +220,8 @@ func Execute() {
 func init() {
 	f := rootCmd.PersistentFlags()
 
-	f.StringVar(&globalFlags.addr, "addr", "localhost:50051",
+	f.StringVar(&globalFlags.addr, "addr", "127.0.0.1:50051",
 		"notx gRPC server address (host:port)")
-	f.BoolVar(&globalFlags.insecure, "insecure", false,
-		"disable transport security (plaintext — dev only)")
-	f.StringVar(&globalFlags.certFile, "cert", "",
-		"path to PEM client certificate for mTLS")
-	f.StringVar(&globalFlags.keyFile, "key", "",
-		"path to PEM client private key for mTLS")
-	f.StringVar(&globalFlags.caFile, "ca", "",
-		"path to PEM CA certificate (overrides system roots)")
 	f.StringVarP(&globalFlags.output, "output", "o", "table",
 		"output format: table | json")
 	f.DurationVar(&globalFlags.timeout, "timeout", 10*time.Second,
@@ -200,10 +229,8 @@ func init() {
 
 	// Register all service command groups.
 	rootCmd.AddCommand(notesCmd)
-	rootCmd.AddCommand(devicesCmd)
 	rootCmd.AddCommand(projectsCmd)
 	rootCmd.AddCommand(foldersCmd)
-	rootCmd.AddCommand(pairingCmd)
 	rootCmd.AddCommand(contextCmd)
 	rootCmd.AddCommand(linksCmd)
 	rootCmd.AddCommand(versionCmd)
@@ -272,7 +299,6 @@ func fmtBool(b bool, trueVal, falseVal string) string {
 }
 
 // shortURN returns the last 8 hex characters of the UUID segment of a notx URN.
-// e.g. "urn:notx:note:1a9670dd-1a65-481a-ad17-03d77de021e5" → "1a9670dd-1a65-481a-ad17-03d77de021e5"
 // Falls back to the full string if the URN is malformed.
 func shortURN(urn string) string {
 	parts := strings.Split(urn, ":")

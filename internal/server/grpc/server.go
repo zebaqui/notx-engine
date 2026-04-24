@@ -2,52 +2,48 @@ package grpc
 
 import (
 	"context"
-	"crypto/tls"
-	"crypto/x509"
 	"fmt"
 	"log/slog"
 	"net"
-	"os"
+	"time"
 
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/reflection"
 
 	"github.com/zebaqui/notx-engine/config"
-	"github.com/zebaqui/notx-engine/internal/relay"
 	pb "github.com/zebaqui/notx-engine/proto"
 	"github.com/zebaqui/notx-engine/repo"
-
-	"time"
 )
 
 // Server wraps a grpc.Server and owns the lifecycle of the gRPC listener.
-// It registers NoteServer, DeviceServer, DeviceAdminServer and the other
-// service servers, and handles TLS / mTLS configuration derived from Config.
+// It registers NoteServer, ProjectServer, FolderServer, and optionally
+// ContextServer and LinkServer. All traffic is plaintext localhost-only.
 type Server struct {
-	cfg          *config.Config
-	log          *slog.Logger
-	gs           *grpc.Server
-	noteS        *NoteServer
-	deviceS      *DeviceServer
-	deviceAdminS *DeviceAdminServer
-	projS        *ProjectServer
-	relayS       *RelayServer
-	userS        *UserServer
+	cfg      *config.Config
+	log      *slog.Logger
+	gs       *grpc.Server
+	noteS    *NoteServer
+	projS    *ProjectServer
+	folderS  *FolderServer
+	contextS *ContextServer // optional — nil when contextRepo is nil
+	linkS    *LinkServer    // optional — nil when linkRepo is nil
 }
 
 // NewServer creates a fully wired gRPC Server ready to call Serve on.
-// It does NOT start listening; call Serve to begin accepting connections.
-func NewServer(cfg *config.Config, r repo.NoteRepository, projRepo repo.ProjectRepository, devRepo repo.DeviceRepository, userRepo repo.UserRepository, log *slog.Logger) (*Server, error) {
-	creds, err := buildTransportCredentials(cfg)
-	if err != nil {
-		return nil, fmt.Errorf("grpc: build TLS credentials: %w", err)
-	}
-
+// contextRepo and linkRepo may be nil; their corresponding services are only
+// registered when a non-nil repository is provided.
+func NewServer(
+	cfg *config.Config,
+	r repo.NoteRepository,
+	projRepo repo.ProjectRepository,
+	contextRepo repo.ContextRepository,
+	linkRepo repo.LinkRepository,
+	log *slog.Logger,
+) (*Server, error) {
 	opts := []grpc.ServerOption{
-		grpc.Creds(creds),
+		grpc.Creds(insecure.NewCredentials()),
 		grpc.KeepaliveParams(keepalive.ServerParameters{
 			MaxConnectionIdle:     5 * time.Minute,
 			MaxConnectionAge:      30 * time.Minute,
@@ -69,33 +65,36 @@ func NewServer(cfg *config.Config, r repo.NoteRepository, projRepo repo.ProjectR
 
 	noteS := NewNoteServer(r, cfg.DefaultPageSize, cfg.MaxPageSize)
 	projS := NewProjectServer(projRepo, cfg.DefaultPageSize, cfg.MaxPageSize)
-	deviceS := NewDeviceServer(devRepo)
-	deviceAdminS := NewDeviceAdminServer(devRepo)
-	relayPolicy := relay.DefaultPolicy()
-	relayS := NewRelayServer(devRepo, relayPolicy, log, nil)
-	userS := NewUserServer(userRepo, cfg.DefaultPageSize, cfg.MaxPageSize)
+	folderS := NewFolderServer(projRepo, cfg.DefaultPageSize, cfg.MaxPageSize)
 
 	pb.RegisterNoteServiceServer(gs, noteS)
 	pb.RegisterProjectServiceServer(gs, projS)
-	pb.RegisterDeviceServiceServer(gs, deviceS)
-	pb.RegisterDeviceAdminServiceServer(gs, deviceAdminS)
-	pb.RegisterRelayServiceServer(gs, relayS)
+	pb.RegisterFolderServiceServer(gs, folderS)
 
-	pb.RegisterUserServiceServer(gs, userS)
+	var contextS *ContextServer
+	if contextRepo != nil {
+		contextS = NewContextServer(contextRepo, cfg.DefaultPageSize, cfg.MaxPageSize)
+		pb.RegisterContextServiceServer(gs, contextS)
+	}
+
+	var linkS *LinkServer
+	if linkRepo != nil {
+		linkS = NewLinkServer(linkRepo)
+		pb.RegisterLinkServiceServer(gs, linkS)
+	}
 
 	// Enable gRPC server reflection so tools like grpcurl work out of the box.
 	reflection.Register(gs)
 
 	return &Server{
-		cfg:          cfg,
-		log:          log,
-		gs:           gs,
-		noteS:        noteS,
-		projS:        projS,
-		deviceS:      deviceS,
-		deviceAdminS: deviceAdminS,
-		relayS:       relayS,
-		userS:        userS,
+		cfg:      cfg,
+		log:      log,
+		gs:       gs,
+		noteS:    noteS,
+		projS:    projS,
+		folderS:  folderS,
+		contextS: contextS,
+		linkS:    linkS,
 	}, nil
 }
 
@@ -109,11 +108,7 @@ func (s *Server) Serve() error {
 		return fmt.Errorf("grpc: listen on %s: %w", addr, err)
 	}
 
-	s.log.Info("grpc server listening",
-		"addr", addr,
-		"tls", s.cfg.TLSEnabled(),
-		"mtls", s.cfg.MTLSEnabled(),
-	)
+	s.log.Info("grpc server listening", "addr", addr)
 
 	if err := s.gs.Serve(ln); err != nil {
 		return fmt.Errorf("grpc: serve: %w", err)
@@ -121,43 +116,7 @@ func (s *Server) Serve() error {
 	return nil
 }
 
-// RelayService returns the RelayServer so the HTTP adapter layer can
-// call it directly without a network hop.
-func (s *Server) RelayService() *RelayServer {
-	return s.relayS
-}
-
-// UserService returns the UserServer so the HTTP adapter layer can
-// call it directly without a network hop.
-func (s *Server) UserService() *UserServer {
-	return s.userS
-}
-
-// NoteService returns the NoteServer so the HTTP adapter layer can
-// call it directly without a network hop.
-func (s *Server) NoteService() *NoteServer {
-	return s.noteS
-}
-
-// ProjectService returns the ProjectServer so the HTTP adapter layer
-// can call it directly without a network hop.
-func (s *Server) ProjectService() *ProjectServer {
-	return s.projS
-}
-
-// DeviceService returns the DeviceServer so the HTTP adapter layer can
-// call it directly without a network hop.
-func (s *Server) DeviceService() *DeviceServer {
-	return s.deviceS
-}
-
-// DeviceAdminService returns the DeviceAdminServer so the HTTP adapter
-// layer can call it directly without a network hop.
-func (s *Server) DeviceAdminService() *DeviceAdminServer {
-	return s.deviceAdminS
-}
-
-// Shutdown initiates a graceful shutdown.  In-flight RPCs are allowed to
+// Shutdown initiates a graceful shutdown. In-flight RPCs are allowed to
 // complete until ctx is cancelled, at which point the server is force-stopped.
 func (s *Server) Shutdown(ctx context.Context) {
 	stopped := make(chan struct{})
@@ -175,46 +134,25 @@ func (s *Server) Shutdown(ctx context.Context) {
 	}
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// TLS helpers
-// ─────────────────────────────────────────────────────────────────────────────
+// NoteService returns the NoteServer so the HTTP adapter layer can
+// call it directly without a network hop.
+func (s *Server) NoteService() *NoteServer { return s.noteS }
 
-// buildTransportCredentials returns the appropriate gRPC transport credentials
-// based on the Config:
-//
-//   - No TLS configured → insecure (development only)
-//   - TLS cert + key    → TLS 1.3 server credentials
-//   - TLS + CA cert     → mTLS (client certificate required)
-func buildTransportCredentials(cfg *config.Config) (credentials.TransportCredentials, error) {
-	if !cfg.TLSEnabled() {
-		return insecure.NewCredentials(), nil
-	}
+// ProjectService returns the ProjectServer so the HTTP adapter layer can
+// call it directly without a network hop.
+func (s *Server) ProjectService() *ProjectServer { return s.projS }
 
-	cert, err := tls.LoadX509KeyPair(cfg.TLSCertFile, cfg.TLSKeyFile)
-	if err != nil {
-		return nil, fmt.Errorf("load server cert/key: %w", err)
-	}
+// FolderService returns the FolderServer so the HTTP adapter layer can
+// call it directly without a network hop.
+func (s *Server) FolderService() *FolderServer { return s.folderS }
 
-	tlsCfg := &tls.Config{
-		Certificates: []tls.Certificate{cert},
-		MinVersion:   tls.VersionTLS13, // enforce TLS 1.3 minimum (Phase 5 requirement)
-	}
+// ContextService returns the ContextServer, or nil if no context repository
+// was provided at construction time.
+func (s *Server) ContextService() *ContextServer { return s.contextS }
 
-	if cfg.MTLSEnabled() {
-		caPEM, err := os.ReadFile(cfg.TLSCAFile)
-		if err != nil {
-			return nil, fmt.Errorf("read CA cert %q: %w", cfg.TLSCAFile, err)
-		}
-		caPool := x509.NewCertPool()
-		if !caPool.AppendCertsFromPEM(caPEM) {
-			return nil, fmt.Errorf("parse CA cert %q: no valid PEM blocks found", cfg.TLSCAFile)
-		}
-		tlsCfg.ClientCAs = caPool
-		tlsCfg.ClientAuth = tls.RequireAndVerifyClientCert
-	}
-
-	return credentials.NewTLS(tlsCfg), nil
-}
+// LinkService returns the LinkServer, or nil if no link repository was
+// provided at construction time.
+func (s *Server) LinkService() *LinkServer { return s.linkS }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Interceptors

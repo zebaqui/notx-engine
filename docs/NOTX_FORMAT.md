@@ -153,11 +153,13 @@ Each line in an event describes a change to a specific line number. Format:
 
 The line number is 1-based. The pipe `|` separates the line number from its content.
 
-| Syntax       | Meaning                                                  |
-| ------------ | -------------------------------------------------------- |
-| `3 \| hello` | Set line 3 to `hello`                                    |
-| `4 \|`       | Set line 4 to an empty string (line exists but is blank) |
-| `5 \|-`      | **Delete** line 5; all subsequent lines shift up         |
+| Syntax        | Meaning                                                  |
+| ------------- | -------------------------------------------------------- |
+| `3 \| hello`  | Set line 3 to `hello`                                    |
+| `4 \|`        | Set line 4 to an empty string (line exists but is blank) |
+| `5 \|-`       | **Delete** line 5; all subsequent lines shift up         |
+| `6 \|+ hello` | **Insert** `hello` at line 6; lines >= 6 shift down      |
+| `6 \|+`       | Insert an empty line at 6; lines >= 6 shift down         |
 
 #### Encrypted Event Format
 
@@ -267,6 +269,24 @@ Line 4 is now an empty string. The line still exists; it is not deleted.
 
 Remove line 5 entirely. All subsequent line numbers shift down by 1.
 
+**Insert a line:**
+
+```
+6 |+ new content here
+```
+
+Insert a new line at position 6. All existing lines at positions >= 6 shift down by one. The
+document grows by one line. This is the preferred way to add a line in the middle of a
+document — it requires only one entry rather than re-emitting every subsequent line.
+
+**Insert an empty line:**
+
+```
+6 |+
+```
+
+Same as above, but the new line has empty content.
+
 ### Multi-Line Event
 
 An event can change multiple lines:
@@ -355,6 +375,25 @@ Document after event 4 (line 2 deleted, lines shift up):
 
 ```
 # Meeting Notes
+Attendees: Alice, Bob, Carol
+
+## Action Items
+- Alice: send recap
+```
+
+**Event 5:**
+
+```
+5:2025-01-15T11:00:00Z:urn:notx:usr:01HZX3K8ABCDEF1234567890
+->
+2 |+ **Key decision:** ship by end of quarter
+```
+
+Document after event 5 (new line inserted at 2, rest shifts down):
+
+```
+# Meeting Notes
+**Key decision:** ship by end of quarter
 Attendees: Alice, Bob, Carol
 
 ## Action Items

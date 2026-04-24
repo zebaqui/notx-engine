@@ -8,8 +8,6 @@ import (
 	"strings"
 	"time"
 
-	b64 "encoding/base64"
-
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
@@ -39,25 +37,10 @@ func (h *Handler) routeNote(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Sub-resource check: <urn>/events, <urn>/share, <urn>/receive, <urn>/content
-	// Also handles the reversed form receive/<urn> for the receive endpoint.
+	// Sub-resource check: <urn>/events, <urn>/content
 	if idx := strings.Index(trimmed, "/"); idx != -1 {
-		first := trimmed[:idx]
-		rest := trimmed[idx+1:]
-
-		// Handle /v1/notes/receive/<urn> — the sub-resource comes before the URN.
-		if first == "receive" {
-			noteURN := rest
-			if noteURN == "" {
-				writeError(w, http.StatusBadRequest, "note URN is required")
-				return
-			}
-			h.routeReceiveSharedNote(w, r, noteURN)
-			return
-		}
-
-		urn := first
-		sub := rest
+		urn := trimmed[:idx]
+		sub := trimmed[idx+1:]
 		if urn == "" {
 			writeError(w, http.StatusBadRequest, "note URN is required")
 			return
@@ -65,14 +48,6 @@ func (h *Handler) routeNote(w http.ResponseWriter, r *http.Request) {
 		switch sub {
 		case "events":
 			h.handleStreamEvents(w, r, urn)
-		case "share":
-			if r.Method != http.MethodPost {
-				writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-				return
-			}
-			h.handleShareSecureNote(w, r, urn)
-		case "receive":
-			h.routeReceiveSharedNote(w, r, urn)
 		case "content":
 			h.handleReplaceContent(w, r, urn)
 		default:
@@ -92,25 +67,6 @@ func (h *Handler) routeNote(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
-}
-
-func (h *Handler) routeReceiveSharedNote(w http.ResponseWriter, r *http.Request, noteURN string) {
-	if r.Method != http.MethodPost {
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-	h.handleReceiveSharedNote(w, r, noteURN)
-}
-
-// routeNoteReceiveOpen handles the open /v1/notes/receive/<urn> route that is
-// reachable without device auth (server-to-server push path).
-func (h *Handler) routeNoteReceiveOpen(w http.ResponseWriter, r *http.Request) {
-	noteURN := strings.TrimPrefix(r.URL.Path, "/v1/notes/receive/")
-	if noteURN == "" {
-		writeError(w, http.StatusBadRequest, "note URN is required")
-		return
-	}
-	h.routeReceiveSharedNote(w, r, noteURN)
 }
 
 func (h *Handler) routeAppendEvent(w http.ResponseWriter, r *http.Request) {
@@ -145,13 +101,12 @@ type noteHeaderJSON struct {
 }
 
 type eventJSON struct {
-	URN         string            `json:"urn,omitempty"`
-	NoteURN     string            `json:"note_urn"`
-	Sequence    int               `json:"sequence"`
-	AuthorURN   string            `json:"author_urn"`
-	CreatedAt   string            `json:"created_at"`
-	Entries     []lineEntryJSON   `json:"entries,omitempty"`
-	WrappedKeys map[string]string `json:"wrapped_keys,omitempty"`
+	URN       string          `json:"urn,omitempty"`
+	NoteURN   string          `json:"note_urn"`
+	Sequence  int             `json:"sequence"`
+	AuthorURN string          `json:"author_urn"`
+	CreatedAt string          `json:"created_at"`
+	Entries   []lineEntryJSON `json:"entries,omitempty"`
 }
 
 type lineEntryJSON struct {
@@ -205,12 +160,6 @@ func protoEventToJSON(ev *pb.Event) *eventJSON {
 	for _, e := range ev.Entries {
 		j.Entries = append(j.Entries, protoLineEntryToJSON(e))
 	}
-	if len(ev.WrappedKeys) > 0 {
-		j.WrappedKeys = make(map[string]string, len(ev.WrappedKeys))
-		for deviceURN, blob := range ev.WrappedKeys {
-			j.WrappedKeys[deviceURN] = b64.StdEncoding.EncodeToString(blob)
-		}
-	}
 	return j
 }
 
@@ -224,6 +173,8 @@ func protoLineEntryToJSON(e *pb.LineEntry) lineEntryJSON {
 		j.Op = "set_empty"
 	case 2:
 		j.Op = "delete"
+	case 3:
+		j.Op = "insert"
 	default:
 		j.Op = "set"
 	}
@@ -242,8 +193,10 @@ func lineEntryFromJSON(j lineEntryJSON) (lineEntryResult, error) {
 		op = 1
 	case "delete":
 		op = 2
+	case "insert":
+		op = 3
 	default:
-		return lineEntryResult{}, fmt.Errorf("unknown op %q: must be set, set_empty, or delete", j.Op)
+		return lineEntryResult{}, fmt.Errorf("unknown op %q: must be set, set_empty, delete, or insert", j.Op)
 	}
 	return lineEntryResult{Op: op, LineNumber: int32(j.LineNumber), Content: j.Content}, nil
 }
@@ -319,6 +272,7 @@ type createNoteRequest struct {
 	URN        string `json:"urn"`
 	Name       string `json:"name"`
 	NoteType   string `json:"note_type"`
+	SnipType   string `json:"snip_type,omitempty"`
 	ProjectURN string `json:"project_urn,omitempty"`
 	FolderURN  string `json:"folder_urn,omitempty"`
 }
@@ -358,6 +312,7 @@ func (h *Handler) handleCreateNote(w http.ResponseWriter, r *http.Request) {
 		Urn:        req.URN,
 		Name:       req.Name,
 		NoteType:   noteType,
+		SnipType:   req.SnipType,
 		ProjectUrn: req.ProjectURN,
 		FolderUrn:  req.FolderURN,
 	}
@@ -502,167 +457,6 @@ func (h *Handler) handleUpdateNote(w http.ResponseWriter, r *http.Request, urn s
 	}
 
 	writeJSON(w, http.StatusOK, &createNoteResponse{Note: protoHeaderToJSON(resp.Header)})
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// POST /v1/notes/:urn/share
-// ─────────────────────────────────────────────────────────────────────────────
-
-type shareSecureNoteRequest struct {
-	WrappedKeys map[string]string `json:"wrapped_keys"`
-}
-
-type shareSecureNoteResponse struct {
-	NoteURN       string `json:"note_urn"`
-	EventsUpdated int    `json:"events_updated"`
-}
-
-func (h *Handler) handleShareSecureNote(w http.ResponseWriter, r *http.Request, noteURN string) {
-	var req shareSecureNoteRequest
-	if err := decodeJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	if len(req.WrappedKeys) == 0 {
-		writeError(w, http.StatusBadRequest, "wrapped_keys must not be empty")
-		return
-	}
-
-	pbWrappedKeys := make(map[string][]byte, len(req.WrappedKeys))
-	for deviceURN, encoded := range req.WrappedKeys {
-		raw, err := b64.StdEncoding.DecodeString(encoded)
-		if err != nil {
-			writeError(w, http.StatusBadRequest,
-				fmt.Sprintf("wrapped_keys[%q]: invalid base64: %v", deviceURN, err))
-			return
-		}
-		pbWrappedKeys[deviceURN] = raw
-	}
-
-	resp, err := h.noteSvc.ShareSecureNote(r.Context(), &pb.ShareSecureNoteRequest{
-		NoteUrn:     noteURN,
-		WrappedKeys: pbWrappedKeys,
-	})
-	if err != nil {
-		grpcErrToHTTP(w, r, h, err, "share secure note")
-		return
-	}
-
-	writeJSON(w, http.StatusOK, &shareSecureNoteResponse{
-		NoteURN:       noteURN,
-		EventsUpdated: int(resp.EventsUpdated),
-	})
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// POST /v1/notes/:urn/receive
-// ─────────────────────────────────────────────────────────────────────────────
-
-type receiveSharedNoteEventJSON struct {
-	URN         string            `json:"urn,omitempty"`
-	Sequence    int               `json:"sequence"`
-	AuthorURN   string            `json:"author_urn"`
-	CreatedAt   string            `json:"created_at,omitempty"`
-	Entries     []lineEntryJSON   `json:"entries,omitempty"`
-	WrappedKeys map[string]string `json:"wrapped_keys,omitempty"`
-}
-
-type receiveSharedNoteRequest struct {
-	Header noteHeaderJSON               `json:"header"`
-	Events []receiveSharedNoteEventJSON `json:"events"`
-}
-
-type receiveSharedNoteResponse struct {
-	NoteURN      string `json:"note_urn"`
-	EventsStored int    `json:"events_stored"`
-}
-
-func (h *Handler) handleReceiveSharedNote(w http.ResponseWriter, r *http.Request, noteURN string) {
-	var req receiveSharedNoteRequest
-	if err := decodeJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-
-	if req.Header.URN == "" {
-		req.Header.URN = noteURN
-	}
-
-	var pbNoteType pb.NoteType
-	switch req.Header.NoteType {
-	case "secure":
-		pbNoteType = pb.NoteType_NOTE_TYPE_SECURE
-	default:
-		pbNoteType = pb.NoteType_NOTE_TYPE_NORMAL
-	}
-
-	pbHeader := &pb.NoteHeader{
-		Urn:      req.Header.URN,
-		Name:     req.Header.Name,
-		NoteType: pbNoteType,
-		Deleted:  req.Header.Deleted,
-	}
-
-	pbEvents := make([]*pb.Event, 0, len(req.Events))
-	for _, evReq := range req.Events {
-		wrappedKeys := make(map[string][]byte, len(evReq.WrappedKeys))
-		for deviceURN, encoded := range evReq.WrappedKeys {
-			raw, err := b64.StdEncoding.DecodeString(encoded)
-			if err != nil {
-				writeError(w, http.StatusBadRequest,
-					fmt.Sprintf("event seq %d wrapped_keys[%q]: invalid base64: %v",
-						evReq.Sequence, deviceURN, err))
-				return
-			}
-			wrappedKeys[deviceURN] = raw
-		}
-
-		pbEntries := make([]*pb.LineEntry, 0, len(evReq.Entries))
-		for _, e := range evReq.Entries {
-			entry, err := lineEntryFromJSON(e)
-			if err != nil {
-				writeError(w, http.StatusBadRequest,
-					fmt.Sprintf("event seq %d: invalid entry: %v", evReq.Sequence, err))
-				return
-			}
-			pbEntries = append(pbEntries, &pb.LineEntry{
-				Op:         int32(entry.Op),
-				LineNumber: int32(entry.LineNumber),
-				Content:    entry.Content,
-			})
-		}
-
-		var createdAtPb *timestamppb.Timestamp
-		if evReq.CreatedAt != "" {
-			if t, err := time.Parse(time.RFC3339, evReq.CreatedAt); err == nil {
-				createdAtPb = timestamppb.New(t.UTC())
-			}
-		}
-
-		pbEvents = append(pbEvents, &pb.Event{
-			Urn:         evReq.URN,
-			NoteUrn:     noteURN,
-			Sequence:    int32(evReq.Sequence),
-			AuthorUrn:   evReq.AuthorURN,
-			CreatedAt:   createdAtPb,
-			Entries:     pbEntries,
-			WrappedKeys: wrappedKeys,
-		})
-	}
-
-	resp, err := h.noteSvc.ReceiveSharedNote(r.Context(), &pb.ReceiveSharedNoteRequest{
-		Header: pbHeader,
-		Events: pbEvents,
-	})
-	if err != nil {
-		grpcErrToHTTP(w, r, h, err, "receive shared note")
-		return
-	}
-
-	writeJSON(w, http.StatusCreated, &receiveSharedNoteResponse{
-		NoteURN:      resp.NoteUrn,
-		EventsStored: int(resp.EventsStored),
-	})
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

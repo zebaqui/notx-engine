@@ -89,6 +89,21 @@ func (p *ParserV1) parseLines(lines []string) (*Note, error) {
 		note.Deleted = strings.ToLower(deletedStr) == "true"
 	}
 
+	if parentURNStr, ok := metadata["parent_urn"]; ok && parentURNStr != "" {
+		parentURN, err := ParseURN(parentURNStr)
+		if err != nil {
+			return nil, fmt.Errorf("parser: invalid parent_urn: %w", err)
+		}
+		note.ParentURN = &parentURN
+	}
+
+	if snipType, ok := metadata["snip_type"]; ok && snipType != "" {
+		note.SnipType = &snipType
+	}
+	if parentAnchor, ok := metadata["parent_anchor"]; ok && parentAnchor != "" {
+		note.ParentAnchor = &parentAnchor
+	}
+
 	remainingLines := lines[headerEnd:]
 	if err := p.parseEventStream(note, remainingLines); err != nil {
 		return nil, fmt.Errorf("parser: event stream: %w", err)
@@ -284,6 +299,12 @@ func (p *ParserV1) parseEventEntries(lines []string, start int) ([]LineEntry, in
 			var content string
 			if raw == "-" {
 				op = LineOpDelete
+			} else if strings.HasPrefix(raw, "+ ") {
+				op = LineOpInsert
+				content = raw[2:] // strip the "+ " prefix
+			} else if raw == "+" {
+				op = LineOpInsert
+				content = ""
 			} else if raw == "" {
 				op = LineOpSetEmpty
 			} else {

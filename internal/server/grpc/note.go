@@ -2,7 +2,6 @@ package grpc
 
 import (
 	"context"
-	b64 "encoding/base64"
 	"errors"
 	"fmt"
 	"strings"
@@ -15,15 +14,17 @@ import (
 	"github.com/zebaqui/notx-engine/core"
 	pb "github.com/zebaqui/notx-engine/proto"
 	"github.com/zebaqui/notx-engine/repo"
+	"github.com/zebaqui/notx-engine/snip"
 )
 
 // NoteServer implements pb.NoteServiceServer backed by a NoteRepository.
 type NoteServer struct {
 	pb.UnimplementedNoteServiceServer
-	repo        repo.NoteRepository
-	contextRepo repo.ContextRepository // may be nil when context layer is disabled
-	defaultPage int
-	maxPage     int
+	repo         repo.NoteRepository
+	contextRepo  repo.ContextRepository // may be nil when context layer is disabled
+	snipRegistry *snip.Registry
+	defaultPage  int
+	maxPage      int
 }
 
 // NewNoteServer returns a ready-to-register NoteServer.
@@ -43,6 +44,12 @@ func NewNoteServerWithContext(r repo.NoteRepository, contextRepo repo.ContextRep
 	s := NewNoteServer(r, defaultPage, maxPage)
 	s.contextRepo = contextRepo
 	return s
+}
+
+// SetSnipRegistry wires a snip plugin registry into the NoteServer so that
+// plugin hooks are dispatched on note create and event append.
+func (s *NoteServer) SetSnipRegistry(r *snip.Registry) {
+	s.snipRegistry = r
 }
 
 // ── GetNote ──────────────────────────────────────────────────────────────────
@@ -138,6 +145,8 @@ func (s *NoteServer) CreateNote(ctx context.Context, req *pb.CreateNoteRequest) 
 		return nil, status.Errorf(codes.Internal, "create note: %v", err)
 	}
 
+	s.dispatchSnipHook(ctx, note, nil)
+
 	return &pb.CreateNoteResponse{
 		Header: coreNoteToHeader(note),
 	}, nil
@@ -192,7 +201,50 @@ func (s *NoteServer) AppendEvent(ctx context.Context, req *pb.AppendEventRequest
 		return nil, status.Errorf(codes.Internal, "append event: %v", err)
 	}
 
+	if s.snipRegistry != nil {
+		if note, getErr := s.repo.Get(ctx, req.Event.NoteUrn); getErr == nil {
+			s.dispatchSnipHook(ctx, note, ev)
+		}
+	}
+
 	return &pb.AppendEventResponse{Sequence: req.Event.Sequence}, nil
+}
+
+// ── ListSnips ─────────────────────────────────────────────────────────────────
+
+func (s *NoteServer) ListSnips(ctx context.Context, req *pb.ListSnipsRequest) (*pb.ListSnipsResponse, error) {
+	pageSize := int(req.PageSize)
+	if pageSize <= 0 {
+		pageSize = s.defaultPage
+	}
+	if pageSize > s.maxPage {
+		pageSize = s.maxPage
+	}
+
+	opts := repo.ListSnipsOptions{
+		SnipType:       req.SnipType,
+		ProjectURN:     req.ProjectUrn,
+		ParentURN:      req.ParentUrn,
+		ParentAnchor:   req.ParentAnchor,
+		IncludeDeleted: req.IncludeDeleted,
+		PageSize:       pageSize,
+		PageToken:      req.PageToken,
+	}
+
+	result, err := s.repo.ListSnips(ctx, opts)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "list snips: %v", err)
+	}
+
+	headers := make([]*pb.NoteHeader, 0, len(result.Notes))
+	for _, n := range result.Notes {
+		headers = append(headers, coreNoteToHeader(n))
+	}
+
+	return &pb.ListSnipsResponse{
+		Snips:         headers,
+		NextPageToken: result.NextPageToken,
+	}, nil
 }
 
 // ── StreamEvents ─────────────────────────────────────────────────────────────
@@ -258,154 +310,6 @@ func (s *NoteServer) SearchNotes(ctx context.Context, req *pb.SearchNotesRequest
 	return &pb.SearchNotesResponse{
 		Results:       pbResults,
 		NextPageToken: results.NextPageToken,
-	}, nil
-}
-
-// ── ShareSecureNote ──────────────────────────────────────────────────────────
-
-// ShareSecureNote merges per-device wrapped CEKs into every event stored for
-// the given secure note.
-//
-// The client calls this after it has:
-//  1. Fetched the public key of each recipient device from
-//     GET /v1/devices/:urn (or DeviceService.GetDevicePublicKey).
-//  2. Wrapped (encrypted) the note's CEK with each recipient's public key
-//     using asymmetric encryption (e.g. ECIES / X25519).
-//  3. Assembled the resulting map[deviceURN → wrappedCEK] and sent it here.
-//
-// The server writes the wrapped keys into the WrappedKeys field of every
-// event for the note and returns the count of events updated.
-func (s *NoteServer) ShareSecureNote(ctx context.Context, req *pb.ShareSecureNoteRequest) (*pb.ShareSecureNoteResponse, error) {
-	if req.NoteUrn == "" {
-		return nil, status.Error(codes.InvalidArgument, "note_urn is required")
-	}
-	if len(req.WrappedKeys) == 0 {
-		return nil, status.Error(codes.InvalidArgument, "wrapped_keys must not be empty")
-	}
-
-	// Confirm the note exists and is of type secure before writing anything.
-	note, err := s.repo.Get(ctx, req.NoteUrn)
-	if err != nil {
-		return nil, shareRepoErrToStatus(err, req.NoteUrn)
-	}
-	if note.NoteType != core.NoteTypeSecure {
-		return nil, status.Errorf(codes.InvalidArgument,
-			"note %q is not a secure note; ShareSecureNote only applies to secure notes",
-			req.NoteUrn)
-	}
-
-	// The proto WrappedKeys map carries raw bytes (the wrapped CEK blob). No
-	// base64 decoding is needed here — the gRPC binary encoding handles the
-	// bytes field directly. We copy directly into a Go map[string][]byte.
-	wrappedKeys := make(map[string][]byte, len(req.WrappedKeys))
-	for deviceURN, blob := range req.WrappedKeys {
-		if deviceURN == "" {
-			return nil, status.Error(codes.InvalidArgument, "wrapped_keys contains an empty device URN key")
-		}
-		if len(blob) == 0 {
-			return nil, status.Errorf(codes.InvalidArgument,
-				"wrapped_keys[%q] has an empty key blob", deviceURN)
-		}
-		wrappedKeys[deviceURN] = blob
-	}
-
-	count, err := s.repo.UpdateEventWrappedKeys(ctx, req.NoteUrn, wrappedKeys)
-	if err != nil {
-		return nil, shareRepoErrToStatus(err, req.NoteUrn)
-	}
-
-	return &pb.ShareSecureNoteResponse{
-		EventsUpdated: int32(count),
-	}, nil
-}
-
-// ── ReceiveSharedNote ─────────────────────────────────────────────────────────
-
-// ReceiveSharedNote accepts a note header and its full event stream forwarded
-// from a paired server and stores them locally.
-//
-// This is the server-side entry point of the cross-server note-sharing flow:
-//
-//	Client A  →  Server A  →  (mTLS / HTTP push)  →  Server B
-//	                                                       ↓
-//	                                                   Client B reads
-//
-// For secure notes the events contain only ciphertext; the server never sees
-// the plaintext CEK. Client B retrieves the note's events and decrypts them
-// locally using its private key after Server A (or Client A directly) has
-// called ShareSecureNote to deliver Client B's wrapped CEK to Server B.
-//
-// The operation is idempotent: events with a sequence number at or below the
-// current local head are skipped, so the call can be retried safely.
-func (s *NoteServer) ReceiveSharedNote(ctx context.Context, req *pb.ReceiveSharedNoteRequest) (*pb.ReceiveSharedNoteResponse, error) {
-	if req.Header == nil {
-		return nil, status.Error(codes.InvalidArgument, "header is required")
-	}
-	if req.Header.Urn == "" {
-		return nil, status.Error(codes.InvalidArgument, "header.urn is required")
-	}
-	if req.Header.Name == "" {
-		return nil, status.Error(codes.InvalidArgument, "header.name is required")
-	}
-
-	// Parse the note header.
-	noteURN, err := core.ParseURN(req.Header.Urn)
-	if err != nil {
-		return nil, status.Errorf(codes.InvalidArgument, "invalid header.urn: %v", err)
-	}
-
-	noteType := protoNoteTypeToCore(req.Header.NoteType)
-
-	createdAt := time.Now().UTC()
-	if req.Header.CreatedAt != nil {
-		createdAt = req.Header.CreatedAt.AsTime()
-	}
-
-	var note *core.Note
-	if noteType == core.NoteTypeSecure {
-		note = core.NewSecureNote(noteURN, req.Header.Name, createdAt)
-	} else {
-		note = core.NewNote(noteURN, req.Header.Name, createdAt)
-	}
-	note.Deleted = req.Header.Deleted
-
-	if req.Header.UpdatedAt != nil {
-		note.UpdatedAt = req.Header.UpdatedAt.AsTime()
-	}
-	if req.Header.ProjectUrn != "" {
-		projURN, err := core.ParseURN(req.Header.ProjectUrn)
-		if err != nil {
-			return nil, status.Errorf(codes.InvalidArgument, "invalid header.project_urn: %v", err)
-		}
-		note.ProjectURN = &projURN
-	}
-	if req.Header.FolderUrn != "" {
-		folderURN, err := core.ParseURN(req.Header.FolderUrn)
-		if err != nil {
-			return nil, status.Errorf(codes.InvalidArgument, "invalid header.folder_urn: %v", err)
-		}
-		note.FolderURN = &folderURN
-	}
-
-	// Parse and validate the event stream.
-	events := make([]*core.Event, 0, len(req.Events))
-	for _, evProto := range req.Events {
-		ev, err := sharedEventToCore(evProto)
-		if err != nil {
-			return nil, status.Errorf(codes.InvalidArgument,
-				"invalid event at sequence %d: %v", evProto.GetSequence(), err)
-		}
-		events = append(events, ev)
-	}
-
-	// Persist — idempotent via ReceiveSharedNote semantics.
-	if err := s.repo.ReceiveSharedNote(ctx, note, events); err != nil {
-		return nil, shareRepoErrToStatus(err, req.Header.Urn)
-	}
-
-	return &pb.ReceiveSharedNoteResponse{
-		NoteUrn:      req.Header.Urn,
-		EventsStored: int32(len(events)),
 	}, nil
 }
 
@@ -586,6 +490,16 @@ func coreNoteToHeader(n *core.Note) *pb.NoteHeader {
 	if n.FolderURN != nil {
 		h.FolderUrn = n.FolderURN.String()
 	}
+	// Snip fields
+	if n.SnipType != nil {
+		h.SnipType = *n.SnipType
+	}
+	if n.ParentURN != nil {
+		h.ParentUrn = n.ParentURN.String()
+	}
+	if n.ParentAnchor != nil {
+		h.ParentAnchor = *n.ParentAnchor
+	}
 	return h
 }
 
@@ -624,8 +538,46 @@ func protoHeaderToCoreNote(h *pb.NoteHeader) (*core.Note, error) {
 		}
 		note.FolderURN = &folderURN
 	}
+	if h.SnipType != "" {
+		st := h.SnipType
+		note.SnipType = &st
+	}
+	if h.ParentUrn != "" {
+		parentURN, err := core.ParseURN(h.ParentUrn)
+		if err != nil {
+			return nil, fmt.Errorf("invalid parent_urn: %w", err)
+		}
+		note.ParentURN = &parentURN
+	}
+	if h.ParentAnchor != "" {
+		pa := h.ParentAnchor
+		note.ParentAnchor = &pa
+	}
 
 	return note, nil
+}
+
+// dispatchSnipHook calls the registered plugin hook after a note write.
+// Called after CreateNote (event==nil) or AppendEvent (event!=nil).
+// Hook errors are logged but never fail the write.
+func (s *NoteServer) dispatchSnipHook(ctx context.Context, note *core.Note, event *core.Event) {
+	if s.snipRegistry == nil || note.SnipType == nil {
+		return
+	}
+	plugin, ok := s.snipRegistry.Get(*note.SnipType)
+	if !ok {
+		return
+	}
+	var err error
+	if event == nil {
+		err = plugin.OnNoteCreated(ctx, note)
+	} else {
+		err = plugin.OnEventAppended(ctx, note, event)
+	}
+	if err != nil {
+		// Non-fatal — plugin index is best-effort
+		_ = err
+	}
 }
 
 func coreEventToProto(ev *core.Event) *pb.Event {
@@ -642,12 +594,6 @@ func coreEventToProto(ev *core.Event) *pb.Event {
 			LineNumber: int32(e.LineNumber),
 			Content:    e.Content,
 		})
-	}
-	if len(ev.WrappedKeys) > 0 {
-		p.WrappedKeys = make(map[string][]byte, len(ev.WrappedKeys))
-		for deviceURN, blob := range ev.WrappedKeys {
-			p.WrappedKeys[deviceURN] = blob
-		}
 	}
 	return p
 }
@@ -711,102 +657,6 @@ func protoNoteTypeToCore(t pb.NoteType) core.NoteType {
 		return core.NoteTypeSecure
 	default:
 		return core.NoteTypeNormal
-	}
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Share helpers
-// ─────────────────────────────────────────────────────────────────────────────
-
-// sharedEventToCore converts a pb.Event into a *core.Event.
-// It handles both raw-bytes and base64-encoded WrappedKeys (the HTTP adapter
-// base64-encodes them; the gRPC path carries raw bytes).
-func sharedEventToCore(p *pb.Event) (*core.Event, error) {
-	if p.GetNoteUrn() == "" {
-		return nil, fmt.Errorf("note_urn is required")
-	}
-	if p.GetAuthorUrn() == "" {
-		return nil, fmt.Errorf("author_urn is required")
-	}
-	if p.GetSequence() < 1 {
-		return nil, fmt.Errorf("sequence must be >= 1")
-	}
-
-	noteURN, err := core.ParseURN(p.GetNoteUrn())
-	if err != nil {
-		return nil, fmt.Errorf("invalid note_urn: %w", err)
-	}
-	authorURN, err := core.ParseURN(p.GetAuthorUrn())
-	if err != nil {
-		return nil, fmt.Errorf("invalid author_urn: %w", err)
-	}
-
-	createdAt := time.Now().UTC()
-	if ts := p.GetCreatedAt(); ts != nil && ts.IsValid() {
-		createdAt = ts.AsTime().UTC()
-	}
-
-	var evURN core.URN
-	if p.GetUrn() != "" {
-		if parsed, err := core.ParseURN(p.GetUrn()); err == nil {
-			evURN = parsed
-		}
-	}
-	if evURN == (core.URN{}) {
-		evURN = core.NewURN(core.ObjectTypeEvent)
-	}
-
-	entries := make([]core.LineEntry, 0, len(p.GetEntries()))
-	for _, e := range p.GetEntries() {
-		entries = append(entries, core.LineEntry{
-			LineNumber: int(e.GetLineNumber()),
-			Op:         core.LineOp(e.GetOp()),
-			Content:    e.GetContent(),
-		})
-	}
-
-	// Build the per-device wrapped-key map.
-	// The WrappedKeys field on SharedEventProto carries map[string][]byte.
-	// When the bytes arrive as raw binary (gRPC path) they are used directly.
-	// When they arrive as base64 strings encoded into the []byte slice
-	// (HTTP-JSON bridge path), we attempt to base64-decode them transparently.
-	wrappedKeys := make(map[string][]byte, len(p.GetWrappedKeys()))
-	for deviceURN, blob := range p.GetWrappedKeys() {
-		if len(blob) == 0 {
-			continue
-		}
-		// Attempt base64 decode: if it succeeds and produces a non-empty result
-		// we assume the HTTP bridge encoded it; otherwise use raw bytes.
-		if decoded, err := b64.StdEncoding.DecodeString(string(blob)); err == nil && len(decoded) > 0 {
-			wrappedKeys[deviceURN] = decoded
-		} else {
-			wrappedKeys[deviceURN] = blob
-		}
-	}
-
-	return &core.Event{
-		URN:         evURN,
-		NoteURN:     noteURN,
-		Sequence:    int(p.GetSequence()),
-		AuthorURN:   authorURN,
-		CreatedAt:   createdAt,
-		Entries:     entries,
-		WrappedKeys: wrappedKeys,
-	}, nil
-}
-
-// shareRepoErrToStatus maps NoteRepository errors to gRPC status codes for
-// the share handlers.
-func shareRepoErrToStatus(err error, urn string) error {
-	switch {
-	case errors.Is(err, repo.ErrNotFound):
-		return status.Errorf(codes.NotFound, "%q not found", urn)
-	case errors.Is(err, repo.ErrAlreadyExists):
-		return status.Errorf(codes.AlreadyExists, "%q already exists", urn)
-	case errors.Is(err, repo.ErrSequenceConflict):
-		return status.Errorf(codes.Aborted, "sequence conflict: %v", err)
-	default:
-		return status.Errorf(codes.Internal, "internal error: %v", err)
 	}
 }
 

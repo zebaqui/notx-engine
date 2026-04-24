@@ -13,7 +13,7 @@ import (
 // currentSchemaVersion must match len(migrations).
 // Bump it by 1 every time you add a migration to the slice below.
 // NEVER edit or remove existing migrations — only append new ones.
-const currentSchemaVersion = 11
+const currentSchemaVersion = 12
 
 // currentProjectionVersion is incremented when projection logic changes
 // (i.e. existing rows need recomputing from the event log even though
@@ -38,12 +38,18 @@ CREATE TABLE IF NOT EXISTS notes (
     deleted           INTEGER NOT NULL DEFAULT 0,
     created_at        INTEGER NOT NULL,
     updated_at        INTEGER NOT NULL,
-    extra             TEXT    NOT NULL DEFAULT '{}'
+    extra             TEXT    NOT NULL DEFAULT '{}',
+    snip_type         TEXT,                           -- NULL for regular notes
+    parent_anchor     TEXT,                           -- NULL for non-sidecar snips
+    parent_urn        TEXT    NOT NULL DEFAULT ''     -- URN of parent note (snips only)
 );
 
 CREATE INDEX IF NOT EXISTS idx_notes_updated ON notes(updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_notes_project ON notes(project_urn, deleted, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_notes_folder  ON notes(folder_urn,  deleted, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_notes_snip_type     ON notes(snip_type)    WHERE snip_type IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_notes_parent_anchor ON notes(parent_anchor) WHERE parent_anchor IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_notes_parent_urn    ON notes(parent_urn)   WHERE parent_urn != '';
 
 -- Event log: one row per appended event on a note.
 CREATE TABLE IF NOT EXISTS events (
@@ -313,13 +319,14 @@ CREATE INDEX IF NOT EXISTS idx_sync_log_note   ON sync_log(note_urn, synced_at D
 //
 // Migration history:
 //
-//	v1 — initial schema (tables created via ddl; this is a no-op for existing DBs)
-//	v2 — add events table and replace content-backed notes_fts with standalone FTS5
-//	v3 — add anchors, backlinks tables (link spec)
-//	v4 — add external_links table (link spec)
-//	v5 — add context_bursts, context_bursts_fts, candidate_relations, project_context_config (context graph)
+//	v1  — initial schema (tables created via ddl; this is a no-op for existing DBs)
+//	v2  — add events table and replace content-backed notes_fts with standalone FTS5
+//	v3  — add anchors, backlinks tables (link spec)
+//	v4  — add external_links table (link spec)
+//	v5  — add context_bursts, context_bursts_fts, candidate_relations, project_context_config (context graph)
 //	v10 — pending_sync table for real-time event bus
 //	v11 — sync_log table for admin sync history
+//	v12 — snips: add snip_type, parent_anchor, parent_urn columns to notes
 var migrations = []string{
 	// v1: initial schema — ddl already handles this on new installs.
 	"SELECT 1",
@@ -516,6 +523,15 @@ CREATE INDEX IF NOT EXISTS idx_inferences_status
 );
 CREATE INDEX IF NOT EXISTS idx_sync_log_synced ON sync_log(synced_at DESC);
 CREATE INDEX IF NOT EXISTS idx_sync_log_note   ON sync_log(note_urn, synced_at DESC);`,
+
+	// v12: snips — add snip_type, parent_anchor, parent_urn columns to notes.
+	// The ALTER TABLE steps are handled idempotently by ensureSnipColumns
+	// (called as a pre-step in runMigrations) so that fresh installs — which
+	// already have these columns via the ddl constant — do not fail.
+	// Only the CREATE INDEX statements live here; they are all IF NOT EXISTS.
+	`CREATE INDEX IF NOT EXISTS idx_notes_snip_type     ON notes(snip_type)    WHERE snip_type IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_notes_parent_anchor ON notes(parent_anchor) WHERE parent_anchor IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_notes_parent_urn    ON notes(parent_urn)   WHERE parent_urn != '';`,
 }
 
 // applySchema creates all tables/indexes on a fresh DB and seeds meta rows.
@@ -587,6 +603,12 @@ func runMigrations(ctx context.Context, db *sql.DB, appliedVersion int) error {
 			}
 		}
 
+		if version == 12 {
+			if err := ensureSnipColumns(ctx, db); err != nil {
+				return fmt.Errorf("sqlite schema: migration %d pre-step: %w", version, err)
+			}
+		}
+
 		if _, err := db.ExecContext(ctx, sqlStmt); err != nil {
 			return fmt.Errorf("sqlite schema: migration %d: %w", version, err)
 		}
@@ -643,6 +665,50 @@ func ensureEventURNColumn(ctx context.Context, db *sql.DB) error {
 			newURN, k.noteURN, k.seq,
 		); err != nil {
 			return fmt.Errorf("sqlite: backfill event urn (note=%s seq=%d): %w", k.noteURN, k.seq, err)
+		}
+	}
+	return nil
+}
+
+// ensureSnipColumns adds the snip_type, parent_anchor, and parent_urn columns
+// to the notes table if they do not already exist. Safe to call multiple times.
+func ensureSnipColumns(ctx context.Context, db *sql.DB) error {
+	type colDef struct {
+		name string
+		ddl  string
+	}
+	cols := []colDef{
+		{"snip_type", `ALTER TABLE notes ADD COLUMN snip_type TEXT`},
+		{"parent_anchor", `ALTER TABLE notes ADD COLUMN parent_anchor TEXT`},
+		{"parent_urn", `ALTER TABLE notes ADD COLUMN parent_urn TEXT NOT NULL DEFAULT ''`},
+	}
+
+	// Build a set of existing column names from PRAGMA table_info.
+	rows, err := db.QueryContext(ctx, `PRAGMA table_info(notes)`)
+	if err != nil {
+		return fmt.Errorf("sqlite: pragma table_info(notes): %w", err)
+	}
+	existing := make(map[string]bool)
+	for rows.Next() {
+		var cid int
+		var name, colType, notNull, dfltValue, pk sql.NullString
+		if err := rows.Scan(&cid, &name, &colType, &notNull, &dfltValue, &pk); err != nil {
+			rows.Close()
+			return fmt.Errorf("sqlite: scan table_info: %w", err)
+		}
+		existing[name.String] = true
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("sqlite: iterate table_info: %w", err)
+	}
+
+	for _, col := range cols {
+		if existing[col.name] {
+			continue
+		}
+		if _, err := db.ExecContext(ctx, col.ddl); err != nil {
+			return fmt.Errorf("sqlite: add column %s to notes: %w", col.name, err)
 		}
 	}
 	return nil

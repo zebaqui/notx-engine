@@ -1,0 +1,117 @@
+syntax = "proto3";
+package notx.v1;
+
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/zebaqui/notx-engine/proto/snips;snipspb";
+
+message TodoComment {
+  string id = 1;
+  string text = 2;
+  string author_urn = 3;
+  google.protobuf.Timestamp at = 4;
+}
+
+message TodoRecord {
+  string note_urn = 1;
+  string parent_urn = 2;
+  string parent_anchor = 3;
+  string project_urn = 4;
+  string file_path = 5;
+  string text = 6;
+  string status = 7;
+  string checkbox_state = 8;
+  int32 head_sequence = 9;
+  repeated TodoComment comments = 10;
+  repeated string tags = 11;
+  google.protobuf.Timestamp created_at = 12;
+  google.protobuf.Timestamp updated_at = 13;
+}
+
+message TodoBoard {
+  repeated TodoRecord backlog = 1;
+  repeated TodoRecord doing = 2;
+  repeated TodoRecord done = 3;
+}
+
+service TodoService {
+  rpc GetBoard(GetBoardRequest) returns (GetBoardResponse);
+  rpc ListTodos(ListTodosRequest) returns (ListTodosResponse);
+  rpc GetTodo(GetTodoRequest) returns (GetTodoResponse);
+  rpc MoveStatus(MoveStatusRequest) returns (MoveStatusResponse);
+  rpc MarkDone(MarkDoneRequest) returns (MarkDoneResponse);
+  rpc AddComment(AddCommentRequest) returns (AddCommentResponse);
+  rpc TriggerScan(TriggerScanRequest) returns (TriggerScanResponse);
+}
+
+message GetBoardRequest {
+  string project_urn = 1;
+  string query = 2;
+}
+message GetBoardResponse {
+  TodoBoard board = 1;
+}
+
+message ListTodosRequest {
+  string project_urn = 1;
+  string status = 2;
+  string file_path = 3;
+  string query = 4;
+  bool include_done = 5;
+  int32 page_size = 6;
+  string page_token = 7;
+}
+message ListTodosResponse {
+  repeated TodoRecord todos = 1;
+  string next_page_token = 2;
+}
+
+message GetTodoRequest {
+  string note_urn = 1;
+}
+message GetTodoResponse {
+  TodoRecord todo = 1;
+  repeated TodoHistoryEntry history = 2;
+}
+message TodoHistoryEntry {
+  int32 sequence = 1;
+  string author_urn = 2;
+  string summary = 3;
+  google.protobuf.Timestamp at = 4;
+}
+
+message MoveStatusRequest {
+  string note_urn = 1;
+  string status = 2;
+}
+message MoveStatusResponse {
+  TodoRecord todo = 1;
+}
+
+message MarkDoneRequest {
+  string note_urn = 1;
+  string author_urn = 2;
+}
+message MarkDoneResponse {
+  TodoRecord todo = 1;
+  int32 note_seq = 2;
+}
+
+message AddCommentRequest {
+  string note_urn = 1;
+  string text = 2;
+  string author_urn = 3;
+}
+message AddCommentResponse {
+  TodoComment comment = 1;
+  int32 head_sequence = 2;
+}
+
+message TriggerScanRequest {
+  string project_urn = 1;
+}
+message TriggerScanResponse {
+  int32 todos_created = 1;
+  int32 todos_updated = 2;
+  int32 todos_deleted = 3;
+}

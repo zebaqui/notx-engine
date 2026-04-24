@@ -87,14 +87,6 @@ const (
 	// The server replicates events to all authorised devices automatically and
 	// in near-real-time. The server may read, index, and search the content.
 	SyncPolicyAuto SyncPolicy = iota
-
-	// SyncPolicyExplicitRelay is the sync policy for secure notes.
-	//
-	// The server acts as a relay only: it stores and forwards the encrypted
-	// blob without ever decrypting it. Distribution to other devices requires
-	// an explicit share action initiated by a device that already holds the
-	// Content Encryption Key (CEK).
-	SyncPolicyExplicitRelay SyncPolicy = iota
 )
 
 // String returns a human-readable label for the SyncPolicy.
@@ -102,8 +94,7 @@ func (p SyncPolicy) String() string {
 	switch p {
 	case SyncPolicyAuto:
 		return "auto"
-	case SyncPolicyExplicitRelay:
-		return "explicit-relay"
+
 	default:
 		return fmt.Sprintf("unknown(%d)", int(p))
 	}
@@ -146,7 +137,7 @@ func NoteSecurityPolicy(t NoteType) SecurityPolicy {
 	case NoteTypeSecure:
 		return SecurityPolicy{
 			NoteType:              NoteTypeSecure,
-			SyncPolicy:            SyncPolicyExplicitRelay,
+			SyncPolicy:            SyncPolicyAuto,
 			IsE2EE:                true,
 			ServerCanReadContent:  false,
 			ServerIndexingAllowed: false,

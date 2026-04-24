@@ -46,6 +46,9 @@ func queryNotes(ctx context.Context, db *sql.DB, opts repo.ListOptions) ([]*core
 		conditions = append(conditions, "note_type = ?")
 		args = append(args, opts.NoteTypeFilter.String())
 	}
+	// Exclude snips — regular list never returns snip-typed notes.
+	conditions = append(conditions, "snip_type IS NULL")
+
 	if cursorMs > 0 {
 		conditions = append(conditions, "(updated_at < ? OR (updated_at = ? AND urn > ?))")
 		args = append(args, cursorMs, cursorMs, cursorURN)
@@ -57,7 +60,8 @@ func queryNotes(ctx context.Context, db *sql.DB, opts repo.ListOptions) ([]*core
 	}
 
 	query := fmt.Sprintf(
-		`SELECT urn, project_urn, folder_urn, note_type, title, head_seq, deleted, created_at, updated_at
+		`SELECT urn, project_urn, folder_urn, note_type, title, head_seq, deleted, created_at, updated_at,
+		        COALESCE(snip_type, ''), COALESCE(parent_anchor, ''), COALESCE(parent_urn, '')
 		 FROM notes %s ORDER BY updated_at DESC, urn ASC LIMIT ?`,
 		where,
 	)
@@ -81,13 +85,17 @@ func queryNotes(ctx context.Context, db *sql.DB, opts repo.ListOptions) ([]*core
 			deleted       int
 			createdMs     int64
 			updatedMs     int64
+			snipType      string
+			parentAnchor  string
+			parentURN     string
 		)
 		if err := rows.Scan(&urnStr, &projectURNStr, &folderURNStr, &noteType, &title,
-			&headSeq, &deleted, &createdMs, &updatedMs); err != nil {
+			&headSeq, &deleted, &createdMs, &updatedMs,
+			&snipType, &parentAnchor, &parentURN); err != nil {
 			return nil, "", fmt.Errorf("sqlite: scan note row: %w", err)
 		}
 		n, err := noteFromRow(urnStr, projectURNStr, folderURNStr, noteType, title,
-			headSeq, deleted == 1, createdMs, updatedMs)
+			headSeq, deleted == 1, createdMs, updatedMs, snipType, parentAnchor, parentURN)
 		if err != nil {
 			return nil, "", err
 		}
@@ -112,7 +120,8 @@ func queryNotes(ctx context.Context, db *sql.DB, opts repo.ListOptions) ([]*core
 // noteFromRow reconstructs a core.Note from flat column values.
 // Only metadata fields are populated — the event stream is empty.
 func noteFromRow(urnStr, projectURNStr, folderURNStr, noteType, title string,
-	headSeq int, deleted bool, createdMs, updatedMs int64) (*core.Note, error) {
+	headSeq int, deleted bool, createdMs, updatedMs int64,
+	snipType, parentAnchor, parentURN string) (*core.Note, error) {
 
 	urn, err := core.ParseURN(urnStr)
 	if err != nil {
@@ -149,7 +158,127 @@ func noteFromRow(urnStr, projectURNStr, folderURNStr, noteType, title string,
 		}
 		n.FolderURN = &u
 	}
+	if snipType != "" {
+		s := snipType
+		n.SnipType = &s
+	}
+	if parentAnchor != "" {
+		a := parentAnchor
+		n.ParentAnchor = &a
+	}
+	if parentURN != "" {
+		u, err := core.ParseURN(parentURN)
+		if err != nil {
+			return nil, fmt.Errorf("sqlite: parse note parent_urn %q: %w", parentURN, err)
+		}
+		n.ParentURN = &u
+	}
 	return n, nil
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Snip queries
+// ─────────────────────────────────────────────────────────────────────────────
+
+// querySnips executes a filtered, paginated SELECT on the notes table,
+// returning only rows where snip_type IS NOT NULL.
+func querySnips(ctx context.Context, db *sql.DB, opts repo.ListSnipsOptions) ([]*core.Note, string, error) {
+	pageSize := opts.PageSize
+	if pageSize <= 0 {
+		pageSize = 50
+	}
+
+	cursorMs, cursorURN, err := decodeCursor(opts.PageToken)
+	if err != nil {
+		return nil, "", err
+	}
+
+	// snip_type IS NOT NULL is the mandatory discriminator.
+	conditions := []string{"snip_type IS NOT NULL"}
+	var args []interface{}
+
+	if !opts.IncludeDeleted {
+		conditions = append(conditions, "deleted = 0")
+	}
+	if opts.SnipType != "" {
+		conditions = append(conditions, "snip_type = ?")
+		args = append(args, opts.SnipType)
+	}
+	if opts.ProjectURN != "" {
+		conditions = append(conditions, "project_urn = ?")
+		args = append(args, opts.ProjectURN)
+	}
+	if opts.ParentURN != "" {
+		conditions = append(conditions, "parent_urn = ?")
+		args = append(args, opts.ParentURN)
+	}
+	if opts.ParentAnchor != "" {
+		conditions = append(conditions, "parent_anchor = ?")
+		args = append(args, opts.ParentAnchor)
+	}
+	if cursorMs > 0 {
+		conditions = append(conditions, "(updated_at < ? OR (updated_at = ? AND urn > ?))")
+		args = append(args, cursorMs, cursorMs, cursorURN)
+	}
+
+	where := "WHERE " + strings.Join(conditions, " AND ")
+
+	query := fmt.Sprintf(
+		`SELECT urn, project_urn, folder_urn, note_type, title, head_seq, deleted, created_at, updated_at,
+		        COALESCE(snip_type, ''), COALESCE(parent_anchor, ''), COALESCE(parent_urn, '')
+		 FROM notes %s ORDER BY updated_at DESC, urn ASC LIMIT ?`,
+		where,
+	)
+	args = append(args, pageSize+1)
+
+	rows, err := db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, "", fmt.Errorf("sqlite: list snips: %w", err)
+	}
+	defer rows.Close()
+
+	var notes []*core.Note
+	for rows.Next() {
+		var (
+			urnStr        string
+			projectURNStr string
+			folderURNStr  string
+			noteType      string
+			title         string
+			headSeq       int
+			deleted       int
+			createdMs     int64
+			updatedMs     int64
+			snipType      string
+			parentAnchor  string
+			parentURN     string
+		)
+		if err := rows.Scan(&urnStr, &projectURNStr, &folderURNStr, &noteType, &title,
+			&headSeq, &deleted, &createdMs, &updatedMs,
+			&snipType, &parentAnchor, &parentURN); err != nil {
+			return nil, "", fmt.Errorf("sqlite: scan snip row: %w", err)
+		}
+		n, err := noteFromRow(urnStr, projectURNStr, folderURNStr, noteType, title,
+			headSeq, deleted == 1, createdMs, updatedMs, snipType, parentAnchor, parentURN)
+		if err != nil {
+			return nil, "", err
+		}
+		notes = append(notes, n)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, "", fmt.Errorf("sqlite: iterate snips: %w", err)
+	}
+
+	var nextToken string
+	if len(notes) > pageSize {
+		last := notes[pageSize-1]
+		nextToken = encodeCursor(last.UpdatedAt.UnixMilli(), last.URN.String())
+		notes = notes[:pageSize]
+	}
+	if notes == nil {
+		notes = []*core.Note{}
+	}
+	return notes, nextToken, nil
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -202,7 +331,7 @@ func searchNotes(ctx context.Context, db *sql.DB, opts repo.SearchOptions) (*rep
 			return nil, fmt.Errorf("sqlite: scan search row: %w", err)
 		}
 		n, err := noteFromRow(urnStr, projectURNStr, folderURNStr, noteType, title,
-			headSeq, deleted == 1, createdMs, updatedMs)
+			headSeq, deleted == 1, createdMs, updatedMs, "", "", "")
 		if err != nil {
 			return nil, err
 		}
@@ -456,365 +585,4 @@ func queryFolders(ctx context.Context, db *sql.DB, opts repo.FolderListOptions) 
 		folders = []*core.Folder{}
 	}
 	return &repo.FolderListResult{Folders: folders, NextPageToken: nextToken}, nil
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Device queries
-// ─────────────────────────────────────────────────────────────────────────────
-
-func queryDevice(ctx context.Context, db *sql.DB, urn string) (*core.Device, error) {
-	var (
-		name           string
-		ownerURNStr    string
-		publicKeyB64   string
-		role           string
-		approvalStatus string
-		revoked        int
-		registeredMs   int64
-		lastSeenMs     int64
-	)
-	err := db.QueryRowContext(ctx,
-		`SELECT name, owner_urn, public_key_b64, role, approval_status,
-		        revoked, registered_at, last_seen_at
-		 FROM devices WHERE urn = ?`, urn,
-	).Scan(&name, &ownerURNStr, &publicKeyB64, &role, &approvalStatus,
-		&revoked, &registeredMs, &lastSeenMs)
-	if err == sql.ErrNoRows {
-		return nil, repo.ErrNotFound
-	}
-	if err != nil {
-		return nil, fmt.Errorf("sqlite: get device: %w", err)
-	}
-	parsedURN, err := core.ParseURN(urn)
-	if err != nil {
-		return nil, fmt.Errorf("sqlite: parse device urn %q: %w", urn, err)
-	}
-	parsedOwnerURN, err := core.ParseURN(ownerURNStr)
-	if err != nil {
-		return nil, fmt.Errorf("sqlite: parse device owner_urn %q: %w", ownerURNStr, err)
-	}
-	d := &core.Device{
-		URN:            parsedURN,
-		Name:           name,
-		OwnerURN:       parsedOwnerURN,
-		PublicKeyB64:   publicKeyB64,
-		Role:           core.DeviceRole(role),
-		ApprovalStatus: core.DeviceApprovalStatus(approvalStatus),
-		Revoked:        revoked == 1,
-		RegisteredAt:   time.UnixMilli(registeredMs).UTC(),
-	}
-	if lastSeenMs > 0 {
-		d.LastSeenAt = time.UnixMilli(lastSeenMs).UTC()
-	}
-	return d, nil
-}
-
-func queryDevices(ctx context.Context, db *sql.DB, opts repo.DeviceListOptions) (*repo.DeviceListResult, error) {
-	var conditions []string
-	var args []interface{}
-
-	if opts.OwnerURN != "" {
-		conditions = append(conditions, "owner_urn = ?")
-		args = append(args, opts.OwnerURN)
-	}
-	if !opts.IncludeRevoked {
-		conditions = append(conditions, "revoked = 0")
-	}
-
-	where := ""
-	if len(conditions) > 0 {
-		where = "WHERE " + strings.Join(conditions, " AND ")
-	}
-
-	q := fmt.Sprintf(
-		`SELECT urn, name, owner_urn, public_key_b64, role, approval_status,
-		        revoked, registered_at, last_seen_at
-		 FROM devices %s ORDER BY registered_at ASC, urn ASC`, where,
-	)
-
-	rows, err := db.QueryContext(ctx, q, args...)
-	if err != nil {
-		return nil, fmt.Errorf("sqlite: list devices: %w", err)
-	}
-	defer rows.Close()
-
-	var devices []*core.Device
-	for rows.Next() {
-		var (
-			urnStr         string
-			name           string
-			ownerURNStr    string
-			publicKeyB64   string
-			role           string
-			approvalStatus string
-			revoked        int
-			registeredMs   int64
-			lastSeenMs     int64
-		)
-		if err := rows.Scan(&urnStr, &name, &ownerURNStr, &publicKeyB64, &role, &approvalStatus,
-			&revoked, &registeredMs, &lastSeenMs); err != nil {
-			return nil, fmt.Errorf("sqlite: scan device: %w", err)
-		}
-		parsedURN, err := core.ParseURN(urnStr)
-		if err != nil {
-			return nil, fmt.Errorf("sqlite: parse device urn %q: %w", urnStr, err)
-		}
-		parsedOwnerURN, err := core.ParseURN(ownerURNStr)
-		if err != nil {
-			return nil, fmt.Errorf("sqlite: parse device owner_urn %q: %w", ownerURNStr, err)
-		}
-		d := &core.Device{
-			URN:            parsedURN,
-			Name:           name,
-			OwnerURN:       parsedOwnerURN,
-			PublicKeyB64:   publicKeyB64,
-			Role:           core.DeviceRole(role),
-			ApprovalStatus: core.DeviceApprovalStatus(approvalStatus),
-			Revoked:        revoked == 1,
-			RegisteredAt:   time.UnixMilli(registeredMs).UTC(),
-		}
-		if lastSeenMs > 0 {
-			d.LastSeenAt = time.UnixMilli(lastSeenMs).UTC()
-		}
-		devices = append(devices, d)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("sqlite: iterate devices: %w", err)
-	}
-	if devices == nil {
-		devices = []*core.Device{}
-	}
-	return &repo.DeviceListResult{Devices: devices}, nil
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// User queries
-// ─────────────────────────────────────────────────────────────────────────────
-
-func queryUser(ctx context.Context, db *sql.DB, urn string) (*core.User, error) {
-	var (
-		displayName string
-		email       string
-		deleted     int
-		createdMs   int64
-		updatedMs   int64
-	)
-	err := db.QueryRowContext(ctx,
-		`SELECT display_name, email, deleted, created_at, updated_at FROM users WHERE urn = ?`, urn,
-	).Scan(&displayName, &email, &deleted, &createdMs, &updatedMs)
-	if err == sql.ErrNoRows {
-		return nil, repo.ErrNotFound
-	}
-	if err != nil {
-		return nil, fmt.Errorf("sqlite: get user: %w", err)
-	}
-	parsedURN, err := core.ParseURN(urn)
-	if err != nil {
-		return nil, fmt.Errorf("sqlite: parse user urn %q: %w", urn, err)
-	}
-	return &core.User{
-		URN:         parsedURN,
-		DisplayName: displayName,
-		Email:       email,
-		Deleted:     deleted == 1,
-		CreatedAt:   time.UnixMilli(createdMs).UTC(),
-		UpdatedAt:   time.UnixMilli(updatedMs).UTC(),
-	}, nil
-}
-
-func queryUsers(ctx context.Context, db *sql.DB, opts repo.UserListOptions) (*repo.UserListResult, error) {
-	pageSize := opts.PageSize
-	if pageSize <= 0 {
-		pageSize = 100
-	}
-
-	var conditions []string
-	var args []interface{}
-	if !opts.IncludeDeleted {
-		conditions = append(conditions, "deleted = 0")
-	}
-
-	cursorMs, cursorURN, err := decodeCursor(opts.PageToken)
-	if err != nil {
-		return nil, err
-	}
-	if cursorMs > 0 {
-		conditions = append(conditions, "(updated_at < ? OR (updated_at = ? AND urn > ?))")
-		args = append(args, cursorMs, cursorMs, cursorURN)
-	}
-
-	where := ""
-	if len(conditions) > 0 {
-		where = "WHERE " + strings.Join(conditions, " AND ")
-	}
-
-	q := fmt.Sprintf(
-		`SELECT urn, display_name, email, deleted, created_at, updated_at FROM users %s
-		 ORDER BY updated_at DESC, urn ASC LIMIT ?`, where,
-	)
-	args = append(args, pageSize+1)
-
-	rows, err := db.QueryContext(ctx, q, args...)
-	if err != nil {
-		return nil, fmt.Errorf("sqlite: list users: %w", err)
-	}
-	defer rows.Close()
-
-	var users []*core.User
-	for rows.Next() {
-		var (
-			urnStr      string
-			displayName string
-			email       string
-			deleted     int
-			createdMs   int64
-			updatedMs   int64
-		)
-		if err := rows.Scan(&urnStr, &displayName, &email, &deleted, &createdMs, &updatedMs); err != nil {
-			return nil, fmt.Errorf("sqlite: scan user: %w", err)
-		}
-		parsedURN, err := core.ParseURN(urnStr)
-		if err != nil {
-			return nil, fmt.Errorf("sqlite: parse user urn %q: %w", urnStr, err)
-		}
-		users = append(users, &core.User{
-			URN:         parsedURN,
-			DisplayName: displayName,
-			Email:       email,
-			Deleted:     deleted == 1,
-			CreatedAt:   time.UnixMilli(createdMs).UTC(),
-			UpdatedAt:   time.UnixMilli(updatedMs).UTC(),
-		})
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("sqlite: iterate users: %w", err)
-	}
-
-	var nextToken string
-	if len(users) > pageSize {
-		last := users[pageSize-1]
-		nextToken = encodeCursor(last.UpdatedAt.UnixMilli(), last.URN.String())
-		users = users[:pageSize]
-	}
-	if users == nil {
-		users = []*core.User{}
-	}
-	return &repo.UserListResult{Users: users, NextPageToken: nextToken}, nil
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Server queries
-// ─────────────────────────────────────────────────────────────────────────────
-
-func queryServer(ctx context.Context, db *sql.DB, urn string) (*core.Server, error) {
-	var (
-		name         string
-		endpoint     string
-		certPEM      string
-		certSerial   string
-		revoked      int
-		registeredMs int64
-		expiresMs    int64
-		lastSeenMs   int64
-	)
-	err := db.QueryRowContext(ctx,
-		`SELECT name, endpoint, cert_pem, cert_serial, revoked,
-		        registered_at, expires_at, last_seen_at
-		 FROM servers WHERE urn = ?`, urn,
-	).Scan(&name, &endpoint, &certPEM, &certSerial, &revoked,
-		&registeredMs, &expiresMs, &lastSeenMs)
-	if err == sql.ErrNoRows {
-		return nil, repo.ErrNotFound
-	}
-	if err != nil {
-		return nil, fmt.Errorf("sqlite: get server: %w", err)
-	}
-	parsedURN, err := core.ParseURN(urn)
-	if err != nil {
-		return nil, fmt.Errorf("sqlite: parse server urn %q: %w", urn, err)
-	}
-	s := &core.Server{
-		URN:          parsedURN,
-		Name:         name,
-		Endpoint:     endpoint,
-		CertPEM:      []byte(certPEM),
-		CertSerial:   certSerial,
-		Revoked:      revoked == 1,
-		RegisteredAt: time.UnixMilli(registeredMs).UTC(),
-		ExpiresAt:    time.UnixMilli(expiresMs).UTC(),
-	}
-	if lastSeenMs > 0 {
-		s.LastSeenAt = time.UnixMilli(lastSeenMs).UTC()
-	}
-	return s, nil
-}
-
-func queryServers(ctx context.Context, db *sql.DB, opts repo.ServerListOptions) (*repo.ServerListResult, error) {
-	var conditions []string
-	var args []interface{}
-
-	if !opts.IncludeRevoked {
-		conditions = append(conditions, "revoked = 0")
-	}
-
-	where := ""
-	if len(conditions) > 0 {
-		where = "WHERE " + strings.Join(conditions, " AND ")
-	}
-
-	q := fmt.Sprintf(
-		`SELECT urn, name, endpoint, cert_pem, cert_serial, revoked,
-		        registered_at, expires_at, last_seen_at
-		 FROM servers %s ORDER BY registered_at ASC, urn ASC`, where,
-	)
-
-	rows, err := db.QueryContext(ctx, q, args...)
-	if err != nil {
-		return nil, fmt.Errorf("sqlite: list servers: %w", err)
-	}
-	defer rows.Close()
-
-	var servers []*core.Server
-	for rows.Next() {
-		var (
-			urnStr       string
-			name         string
-			endpoint     string
-			certPEM      string
-			certSerial   string
-			revoked      int
-			registeredMs int64
-			expiresMs    int64
-			lastSeenMs   int64
-		)
-		if err := rows.Scan(&urnStr, &name, &endpoint, &certPEM, &certSerial, &revoked,
-			&registeredMs, &expiresMs, &lastSeenMs); err != nil {
-			return nil, fmt.Errorf("sqlite: scan server: %w", err)
-		}
-		parsedURN, err := core.ParseURN(urnStr)
-		if err != nil {
-			return nil, fmt.Errorf("sqlite: parse server urn %q: %w", urnStr, err)
-		}
-		s := &core.Server{
-			URN:          parsedURN,
-			Name:         name,
-			Endpoint:     endpoint,
-			CertPEM:      []byte(certPEM),
-			CertSerial:   certSerial,
-			Revoked:      revoked == 1,
-			RegisteredAt: time.UnixMilli(registeredMs).UTC(),
-			ExpiresAt:    time.UnixMilli(expiresMs).UTC(),
-		}
-		if lastSeenMs > 0 {
-			s.LastSeenAt = time.UnixMilli(lastSeenMs).UTC()
-		}
-		servers = append(servers, s)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("sqlite: iterate servers: %w", err)
-	}
-	if servers == nil {
-		servers = []*core.Server{}
-	}
-	return &repo.ServerListResult{Servers: servers}, nil
 }

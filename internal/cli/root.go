@@ -13,13 +13,13 @@ var rootCmd = &cobra.Command{
 	Long: `notx is a note engine for creating, managing and inspecting .notx documents.
 
 When called with a file path as the first argument, notx creates a new note
-by sending it to the running notx gRPC server (equivalent to "notx add <file>"):
+by sending it to the running notx HTTP server (equivalent to "notx add <file>"):
 
   notx some/file.txt
   notx some/file.txt -d --secure
-  notx some/file.txt --addr localhost:9000
+  notx some/file.txt --addr http://localhost:7430
 
-The server address is read from ~/.notx/config.json (client.grpc_addr).
+The server address is read from ~/.notx/config.json (server.http_addr).
 Run "notx config" to set it up interactively.
 
 Pass --urn to update an existing note instead of creating a new one:
@@ -48,14 +48,14 @@ func init() {
 	// Mirror the add-note flags on the root command so they work when the user
 	// invokes notx directly with a file path:
 	//
-	//   notx notes.txt -d --secure --addr localhost:9000
+	//   notx notes.txt -d --secure --addr http://localhost:7430
 	//
 	// The actual flag variables live in addnote.go (addNoteFlags); we bind the
 	// same pointers here so both "notx add ..." and "notx ..." share one set of
 	// values.
 	f := rootCmd.Flags()
 	f.StringVar(&addNoteFlags.addr, "addr", "",
-		"gRPC server address to dial (overrides config client.grpc_addr)")
+		"HTTP server address to dial (overrides config server.http_addr)")
 	f.StringVar(&addNoteFlags.urn, "urn", "",
 		"URN of an existing note to update (skips creation, diffs and appends an event)")
 	f.BoolVarP(&addNoteFlags.delete, "delete", "d", false,

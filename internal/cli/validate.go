@@ -6,7 +6,6 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/zebaqui/notx-engine/core"
-	"github.com/zebaqui/notx-engine/internal/tui"
 	"github.com/zebaqui/notx-engine/internal/validate"
 )
 
@@ -27,12 +26,44 @@ func runValidate(cmd *cobra.Command, args []string) error {
 	}
 
 	report := validate.Validate(note, filePath)
-	tui.DisplayValidationReport(report)
+	printValidationReport(report)
 
-	// Exit with appropriate code based on validation result
 	if !report.Passed {
 		os.Exit(1)
 	}
 
 	return nil
+}
+
+func printValidationReport(report validate.ValidationReport) {
+	const (
+		bold  = "\033[1m"
+		dim   = "\033[2m"
+		green = "\033[32m"
+		red   = "\033[31m"
+		reset = "\033[0m"
+	)
+
+	fmt.Println()
+	fmt.Printf("  %sValidation Report%s\n", bold, reset)
+	fmt.Printf("  %sFile: %s%s\n\n", dim, report.FilePath, reset)
+
+	for _, check := range report.Checks {
+		if check.Passed {
+			fmt.Printf("  %s✓%s  %s\n", green, reset, check.Name)
+		} else {
+			fmt.Printf("  %s✗%s  %s\n", red, reset, check.Name)
+			if check.Error != "" {
+				fmt.Printf("       %s%s%s\n", dim, check.Error, reset)
+			}
+		}
+	}
+
+	fmt.Println()
+
+	if report.Passed {
+		fmt.Printf("  %s✓  All %d checks passed%s\n\n", green, report.TotalChecks, reset)
+	} else {
+		fmt.Printf("  %s✗  %d/%d checks failed%s\n\n", red, report.FailedChecks, report.TotalChecks, reset)
+	}
 }

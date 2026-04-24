@@ -44,6 +44,17 @@ type Note struct {
 	// Nil when the note has no parent.
 	ParentURN *URN
 
+	// SnipType, when non-nil, marks this note as a typed snip.
+	// Immutable after creation — set in the file header and never changed.
+	// Value is a registered snip_type string (e.g. "todo", "bash_history").
+	SnipType *string
+
+	// ParentAnchor is the anchor ID within ParentURN that this snip is
+	// bound to. Non-nil only for sidecar snips. ParentURN already exists
+	// on Note; ParentAnchor is the new companion field that pins the snip
+	// to a specific anchor within that parent note.
+	ParentAnchor *string
+
 	// NodeLinks is a free-form map of named graph links to other note URNs.
 	// Keys are arbitrary labels (e.g. "requirements", "api_docs"); values are
 	// note URNs that may live on any instance (cross-instance references are
@@ -319,85 +330,55 @@ func (n *Note) linesAt(target int) ([]string, error) {
 // BEFORE the event began (batch semantics). Deletions are applied in reverse
 // line-number order so that index shifting does not affect subsequent entries.
 func applyEvent(lines []string, e *Event) []string {
-	// Separate deletions from set operations to use the batch approach
-	// described in NOTX_FILE_SEMANTICS.md §Event Semantics.
-	type setOp struct {
-		lineNumber int
-		content    string
-		empty      bool
-	}
-
-	var sets []setOp
-	var deletes []int // line numbers, collected then applied highest-first
+	// Process entries in declaration order using streaming semantics: each
+	// entry's LineNumber is relative to the evolving document state after all
+	// prior entries in this event have been applied. An offset counter tracks
+	// the net shift caused by inserts (+1) and deletes (-1) so far.
+	offset := 0
 
 	for _, entry := range e.Entries {
-		switch entry.Op {
-		case LineOpDelete:
-			deletes = append(deletes, entry.LineNumber)
-		case LineOpSetEmpty:
-			sets = append(sets, setOp{lineNumber: entry.LineNumber, empty: true})
-		default: // LineOpSet
-			sets = append(sets, setOp{lineNumber: entry.LineNumber, content: entry.Content})
-		}
-	}
+		idx := entry.LineNumber - 1 + offset // convert to 0-based, adjusted for drift
 
-	// Apply set / append operations first (they do not shift indices).
-	for _, op := range sets {
-		idx := op.lineNumber - 1 // convert to 0-based
-		switch {
-		case idx < len(lines):
-			// Replace existing line.
-			if op.empty {
+		switch entry.Op {
+		case LineOpInsert:
+			// Splice a new line at idx, shifting everything at idx and beyond right.
+			lines = append(lines, "")
+			copy(lines[idx+1:], lines[idx:])
+			lines[idx] = entry.Content
+			offset++
+
+		case LineOpDelete:
+			if idx >= 0 && idx < len(lines) {
+				lines = append(lines[:idx], lines[idx+1:]...)
+				offset--
+			}
+			// Deleting a non-existent line is a no-op (idempotent).
+
+		case LineOpSetEmpty:
+			if idx < len(lines) {
 				lines[idx] = ""
 			} else {
-				lines[idx] = op.content
-			}
-		case idx == len(lines):
-			// Append immediately after current last line.
-			if op.empty {
-				lines = append(lines, "")
-			} else {
-				lines = append(lines, op.content)
-			}
-		default:
-			// Gap beyond current end: fill with empty lines then append.
-			for len(lines) < idx {
+				// Gap fill + append
+				for len(lines) < idx {
+					lines = append(lines, "")
+				}
 				lines = append(lines, "")
 			}
-			if op.empty {
-				lines = append(lines, "")
-			} else {
-				lines = append(lines, op.content)
-			}
-		}
-	}
 
-	// Apply deletions from highest line number to lowest to avoid index drift.
-	sortDeletesDesc(deletes)
-	for _, lineNum := range deletes {
-		idx := lineNum - 1
-		if idx < 0 || idx >= len(lines) {
-			// Idempotent: deleting a non-existent line is a no-op.
-			continue
+		default: // LineOpSet
+			if idx < len(lines) {
+				lines[idx] = entry.Content
+			} else {
+				// Gap fill + append
+				for len(lines) < idx {
+					lines = append(lines, "")
+				}
+				lines = append(lines, entry.Content)
+			}
 		}
-		lines = append(lines[:idx], lines[idx+1:]...)
 	}
 
 	return lines
-}
-
-// sortDeletesDesc performs a simple insertion sort (descending) on a small
-// slice of line-number integers. Avoids importing "sort" for this trivial case.
-func sortDeletesDesc(ns []int) {
-	for i := 1; i < len(ns); i++ {
-		key := ns[i]
-		j := i - 1
-		for j >= 0 && ns[j] < key {
-			ns[j+1] = ns[j]
-			j--
-		}
-		ns[j+1] = key
-	}
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

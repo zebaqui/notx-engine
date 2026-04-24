@@ -1,0 +1,117 @@
+syntax = "proto3";
+package notx.v1;
+
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/zebaqui/notx-engine/proto/snips;snipspb";
+
+message CommandVariation {
+  string command = 1;
+  int32 run_count = 2;
+  int32 last_exit_code = 3;
+  google.protobuf.Timestamp last_run_at = 4;
+}
+
+message CommandStats {
+  int32 run_count = 1;
+  int32 success_count = 2;
+  int32 failure_count = 3;
+  repeated string recent_dirs = 4;
+  repeated string recent_hosts = 5;
+  google.protobuf.Timestamp first_run_at = 6;
+  google.protobuf.Timestamp last_run_at = 7;
+}
+
+message CommandRecord {
+  string note_urn = 1;
+  string command = 2;
+  string canonical_form = 3;
+  string shell = 4;
+  string hostname = 5;
+  int32 head_sequence = 6;
+  string note = 7;
+  repeated string tags = 8;
+  CommandStats stats = 9;
+  repeated CommandVariation variations = 10;
+  google.protobuf.Timestamp created_at = 11;
+  google.protobuf.Timestamp updated_at = 12;
+}
+
+service BashHistoryService {
+  rpc GetCommand(GetCommandRequest) returns (GetCommandResponse);
+  rpc ListCommands(ListCommandsRequest) returns (ListCommandsResponse);
+  rpc SearchCommands(SearchCommandsRequest) returns (SearchCommandsResponse);
+  rpc GetVariations(GetVariationsRequest) returns (GetVariationsResponse);
+  rpc GetStats(GetStatsRequest) returns (GetStatsResponse);
+  rpc AnnotateCommand(AnnotateCommandRequest) returns (AnnotateCommandResponse);
+  rpc TriggerSync(TriggerSyncRequest) returns (TriggerSyncResponse);
+}
+
+message GetCommandRequest {
+  string note_urn = 1;
+  string canonical_form = 2;
+}
+message GetCommandResponse {
+  CommandRecord command = 1;
+}
+
+message ListCommandsRequest {
+  string shell = 1;
+  string hostname = 2;
+  string working_dir = 3;
+  bool failures_only = 4;
+  string query = 5;
+  string sort_by = 6;
+  bool sort_desc = 7;
+  int32 page_size = 8;
+  string page_token = 9;
+}
+message ListCommandsResponse {
+  repeated CommandRecord commands = 1;
+  string next_page_token = 2;
+}
+
+message SearchCommandsRequest {
+  string query = 1;
+  int32 page_size = 2;
+  string page_token = 3;
+}
+message SearchCommandsResponse {
+  repeated CommandRecord results = 1;
+  string next_page_token = 2;
+}
+
+message GetVariationsRequest {
+  string note_urn = 1;
+  string canonical_form = 2;
+}
+message GetVariationsResponse {
+  string canonical_form = 1;
+  repeated CommandVariation variations = 2;
+}
+
+message GetStatsRequest {
+  string note_urn = 1;
+  string canonical_form = 2;
+}
+message GetStatsResponse {
+  string canonical_form = 1;
+  CommandStats stats = 2;
+}
+
+message AnnotateCommandRequest {
+  string note_urn = 1;
+  string note = 2;
+}
+message AnnotateCommandResponse {
+  CommandRecord command = 1;
+}
+
+message TriggerSyncRequest {
+  bool full_reimport = 1;
+}
+message TriggerSyncResponse {
+  int32 entries_ingested = 1;
+  int32 snips_created = 2;
+  int32 snips_updated = 3;
+}
