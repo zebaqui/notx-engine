@@ -6,7 +6,9 @@ import (
 	"strings"
 	"time"
 
-	pb "github.com/zebaqui/notx-engine/proto"
+	"github.com/zebaqui/notx-engine/core"
+	"github.com/zebaqui/notx-engine/repo"
+	"github.com/zebaqui/notx-engine/service"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -101,23 +103,18 @@ type listProjectsResponse struct {
 	NextPageToken string         `json:"next_page_token,omitempty"`
 }
 
-func projectProtoToJSON(p *pb.Project) *projectJSON {
+func coreProjectToJSON(p *core.Project) *projectJSON {
 	if p == nil {
 		return nil
 	}
-	j := &projectJSON{
-		URN:         p.Urn,
+	return &projectJSON{
+		URN:         p.URN.String(),
 		Name:        p.Name,
 		Description: p.Description,
 		Deleted:     p.Deleted,
+		CreatedAt:   p.CreatedAt.UTC().Format(time.RFC3339),
+		UpdatedAt:   p.UpdatedAt.UTC().Format(time.RFC3339),
 	}
-	if p.CreatedAt != nil {
-		j.CreatedAt = p.CreatedAt.AsTime().UTC().Format(time.RFC3339)
-	}
-	if p.UpdatedAt != nil {
-		j.UpdatedAt = p.UpdatedAt.AsTime().UTC().Format(time.RFC3339)
-	}
-	return j
 }
 
 type folderJSON struct {
@@ -148,24 +145,27 @@ type listFoldersResponse struct {
 	NextPageToken string        `json:"next_page_token,omitempty"`
 }
 
-func folderProtoToJSON(f *pb.Folder) *folderJSON {
+func coreFolderToJSON(f *core.Folder) *folderJSON {
 	if f == nil {
 		return nil
 	}
-	j := &folderJSON{
-		URN:         f.Urn,
-		ProjectURN:  f.ProjectUrn,
+	return &folderJSON{
+		URN:         f.URN.String(),
+		ProjectURN:  f.ProjectURN.String(),
 		Name:        f.Name,
 		Description: f.Description,
 		Deleted:     f.Deleted,
+		CreatedAt:   f.CreatedAt.UTC().Format(time.RFC3339),
+		UpdatedAt:   f.UpdatedAt.UTC().Format(time.RFC3339),
 	}
-	if f.CreatedAt != nil {
-		j.CreatedAt = f.CreatedAt.AsTime().UTC().Format(time.RFC3339)
+}
+
+// derefOrEmpty dereferences a *string, returning "" when nil.
+func derefOrEmpty(s *string) string {
+	if s == nil {
+		return ""
 	}
-	if f.UpdatedAt != nil {
-		j.UpdatedAt = f.UpdatedAt.AsTime().UTC().Format(time.RFC3339)
-	}
-	return j
+	return *s
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -181,23 +181,23 @@ func (h *Handler) handleListProjects(w http.ResponseWriter, r *http.Request) {
 	}
 	pageToken := q.Get("page_token")
 
-	resp, err := h.projSvc.ListProjects(r.Context(), &pb.ListProjectsRequest{
+	result, err := h.projSvc.List(r.Context(), repo.ProjectListOptions{
 		IncludeDeleted: includeDeleted,
-		PageSize:       pageSize,
+		PageSize:       int(pageSize),
 		PageToken:      pageToken,
 	})
 	if err != nil {
-		grpcErrToHTTP(w, r, h, err, "list projects")
+		svcErrToHTTP(w, r, h, err, "list projects")
 		return
 	}
 
-	out := make([]*projectJSON, 0, len(resp.Projects))
-	for _, p := range resp.Projects {
-		out = append(out, projectProtoToJSON(p))
+	out := make([]*projectJSON, 0, len(result.Projects))
+	for _, p := range result.Projects {
+		out = append(out, coreProjectToJSON(p))
 	}
 	writeJSON(w, http.StatusOK, &listProjectsResponse{
 		Projects:      out,
-		NextPageToken: resp.NextPageToken,
+		NextPageToken: result.NextPageToken,
 	})
 }
 
@@ -208,36 +208,42 @@ func (h *Handler) handleCreateProject(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if req.Name == "" {
-		writeError(w, http.StatusBadRequest, "name is required")
-		return
-	}
 	if req.URN == "" {
 		writeError(w, http.StatusBadRequest, "urn is required")
 		return
 	}
-
-	resp, err := h.projSvc.CreateProject(r.Context(), &pb.CreateProjectRequest{
-		Urn:         req.URN,
-		Name:        req.Name,
-		Description: req.Description,
-	})
-	if err != nil {
-		grpcErrToHTTP(w, r, h, err, "create project")
+	if req.Name == "" {
+		writeError(w, http.StatusBadRequest, "name is required")
 		return
 	}
 
-	writeJSON(w, http.StatusCreated, projectProtoToJSON(resp.Project))
+	urn, err := core.ParseURN(req.URN)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	proj := &core.Project{
+		URN:         urn,
+		Name:        req.Name,
+		Description: req.Description,
+	}
+	if err := h.projSvc.Create(r.Context(), proj); err != nil {
+		svcErrToHTTP(w, r, h, err, "create project")
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, coreProjectToJSON(proj))
 }
 
 // GET /v1/projects/<urn>
 func (h *Handler) handleGetProject(w http.ResponseWriter, r *http.Request, urn string) {
-	resp, err := h.projSvc.GetProject(r.Context(), &pb.GetProjectRequest{Urn: urn})
+	proj, err := h.projSvc.Get(r.Context(), urn)
 	if err != nil {
-		grpcErrToHTTP(w, r, h, err, "get project")
+		svcErrToHTTP(w, r, h, err, "get project")
 		return
 	}
-	writeJSON(w, http.StatusOK, projectProtoToJSON(resp.Project))
+	writeJSON(w, http.StatusOK, coreProjectToJSON(proj))
 }
 
 // PATCH /v1/projects/<urn>
@@ -248,45 +254,24 @@ func (h *Handler) handleUpdateProject(w http.ResponseWriter, r *http.Request, ur
 		return
 	}
 
-	// Fetch current state to apply partial patch.
-	current, err := h.projSvc.GetProject(r.Context(), &pb.GetProjectRequest{Urn: urn})
-	if err != nil {
-		grpcErrToHTTP(w, r, h, err, "get project for update")
-		return
+	upd := service.ProjectUpdate{
+		Name:        derefOrEmpty(req.Name),
+		Description: req.Description,
+		Deleted:     req.Deleted,
 	}
 
-	grpcReq := &pb.UpdateProjectRequest{
-		Urn: urn,
-		Project: &pb.Project{
-			Urn:         urn,
-			Name:        current.Project.Name,
-			Description: current.Project.Description,
-			Deleted:     current.Project.Deleted,
-		},
-	}
-	if req.Name != nil {
-		grpcReq.Project.Name = *req.Name
-	}
-	if req.Description != nil {
-		grpcReq.Project.Description = *req.Description
-	}
-	if req.Deleted != nil {
-		grpcReq.Project.Deleted = *req.Deleted
-	}
-
-	resp, err := h.projSvc.UpdateProject(r.Context(), grpcReq)
+	proj, err := h.projSvc.Update(r.Context(), urn, upd)
 	if err != nil {
-		grpcErrToHTTP(w, r, h, err, "update project")
+		svcErrToHTTP(w, r, h, err, "update project")
 		return
 	}
-	writeJSON(w, http.StatusOK, projectProtoToJSON(resp.Project))
+	writeJSON(w, http.StatusOK, coreProjectToJSON(proj))
 }
 
 // DELETE /v1/projects/<urn>
 func (h *Handler) handleDeleteProject(w http.ResponseWriter, r *http.Request, urn string) {
-	_, err := h.projSvc.DeleteProject(r.Context(), &pb.DeleteProjectRequest{Urn: urn})
-	if err != nil {
-		grpcErrToHTTP(w, r, h, err, "delete project")
+	if err := h.projSvc.Delete(r.Context(), urn); err != nil {
+		svcErrToHTTP(w, r, h, err, "delete project")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"deleted": true})
@@ -307,24 +292,24 @@ func (h *Handler) handleListFolders(w http.ResponseWriter, r *http.Request) {
 	}
 	pageToken := q.Get("page_token")
 
-	resp, err := h.folderSvc.ListFolders(r.Context(), &pb.ListFoldersRequest{
-		ProjectUrn:     projectURN,
+	result, err := h.folderSvc.List(r.Context(), repo.FolderListOptions{
+		ProjectURN:     projectURN,
 		IncludeDeleted: includeDeleted,
-		PageSize:       pageSize,
+		PageSize:       int(pageSize),
 		PageToken:      pageToken,
 	})
 	if err != nil {
-		grpcErrToHTTP(w, r, h, err, "list folders")
+		svcErrToHTTP(w, r, h, err, "list folders")
 		return
 	}
 
-	out := make([]*folderJSON, 0, len(resp.Folders))
-	for _, f := range resp.Folders {
-		out = append(out, folderProtoToJSON(f))
+	out := make([]*folderJSON, 0, len(result.Folders))
+	for _, f := range result.Folders {
+		out = append(out, coreFolderToJSON(f))
 	}
 	writeJSON(w, http.StatusOK, &listFoldersResponse{
 		Folders:       out,
-		NextPageToken: resp.NextPageToken,
+		NextPageToken: result.NextPageToken,
 	})
 }
 
@@ -348,28 +333,39 @@ func (h *Handler) handleCreateFolder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp, err := h.folderSvc.CreateFolder(r.Context(), &pb.CreateFolderRequest{
-		Urn:         req.URN,
-		ProjectUrn:  req.ProjectURN,
-		Name:        req.Name,
-		Description: req.Description,
-	})
+	urn, err := core.ParseURN(req.URN)
 	if err != nil {
-		grpcErrToHTTP(w, r, h, err, "create folder")
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	projURN, err := core.ParseURN(req.ProjectURN)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
-	writeJSON(w, http.StatusCreated, folderProtoToJSON(resp.Folder))
+	folder := &core.Folder{
+		URN:         urn,
+		ProjectURN:  projURN,
+		Name:        req.Name,
+		Description: req.Description,
+	}
+	if err := h.folderSvc.Create(r.Context(), folder); err != nil {
+		svcErrToHTTP(w, r, h, err, "create folder")
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, coreFolderToJSON(folder))
 }
 
 // GET /v1/folders/<urn>
 func (h *Handler) handleGetFolder(w http.ResponseWriter, r *http.Request, urn string) {
-	resp, err := h.folderSvc.GetFolder(r.Context(), &pb.GetFolderRequest{Urn: urn})
+	folder, err := h.folderSvc.Get(r.Context(), urn)
 	if err != nil {
-		grpcErrToHTTP(w, r, h, err, "get folder")
+		svcErrToHTTP(w, r, h, err, "get folder")
 		return
 	}
-	writeJSON(w, http.StatusOK, folderProtoToJSON(resp.Folder))
+	writeJSON(w, http.StatusOK, coreFolderToJSON(folder))
 }
 
 // PATCH /v1/folders/<urn>
@@ -380,46 +376,24 @@ func (h *Handler) handleUpdateFolder(w http.ResponseWriter, r *http.Request, urn
 		return
 	}
 
-	// Fetch current state to apply partial patch.
-	current, err := h.folderSvc.GetFolder(r.Context(), &pb.GetFolderRequest{Urn: urn})
-	if err != nil {
-		grpcErrToHTTP(w, r, h, err, "get folder for update")
-		return
+	upd := service.FolderUpdate{
+		Name:        derefOrEmpty(req.Name),
+		Description: req.Description,
+		Deleted:     req.Deleted,
 	}
 
-	grpcReq := &pb.UpdateFolderRequest{
-		Urn: urn,
-		Folder: &pb.Folder{
-			Urn:         urn,
-			ProjectUrn:  current.Folder.ProjectUrn,
-			Name:        current.Folder.Name,
-			Description: current.Folder.Description,
-			Deleted:     current.Folder.Deleted,
-		},
-	}
-	if req.Name != nil {
-		grpcReq.Folder.Name = *req.Name
-	}
-	if req.Description != nil {
-		grpcReq.Folder.Description = *req.Description
-	}
-	if req.Deleted != nil {
-		grpcReq.Folder.Deleted = *req.Deleted
-	}
-
-	resp, err := h.folderSvc.UpdateFolder(r.Context(), grpcReq)
+	folder, err := h.folderSvc.Update(r.Context(), urn, upd)
 	if err != nil {
-		grpcErrToHTTP(w, r, h, err, "update folder")
+		svcErrToHTTP(w, r, h, err, "update folder")
 		return
 	}
-	writeJSON(w, http.StatusOK, folderProtoToJSON(resp.Folder))
+	writeJSON(w, http.StatusOK, coreFolderToJSON(folder))
 }
 
 // DELETE /v1/folders/<urn>
 func (h *Handler) handleDeleteFolder(w http.ResponseWriter, r *http.Request, urn string) {
-	_, err := h.folderSvc.DeleteFolder(r.Context(), &pb.DeleteFolderRequest{Urn: urn})
-	if err != nil {
-		grpcErrToHTTP(w, r, h, err, "delete folder")
+	if err := h.folderSvc.Delete(r.Context(), urn); err != nil {
+		svcErrToHTTP(w, r, h, err, "delete folder")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"deleted": true})

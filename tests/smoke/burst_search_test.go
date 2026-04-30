@@ -51,6 +51,7 @@ func startSQLiteHTTPServer(t *testing.T) (baseURL string, stop func()) {
 		provider, // LinkRepository
 		log,
 		nil, // plugins — no snip plugins in smoke tests
+		provider, // propRepo
 	)
 	if err != nil {
 		provider.Close()

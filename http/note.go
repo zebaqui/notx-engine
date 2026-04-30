@@ -1,17 +1,15 @@
 package http
 
 import (
-	"context"
 	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
-	"google.golang.org/grpc"
-	"google.golang.org/protobuf/types/known/timestamppb"
-
-	pb "github.com/zebaqui/notx-engine/proto"
+	"github.com/zebaqui/notx-engine/core"
+	"github.com/zebaqui/notx-engine/repo"
+	"github.com/zebaqui/notx-engine/service"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -115,65 +113,57 @@ type lineEntryJSON struct {
 	Content    string `json:"content,omitempty"`
 }
 
-// protoHeaderToJSON converts a pb.NoteHeader to the HTTP wire type.
-func protoHeaderToJSON(h *pb.NoteHeader) *noteHeaderJSON {
-	if h == nil {
+// ─────────────────────────────────────────────────────────────────────────────
+// core.* → JSON conversion helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+func coreNoteToJSON(n *core.Note) *noteHeaderJSON {
+	if n == nil {
 		return nil
 	}
 	j := &noteHeaderJSON{
-		URN:        h.Urn,
-		Name:       h.Name,
-		Deleted:    h.Deleted,
-		ProjectURN: h.ProjectUrn,
-		FolderURN:  h.FolderUrn,
+		URN:       n.URN.String(),
+		Name:      n.Name,
+		NoteType:  n.NoteType.String(),
+		Deleted:   n.Deleted,
+		CreatedAt: n.CreatedAt.UTC().Format(time.RFC3339),
+		UpdatedAt: n.UpdatedAt.UTC().Format(time.RFC3339),
 	}
-	switch h.NoteType {
-	case pb.NoteType_NOTE_TYPE_SECURE:
-		j.NoteType = "secure"
-	default:
-		j.NoteType = "normal"
+	if n.ProjectURN != nil {
+		j.ProjectURN = n.ProjectURN.String()
 	}
-	if h.CreatedAt != nil {
-		j.CreatedAt = h.CreatedAt.AsTime().UTC().Format(time.RFC3339)
-	}
-	if h.UpdatedAt != nil {
-		j.UpdatedAt = h.UpdatedAt.AsTime().UTC().Format(time.RFC3339)
+	if n.FolderURN != nil {
+		j.FolderURN = n.FolderURN.String()
 	}
 	return j
 }
 
-// protoEventToJSON converts a pb.Event to the HTTP wire type.
-func protoEventToJSON(ev *pb.Event) *eventJSON {
+func coreEventToJSON(ev *core.Event) *eventJSON {
 	if ev == nil {
 		return nil
 	}
 	j := &eventJSON{
-		URN:       ev.Urn,
-		NoteURN:   ev.NoteUrn,
-		Sequence:  int(ev.Sequence),
-		AuthorURN: ev.AuthorUrn,
+		URN:       ev.URN.String(),
+		NoteURN:   ev.NoteURN.String(),
+		Sequence:  ev.Sequence,
+		AuthorURN: ev.AuthorURN.String(),
+		CreatedAt: ev.CreatedAt.UTC().Format(time.RFC3339),
 		Entries:   make([]lineEntryJSON, 0, len(ev.Entries)),
 	}
-	if ev.CreatedAt != nil {
-		j.CreatedAt = ev.CreatedAt.AsTime().UTC().Format(time.RFC3339)
-	}
 	for _, e := range ev.Entries {
-		j.Entries = append(j.Entries, protoLineEntryToJSON(e))
+		j.Entries = append(j.Entries, coreLineEntryToJSON(e))
 	}
 	return j
 }
 
-func protoLineEntryToJSON(e *pb.LineEntry) lineEntryJSON {
-	j := lineEntryJSON{
-		LineNumber: int(e.LineNumber),
-		Content:    e.Content,
-	}
+func coreLineEntryToJSON(e core.LineEntry) lineEntryJSON {
+	j := lineEntryJSON{LineNumber: e.LineNumber, Content: e.Content}
 	switch e.Op {
-	case 1:
+	case core.LineOpSetEmpty:
 		j.Op = "set_empty"
-	case 2:
+	case core.LineOpDelete:
 		j.Op = "delete"
-	case 3:
+	case core.LineOpInsert:
 		j.Op = "insert"
 	default:
 		j.Op = "set"
@@ -181,30 +171,24 @@ func protoLineEntryToJSON(e *pb.LineEntry) lineEntryJSON {
 	return j
 }
 
-func lineEntryFromJSON(j lineEntryJSON) (lineEntryResult, error) {
+func lineEntryFromJSON(j lineEntryJSON) (core.LineEntry, error) {
 	if j.LineNumber < 1 {
-		return lineEntryResult{}, fmt.Errorf("line_number must be >= 1")
+		return core.LineEntry{}, fmt.Errorf("line_number must be >= 1")
 	}
-	var op int32
+	var op core.LineOp
 	switch j.Op {
 	case "set", "":
-		op = 0
+		op = core.LineOpSet
 	case "set_empty":
-		op = 1
+		op = core.LineOpSetEmpty
 	case "delete":
-		op = 2
+		op = core.LineOpDelete
 	case "insert":
-		op = 3
+		op = core.LineOpInsert
 	default:
-		return lineEntryResult{}, fmt.Errorf("unknown op %q: must be set, set_empty, delete, or insert", j.Op)
+		return core.LineEntry{}, fmt.Errorf("unknown op %q: must be set, set_empty, delete, or insert", j.Op)
 	}
-	return lineEntryResult{Op: op, LineNumber: int32(j.LineNumber), Content: j.Content}, nil
-}
-
-type lineEntryResult struct {
-	Op         int32
-	LineNumber int32
-	Content    string
+	return core.LineEntry{LineNumber: j.LineNumber, Op: op, Content: j.Content}, nil
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -219,9 +203,9 @@ type listNotesResponse struct {
 func (h *Handler) handleListNotes(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 
-	req := &pb.ListNotesRequest{
-		ProjectUrn:     q.Get("project_urn"),
-		FolderUrn:      q.Get("folder_urn"),
+	opts := repo.ListOptions{
+		ProjectURN:     q.Get("project_urn"),
+		FolderURN:      q.Get("folder_urn"),
 		PageToken:      q.Get("page_token"),
 		IncludeDeleted: q.Get("include_deleted") == "true",
 	}
@@ -232,33 +216,35 @@ func (h *Handler) handleListNotes(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "page_size must be a positive integer")
 			return
 		}
-		req.PageSize = int32(n)
+		opts.PageSize = n
 	}
 
 	if nt := q.Get("note_type"); nt != "" {
 		switch nt {
 		case "normal":
-			req.NoteType = pb.NoteType_NOTE_TYPE_NORMAL
+			opts.FilterByType = true
+			opts.NoteTypeFilter = core.NoteTypeNormal
 		case "secure":
-			req.NoteType = pb.NoteType_NOTE_TYPE_SECURE
+			opts.FilterByType = true
+			opts.NoteTypeFilter = core.NoteTypeSecure
 		default:
 			writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid note_type %q: must be normal or secure", nt))
 			return
 		}
 	}
 
-	resp, err := h.noteSvc.ListNotes(r.Context(), req)
+	result, err := h.noteSvc.List(r.Context(), opts)
 	if err != nil {
-		grpcErrToHTTP(w, r, h, err, "list notes")
+		svcErrToHTTP(w, r, h, err, "list notes")
 		return
 	}
 
 	out := &listNotesResponse{
-		Notes:         make([]*noteHeaderJSON, 0, len(resp.Notes)),
-		NextPageToken: resp.NextPageToken,
+		Notes:         make([]*noteHeaderJSON, 0, len(result.Notes)),
+		NextPageToken: result.NextPageToken,
 	}
-	for _, hdr := range resp.Notes {
-		out.Notes = append(out.Notes, protoHeaderToJSON(hdr))
+	for _, n := range result.Notes {
+		out.Notes = append(out.Notes, coreNoteToJSON(n))
 	}
 
 	writeJSON(w, http.StatusOK, out)
@@ -297,33 +283,55 @@ func (h *Handler) handleCreateNote(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var noteType pb.NoteType
-	switch req.NoteType {
-	case "secure":
-		noteType = pb.NoteType_NOTE_TYPE_SECURE
-	case "normal", "":
-		noteType = pb.NoteType_NOTE_TYPE_NORMAL
-	default:
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid note_type %q: must be normal or secure", req.NoteType))
-		return
-	}
-
-	pbHdr := &pb.NoteHeader{
-		Urn:        req.URN,
-		Name:       req.Name,
-		NoteType:   noteType,
-		SnipType:   req.SnipType,
-		ProjectUrn: req.ProjectURN,
-		FolderUrn:  req.FolderURN,
-	}
-
-	resp, err := h.noteSvc.CreateNote(r.Context(), &pb.CreateNoteRequest{Header: pbHdr})
+	noteURN, err := core.ParseURN(req.URN)
 	if err != nil {
-		grpcErrToHTTP(w, r, h, err, "create note")
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid urn: %v", err))
 		return
 	}
 
-	writeJSON(w, http.StatusCreated, &createNoteResponse{Note: protoHeaderToJSON(resp.Header)})
+	noteType, err := core.ParseNoteType(req.NoteType)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	now := time.Now().UTC()
+	var note *core.Note
+	if noteType == core.NoteTypeSecure {
+		note = core.NewSecureNote(noteURN, req.Name, now)
+	} else {
+		note = core.NewNote(noteURN, req.Name, now)
+	}
+
+	if req.SnipType != "" {
+		st := req.SnipType
+		note.SnipType = &st
+	}
+
+	if req.ProjectURN != "" {
+		projURN, err := core.ParseURN(req.ProjectURN)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid project_urn: %v", err))
+			return
+		}
+		note.ProjectURN = &projURN
+	}
+
+	if req.FolderURN != "" {
+		folderURN, err := core.ParseURN(req.FolderURN)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid folder_urn: %v", err))
+			return
+		}
+		note.FolderURN = &folderURN
+	}
+
+	if err := h.noteSvc.Create(r.Context(), note); err != nil {
+		svcErrToHTTP(w, r, h, err, "create note")
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, &createNoteResponse{Note: coreNoteToJSON(note)})
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -336,54 +344,22 @@ type getNoteResponse struct {
 }
 
 func (h *Handler) handleGetNote(w http.ResponseWriter, r *http.Request, urn string) {
-	resp, err := h.noteSvc.GetNote(r.Context(), &pb.GetNoteRequest{Urn: urn})
+	note, _, err := h.noteSvc.Get(r.Context(), urn)
 	if err != nil {
-		grpcErrToHTTP(w, r, h, err, "get note")
+		svcErrToHTTP(w, r, h, err, "get note")
 		return
 	}
 
 	content := ""
 	// Only reconstruct content for non-secure notes.
-	if resp.Header.NoteType != pb.NoteType_NOTE_TYPE_SECURE {
-		content = applyEventsToContent(resp.Events)
+	if note.NoteType != core.NoteTypeSecure {
+		content = note.Content()
 	}
 
 	writeJSON(w, http.StatusOK, &getNoteResponse{
-		Header:  protoHeaderToJSON(resp.Header),
+		Header:  coreNoteToJSON(note),
 		Content: content,
 	})
-}
-
-// applyEventsToContent reconstructs the plaintext content of a note from its
-// ordered list of EventProto by replaying line-entry operations in sequence.
-func applyEventsToContent(events []*pb.Event) string {
-	lines := make(map[int]string)
-	for _, ev := range events {
-		for _, e := range ev.Entries {
-			switch e.Op {
-			case 0: // SET
-				lines[int(e.LineNumber)] = e.Content
-			case 1: // SET_EMPTY
-				lines[int(e.LineNumber)] = ""
-			case 2: // DELETE
-				delete(lines, int(e.LineNumber))
-			}
-		}
-	}
-	if len(lines) == 0 {
-		return ""
-	}
-	maxLine := 0
-	for k := range lines {
-		if k > maxLine {
-			maxLine = k
-		}
-	}
-	parts := make([]string, maxLine)
-	for i := 1; i <= maxLine; i++ {
-		parts[i-1] = lines[i]
-	}
-	return strings.Join(parts, "\n")
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -404,59 +380,43 @@ func (h *Handler) handleUpdateNote(w http.ResponseWriter, r *http.Request, urn s
 		return
 	}
 
-	// Fetch current state so we can carry forward unset fields.
-	current, err := h.noteSvc.GetNote(r.Context(), &pb.GetNoteRequest{Urn: urn})
-	if err != nil {
-		grpcErrToHTTP(w, r, h, err, "get note for update")
-		return
-	}
-
-	header := &pb.NoteHeader{
-		Urn:        urn,
-		Name:       current.Header.Name,
-		NoteType:   current.Header.NoteType,
-		ProjectUrn: current.Header.ProjectUrn,
-		FolderUrn:  current.Header.FolderUrn,
-		Deleted:    current.Header.Deleted,
-	}
+	var upd service.NoteUpdate
 
 	if req.Name != nil {
 		if *req.Name == "" {
 			writeError(w, http.StatusBadRequest, "name must not be empty")
 			return
 		}
-		header.Name = *req.Name
+		upd.Name = *req.Name
 	}
 
 	if req.ProjectURN != nil {
 		if *req.ProjectURN == "" {
-			header.ProjectUrn = "CLEAR"
+			upd.ClearProjectURN = true
 		} else {
-			header.ProjectUrn = *req.ProjectURN
+			upd.SetProjectURN = *req.ProjectURN
 		}
 	}
 
 	if req.FolderURN != nil {
 		if *req.FolderURN == "" {
-			header.FolderUrn = "CLEAR"
+			upd.ClearFolderURN = true
 		} else {
-			header.FolderUrn = *req.FolderURN
+			upd.SetFolderURN = *req.FolderURN
 		}
 	}
 
 	if req.Deleted != nil {
-		header.Deleted = *req.Deleted
+		upd.Deleted = req.Deleted
 	}
 
-	grpcReq := &pb.UpdateNoteRequest{Urn: urn, Header: header}
-
-	resp, err := h.noteSvc.UpdateNote(r.Context(), grpcReq)
+	note, err := h.noteSvc.Update(r.Context(), urn, upd)
 	if err != nil {
-		grpcErrToHTTP(w, r, h, err, "update note")
+		svcErrToHTTP(w, r, h, err, "update note")
 		return
 	}
 
-	writeJSON(w, http.StatusOK, &createNoteResponse{Note: protoHeaderToJSON(resp.Header)})
+	writeJSON(w, http.StatusOK, &createNoteResponse{Note: coreNoteToJSON(note)})
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -468,9 +428,8 @@ type deleteNoteResponse struct {
 }
 
 func (h *Handler) handleDeleteNote(w http.ResponseWriter, r *http.Request, urn string) {
-	_, err := h.noteSvc.DeleteNote(r.Context(), &pb.DeleteNoteRequest{Urn: urn})
-	if err != nil {
-		grpcErrToHTTP(w, r, h, err, "delete note")
+	if err := h.noteSvc.Delete(r.Context(), urn); err != nil {
+		svcErrToHTTP(w, r, h, err, "delete note")
 		return
 	}
 	writeJSON(w, http.StatusOK, &deleteNoteResponse{Deleted: true})
@@ -508,6 +467,11 @@ func (h *Handler) handleAppendEvent(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "sequence must be >= 1")
 		return
 	}
+	// Fall back to the JWT-derived URN stamped by DeviceBridgeMiddleware
+	// so callers do not need to echo the author back in the request body.
+	if req.AuthorURN == "" {
+		req.AuthorURN = r.Header.Get("X-Author-URN")
+	}
 	if req.AuthorURN == "" {
 		writeError(w, http.StatusBadRequest, "author_urn is required")
 		return
@@ -517,39 +481,49 @@ func (h *Handler) handleAppendEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	pbEntries := make([]*pb.LineEntry, 0, len(req.Entries))
+	noteURN, err := core.ParseURN(req.NoteURN)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid note_urn: %v", err))
+		return
+	}
+
+	authorURN, err := core.ParseURN(req.AuthorURN)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid author_urn: %v", err))
+		return
+	}
+
+	entries := make([]core.LineEntry, 0, len(req.Entries))
 	for _, e := range req.Entries {
 		entry, err := lineEntryFromJSON(e)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid line entry: %v", err))
 			return
 		}
-		pbEntries = append(pbEntries, &pb.LineEntry{
-			Op:         int32(entry.Op),
-			LineNumber: int32(entry.LineNumber),
-			Content:    entry.Content,
-		})
+		entries = append(entries, entry)
 	}
 
-	ev := &pb.Event{
-		NoteUrn:   req.NoteURN,
-		Sequence:  int32(req.Sequence),
-		AuthorUrn: req.AuthorURN,
-		Entries:   pbEntries,
-	}
-
+	createdAt := time.Now().UTC()
 	if req.CreatedAt != "" {
 		t, err := time.Parse(time.RFC3339, req.CreatedAt)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid created_at: %v", err))
 			return
 		}
-		ev.CreatedAt = timestamppb.New(t.UTC())
+		createdAt = t.UTC()
 	}
 
-	_, err := h.noteSvc.AppendEvent(r.Context(), &pb.AppendEventRequest{Event: ev})
-	if err != nil {
-		grpcErrToHTTP(w, r, h, err, "append event")
+	ev := &core.Event{
+		URN:       core.NewURN(core.ObjectTypeEvent),
+		NoteURN:   noteURN,
+		Sequence:  req.Sequence,
+		AuthorURN: authorURN,
+		CreatedAt: createdAt,
+		Entries:   entries,
+	}
+
+	if err := h.noteSvc.AppendEvent(r.Context(), ev, repo.AppendEventOptions{ExpectSequence: req.Sequence}); err != nil {
+		svcErrToHTTP(w, r, h, err, "append event")
 		return
 	}
 
@@ -572,51 +546,32 @@ func (h *Handler) handleStreamEvents(w http.ResponseWriter, r *http.Request, not
 		return
 	}
 
-	fromSeq := int32(1)
+	fromSeq := 1
 	if fs := r.URL.Query().Get("from"); fs != "" {
 		n, err := strconv.Atoi(fs)
 		if err != nil || n < 1 {
 			writeError(w, http.StatusBadRequest, "from must be a positive integer")
 			return
 		}
-		fromSeq = int32(n)
+		fromSeq = n
 	}
 
-	// Use an in-memory server stream adapter to collect all events.
-	ms := &memoryEventStream{ctx: r.Context()}
-	if err := h.noteSvc.StreamEvents(
-		&pb.StreamEventsRequest{NoteUrn: noteURN, FromSequence: fromSeq},
-		ms,
-	); err != nil {
-		grpcErrToHTTP(w, r, h, err, "stream events")
+	events, err := h.noteSvc.Events(r.Context(), noteURN, fromSeq)
+	if err != nil {
+		svcErrToHTTP(w, r, h, err, "stream events")
 		return
 	}
 
 	resp := &streamEventsResponse{
 		NoteURN: noteURN,
-		Events:  make([]*eventJSON, 0, len(ms.events)),
-		Count:   len(ms.events),
+		Events:  make([]*eventJSON, 0, len(events)),
+		Count:   len(events),
 	}
-	for _, ev := range ms.events {
-		resp.Events = append(resp.Events, protoEventToJSON(ev))
+	for _, ev := range events {
+		resp.Events = append(resp.Events, coreEventToJSON(ev))
 	}
 
 	writeJSON(w, http.StatusOK, resp)
-}
-
-// memoryEventStream is an in-process grpc.ServerStream adapter for
-// NoteService_StreamEventsServer. It collects all sent events in memory so
-// the HTTP handler can return them as a single JSON response.
-type memoryEventStream struct {
-	ctx    context.Context
-	events []*pb.Event
-	grpc.ServerStream
-}
-
-func (s *memoryEventStream) Context() context.Context { return s.ctx }
-func (s *memoryEventStream) Send(resp *pb.StreamEventsResponse) error {
-	s.events = append(s.events, resp.Event)
-	return nil
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -646,25 +601,33 @@ func (h *Handler) handleReplaceContent(w http.ResponseWriter, r *http.Request, n
 		return
 	}
 
-	resp, err := h.noteSvc.ReplaceContent(r.Context(), &pb.ReplaceContentRequest{
-		NoteUrn:   noteURN,
+	// If the body did not carry an author_urn, fall back to the value that
+	// DeviceBridgeMiddleware stamped from the JWT so bursts are always
+	// attributed to a real user rather than the anonymous sentinel.
+	authorURN := req.AuthorURN
+	if authorURN == "" {
+		authorURN = r.Header.Get("X-Author-URN")
+	}
+
+	result, err := h.noteSvc.ReplaceContent(r.Context(), service.ReplaceContentInput{
+		NoteURN:   noteURN,
 		Content:   req.Content,
-		AuthorUrn: req.AuthorURN,
+		AuthorURN: authorURN,
 	})
 	if err != nil {
-		grpcErrToHTTP(w, r, h, err, "replace content")
+		svcErrToHTTP(w, r, h, err, "replace content")
 		return
 	}
 
 	statusCode := http.StatusOK
-	if resp.Changed {
+	if result.Changed {
 		statusCode = http.StatusCreated
 	}
 
 	writeJSON(w, statusCode, &replaceContentResponse{
-		Sequence: int(resp.Sequence),
-		Changed:  resp.Changed,
-		NoteURN:  noteURN,
+		Sequence: result.Sequence,
+		Changed:  result.Changed,
+		NoteURN:  result.NoteURN,
 	})
 }
 
@@ -691,7 +654,7 @@ func (h *Handler) handleSearchNotes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	pageSize := int32(h.cfg.DefaultPageSize)
+	pageSize := h.cfg.DefaultPageSize
 	if ps := q.Get("page_size"); ps != "" {
 		n, err := strconv.Atoi(ps)
 		if err != nil || n < 1 {
@@ -701,26 +664,26 @@ func (h *Handler) handleSearchNotes(w http.ResponseWriter, r *http.Request) {
 		if n > h.cfg.MaxPageSize {
 			n = h.cfg.MaxPageSize
 		}
-		pageSize = int32(n)
+		pageSize = n
 	}
 
-	resp, err := h.noteSvc.SearchNotes(r.Context(), &pb.SearchNotesRequest{
+	results, err := h.noteSvc.Search(r.Context(), repo.SearchOptions{
 		Query:     query,
 		PageSize:  pageSize,
 		PageToken: q.Get("page_token"),
 	})
 	if err != nil {
-		grpcErrToHTTP(w, r, h, err, "search notes")
+		svcErrToHTTP(w, r, h, err, "search notes")
 		return
 	}
 
 	out := &searchNotesResponse{
-		Results:       make([]*searchResultJSON, 0, len(resp.Results)),
-		NextPageToken: resp.NextPageToken,
+		Results:       make([]*searchResultJSON, 0, len(results.Results)),
+		NextPageToken: results.NextPageToken,
 	}
-	for _, sr := range resp.Results {
+	for _, sr := range results.Results {
 		out.Results = append(out.Results, &searchResultJSON{
-			Note:    protoHeaderToJSON(sr.Header),
+			Note:    coreNoteToJSON(sr.Note),
 			Excerpt: sr.Excerpt,
 		})
 	}

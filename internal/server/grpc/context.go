@@ -2,7 +2,6 @@ package grpc
 
 import (
 	"context"
-	"errors"
 	"time"
 
 	"google.golang.org/grpc/codes"
@@ -11,26 +10,19 @@ import (
 
 	pb "github.com/zebaqui/notx-engine/proto"
 	"github.com/zebaqui/notx-engine/repo"
+	"github.com/zebaqui/notx-engine/service"
 )
 
-// ContextServer implements pb.ContextServiceServer backed by a
-// repo.ContextRepository.
+// ContextServer implements pb.ContextServiceServer as a thin proto adapter,
+// delegating all business logic to service.ContextService.
 type ContextServer struct {
 	pb.UnimplementedContextServiceServer
-	repo        repo.ContextRepository
-	defaultPage int
-	maxPage     int
+	svc service.ContextService
 }
 
 // NewContextServer returns a ready-to-register ContextServer.
-func NewContextServer(r repo.ContextRepository, defaultPage, maxPage int) *ContextServer {
-	if defaultPage <= 0 {
-		defaultPage = 50
-	}
-	if maxPage <= 0 {
-		maxPage = 200
-	}
-	return &ContextServer{repo: r, defaultPage: defaultPage, maxPage: maxPage}
+func NewContextServer(svc service.ContextService) *ContextServer {
+	return &ContextServer{svc: svc}
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -38,21 +30,9 @@ func NewContextServer(r repo.ContextRepository, defaultPage, maxPage int) *Conte
 // ─────────────────────────────────────────────────────────────────────────────
 
 func (s *ContextServer) ListBursts(ctx context.Context, req *pb.ListBurstsRequest) (*pb.ListBurstsResponse, error) {
-	if req.NoteUrn == "" {
-		return nil, status.Error(codes.InvalidArgument, "note_urn is required")
-	}
-
-	pageSize := int(req.PageSize)
-	if pageSize <= 0 {
-		pageSize = s.defaultPage
-	}
-	if pageSize > s.maxPage {
-		pageSize = s.maxPage
-	}
-
-	bursts, nextToken, err := s.repo.ListBursts(ctx, req.NoteUrn, int(req.SinceSequence), pageSize)
+	bursts, nextToken, err := s.svc.ListBursts(ctx, req.NoteUrn, int(req.SinceSequence), int(req.PageSize))
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, "list bursts: %v", err)
+		return nil, svcErrToStatus(err, req.NoteUrn)
 	}
 
 	pbBursts := make([]*pb.BurstRecord, 0, len(bursts))
@@ -75,9 +55,9 @@ func (s *ContextServer) GetBurst(ctx context.Context, req *pb.GetBurstRequest) (
 		return nil, status.Error(codes.InvalidArgument, "id is required")
 	}
 
-	burst, err := s.repo.GetBurst(ctx, req.Id)
+	burst, err := s.svc.GetBurst(ctx, req.Id)
 	if err != nil {
-		return nil, contextRepoErrToStatus(err, req.Id)
+		return nil, svcErrToStatus(err, req.Id)
 	}
 
 	return &pb.GetBurstResponse{Burst: burstToProto(&burst)}, nil
@@ -88,35 +68,31 @@ func (s *ContextServer) GetBurst(ctx context.Context, req *pb.GetBurstRequest) (
 // ─────────────────────────────────────────────────────────────────────────────
 
 func (s *ContextServer) ListCandidates(ctx context.Context, req *pb.ListCandidatesRequest) (*pb.ListCandidatesResponse, error) {
-	pageSize := int(req.PageSize)
-	if pageSize <= 0 {
-		pageSize = s.defaultPage
-	}
-	if pageSize > s.maxPage {
-		pageSize = s.maxPage
-	}
-
 	opts := repo.CandidateListOptions{
 		ProjectURN: req.ProjectUrn,
 		NoteURN:    req.NoteUrn,
 		Status:     req.Status,
 		MinScore:   req.MinScore,
-		PageSize:   pageSize,
+		PageSize:   int(req.PageSize),
 		PageToken:  req.PageToken,
 	}
 
-	candidates, nextToken, err := s.repo.ListCandidates(ctx, opts)
+	candidates, nextToken, err := s.svc.ListCandidates(ctx, opts, req.IncludeBursts)
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, "list candidates: %v", err)
+		return nil, svcErrToStatus(err, "")
 	}
 
 	pbCandidates := make([]*pb.CandidateRecord, 0, len(candidates))
 	for i := range candidates {
-		c := candidateToProto(&candidates[i])
-		if req.IncludeBursts {
-			c = s.embedBursts(ctx, c, &candidates[i])
+		c := &candidates[i]
+		pbC := candidateToProto(&c.Candidate)
+		if c.BurstA != nil {
+			pbC.BurstA = burstToProto(c.BurstA)
 		}
-		pbCandidates = append(pbCandidates, c)
+		if c.BurstB != nil {
+			pbC.BurstB = burstToProto(c.BurstB)
+		}
+		pbCandidates = append(pbCandidates, pbC)
 	}
 
 	return &pb.ListCandidatesResponse{
@@ -134,20 +110,20 @@ func (s *ContextServer) GetCandidate(ctx context.Context, req *pb.GetCandidateRe
 		return nil, status.Error(codes.InvalidArgument, "id is required")
 	}
 
-	candidate, err := s.repo.GetCandidate(ctx, req.Id)
+	c, err := s.svc.GetCandidate(ctx, req.Id)
 	if err != nil {
-		return nil, contextRepoErrToStatus(err, req.Id)
+		return nil, svcErrToStatus(err, req.Id)
 	}
 
-	c := candidateToProto(&candidate)
-
-	// include_bursts defaults to true for GetCandidate (the caller almost
-	// always needs them to make a review decision).
-	if req.IncludeBursts || !req.IncludeBursts {
-		c = s.embedBursts(ctx, c, &candidate)
+	pbC := candidateToProto(&c.Candidate)
+	if c.BurstA != nil {
+		pbC.BurstA = burstToProto(c.BurstA)
+	}
+	if c.BurstB != nil {
+		pbC.BurstB = burstToProto(c.BurstB)
 	}
 
-	return &pb.GetCandidateResponse{Candidate: c}, nil
+	return &pb.GetCandidateResponse{Candidate: pbC}, nil
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -170,30 +146,21 @@ func (s *ContextServer) PromoteCandidate(ctx context.Context, req *pb.PromoteCan
 		ReviewerURN: req.ReviewerUrn,
 	}
 
-	result, err := s.repo.PromoteCandidate(ctx, req.Id, opts)
+	result, updated, err := s.svc.PromoteCandidate(ctx, req.Id, opts)
 	if err != nil {
-		return nil, contextRepoErrToStatus(err, req.Id)
+		return nil, svcErrToStatus(err, req.Id)
 	}
 
-	// Fetch the updated candidate record to embed in the response.
-	updated, err := s.repo.GetCandidate(ctx, req.Id)
-	if err != nil {
-		// Non-fatal: return the promote result even if we can't re-fetch.
-		return &pb.PromoteCandidateResponse{
-			AnchorAId: result.AnchorAID,
-			AnchorBId: result.AnchorBID,
-			LinkAToB:  result.LinkAToB,
-			LinkBToA:  result.LinkBToA,
-		}, nil
-	}
-
-	return &pb.PromoteCandidateResponse{
+	resp := &pb.PromoteCandidateResponse{
 		AnchorAId: result.AnchorAID,
 		AnchorBId: result.AnchorBID,
 		LinkAToB:  result.LinkAToB,
 		LinkBToA:  result.LinkBToA,
-		Candidate: candidateToProto(&updated),
-	}, nil
+	}
+	if updated != nil {
+		resp.Candidate = candidateToProto(updated)
+	}
+	return resp, nil
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -205,18 +172,16 @@ func (s *ContextServer) DismissCandidate(ctx context.Context, req *pb.DismissCan
 		return nil, status.Error(codes.InvalidArgument, "id is required")
 	}
 
-	if err := s.repo.DismissCandidate(ctx, req.Id, req.ReviewerUrn); err != nil {
-		return nil, contextRepoErrToStatus(err, req.Id)
-	}
-
-	updated, err := s.repo.GetCandidate(ctx, req.Id)
+	updated, err := s.svc.DismissCandidate(ctx, req.Id, req.ReviewerUrn)
 	if err != nil {
-		return &pb.DismissCandidateResponse{}, nil
+		return nil, svcErrToStatus(err, req.Id)
 	}
 
-	return &pb.DismissCandidateResponse{
-		Candidate: candidateToProto(&updated),
-	}, nil
+	resp := &pb.DismissCandidateResponse{}
+	if updated != nil {
+		resp.Candidate = candidateToProto(updated)
+	}
+	return resp, nil
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -224,9 +189,9 @@ func (s *ContextServer) DismissCandidate(ctx context.Context, req *pb.DismissCan
 // ─────────────────────────────────────────────────────────────────────────────
 
 func (s *ContextServer) GetStats(ctx context.Context, req *pb.GetStatsRequest) (*pb.GetStatsResponse, error) {
-	stats, err := s.repo.GetContextStats(ctx, req.ProjectUrn)
+	stats, err := s.svc.GetStats(ctx, req.ProjectUrn)
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, "get context stats: %v", err)
+		return nil, svcErrToStatus(err, req.ProjectUrn)
 	}
 
 	return &pb.GetStatsResponse{
@@ -251,9 +216,9 @@ func (s *ContextServer) GetProjectConfig(ctx context.Context, req *pb.GetProject
 		return nil, status.Error(codes.InvalidArgument, "project_urn is required")
 	}
 
-	cfg, err := s.repo.GetProjectContextConfig(ctx, req.ProjectUrn)
+	cfg, err := s.svc.GetProjectConfig(ctx, req.ProjectUrn)
 	if err != nil {
-		return nil, contextRepoErrToStatus(err, req.ProjectUrn)
+		return nil, svcErrToStatus(err, req.ProjectUrn)
 	}
 
 	return &pb.GetProjectConfigResponse{
@@ -272,7 +237,6 @@ func (s *ContextServer) SetProjectConfig(ctx context.Context, req *pb.SetProject
 
 	cfg := repo.ProjectContextConfig{
 		ProjectURN: req.ProjectUrn,
-		UpdatedAt:  time.Now().UTC(),
 	}
 
 	// 0 means "reset to global default" → nil pointer.
@@ -285,30 +249,14 @@ func (s *ContextServer) SetProjectConfig(ctx context.Context, req *pb.SetProject
 		cfg.BurstMaxPerProjectPerDay = &v
 	}
 
-	if err := s.repo.UpsertProjectContextConfig(ctx, cfg); err != nil {
-		return nil, status.Errorf(codes.Internal, "set project context config: %v", err)
+	result, err := s.svc.SetProjectConfig(ctx, cfg)
+	if err != nil {
+		return nil, svcErrToStatus(err, req.ProjectUrn)
 	}
 
 	return &pb.SetProjectConfigResponse{
-		Config: projectContextConfigToProto(&cfg),
+		Config: projectContextConfigToProto(&result),
 	}, nil
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Internal helpers
-// ─────────────────────────────────────────────────────────────────────────────
-
-// embedBursts fetches burst_a and burst_b from the repo and attaches them to
-// the proto candidate. Errors are silently ignored — the candidate is still
-// returned without the previews rather than failing the whole RPC.
-func (s *ContextServer) embedBursts(ctx context.Context, c *pb.CandidateRecord, src *repo.CandidateRecord) *pb.CandidateRecord {
-	if ba, err := s.repo.GetBurst(ctx, src.BurstAID); err == nil {
-		c.BurstA = burstToProto(&ba)
-	}
-	if bb, err := s.repo.GetBurst(ctx, src.BurstBID); err == nil {
-		c.BurstB = burstToProto(&bb)
-	}
-	return c
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -333,7 +281,7 @@ func burstToProto(b *repo.BurstRecord) *pb.BurstRecord {
 }
 
 func candidateToProto(c *repo.CandidateRecord) *pb.CandidateRecord {
-	pb := &pb.CandidateRecord{
+	rec := &pb.CandidateRecord{
 		Id:           c.ID,
 		BurstAId:     c.BurstAID,
 		BurstBId:     c.BurstBID,
@@ -348,9 +296,9 @@ func candidateToProto(c *repo.CandidateRecord) *pb.CandidateRecord {
 		PromotedLink: c.PromotedLink,
 	}
 	if c.ReviewedAt != nil {
-		pb.ReviewedAt = safeTimestamp(*c.ReviewedAt)
+		rec.ReviewedAt = safeTimestamp(*c.ReviewedAt)
 	}
-	return pb
+	return rec
 }
 
 func projectContextConfigToProto(c *repo.ProjectContextConfig) *pb.ProjectContextConfig {
@@ -368,7 +316,7 @@ func projectContextConfigToProto(c *repo.ProjectContextConfig) *pb.ProjectContex
 }
 
 // safeTimestamp converts a time.Time to a protobuf Timestamp.
-// A zero time is returned as a nil-safe zero Timestamp rather than panicking.
+// A zero time is returned as nil rather than a zero Timestamp.
 func safeTimestamp(t time.Time) *timestamppb.Timestamp {
 	if t.IsZero() {
 		return nil
@@ -376,54 +324,43 @@ func safeTimestamp(t time.Time) *timestamppb.Timestamp {
 	return timestamppb.New(t)
 }
 
-// contextRepoErrToStatus maps repository sentinel errors to appropriate gRPC
-// status codes.
-func contextRepoErrToStatus(err error, id string) error {
-	switch {
-	case errors.Is(err, repo.ErrNotFound):
-		return status.Errorf(codes.NotFound, "%q not found", id)
-	default:
-		return status.Errorf(codes.Internal, "internal error: %v", err)
-	}
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
-// Inference — non-gRPC methods (called directly by the HTTP layer)
+// Non-gRPC direct methods (HTTP layer calls these — signatures must not change)
 // ─────────────────────────────────────────────────────────────────────────────
 
 // GetFullStats returns the complete ContextStats (including inference counts)
 // directly as a repo.ContextStats, bypassing the proto mapping.
 // The HTTP handler uses this to avoid needing proto fields for new stats.
 func (s *ContextServer) GetFullStats(ctx context.Context, projectURN string) (repo.ContextStats, error) {
-	return s.repo.GetContextStats(ctx, projectURN)
+	return s.svc.GetStats(ctx, projectURN)
 }
 
 // ListInferences returns a paginated list of inference records.
 func (s *ContextServer) ListInferences(ctx context.Context, opts repo.InferenceListOptions) ([]repo.InferenceRecord, string, error) {
-	return s.repo.ListInferences(ctx, opts)
+	return s.svc.ListInferences(ctx, opts)
 }
 
 // GetInference returns a single inference record by ID.
 func (s *ContextServer) GetInference(ctx context.Context, id string) (repo.InferenceRecord, error) {
-	return s.repo.GetInference(ctx, id)
+	return s.svc.GetInference(ctx, id)
 }
 
 // GetNoteInference returns the active pending inference for a note.
 func (s *ContextServer) GetNoteInference(ctx context.Context, noteURN string) (repo.InferenceRecord, bool, error) {
-	return s.repo.GetNoteInference(ctx, noteURN)
+	return s.svc.GetNoteInference(ctx, noteURN)
 }
 
 // AcceptInference marks an inference as accepted and applies the accepted fields.
 func (s *ContextServer) AcceptInference(ctx context.Context, id string, opts repo.AcceptInferenceOptions) error {
-	return s.repo.AcceptInference(ctx, id, opts)
+	return s.svc.AcceptInference(ctx, id, opts)
 }
 
 // RejectInference marks an inference as rejected.
 func (s *ContextServer) RejectInference(ctx context.Context, id, reviewerURN string) error {
-	return s.repo.RejectInference(ctx, id, reviewerURN)
+	return s.svc.RejectInference(ctx, id, reviewerURN)
 }
 
 // SearchBursts performs a full-text search over burst text and tokens.
 func (s *ContextServer) SearchBursts(ctx context.Context, q string, pageSize int) ([]repo.BurstSearchResult, error) {
-	return s.repo.SearchBursts(ctx, q, pageSize)
+	return s.svc.SearchBursts(ctx, q, pageSize)
 }

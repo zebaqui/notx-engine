@@ -2,19 +2,23 @@ package grpc
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/reflection"
+	"google.golang.org/grpc/status"
 
 	"github.com/zebaqui/notx-engine/config"
 	pb "github.com/zebaqui/notx-engine/proto"
 	"github.com/zebaqui/notx-engine/repo"
+	"github.com/zebaqui/notx-engine/service"
 )
 
 // Server wraps a grpc.Server and owns the lifecycle of the gRPC listener.
@@ -31,15 +35,18 @@ type Server struct {
 	linkS    *LinkServer    // optional — nil when linkRepo is nil
 }
 
-// NewServer creates a fully wired gRPC Server ready to call Serve on.
-// contextRepo and linkRepo may be nil; their corresponding services are only
-// registered when a non-nil repository is provided.
+// NewServer creates a gRPC network listener and registers the supplied
+// pre-created handler instances. Callers are responsible for constructing the
+// handlers (typically via NewNoteServer, NewProjectServer, etc.) so that the
+// exact same handler objects — and therefore the same service.Engine — can be
+// shared with the HTTP layer. contextS and linkS may be nil.
 func NewServer(
 	cfg *config.Config,
-	r repo.NoteRepository,
-	projRepo repo.ProjectRepository,
-	contextRepo repo.ContextRepository,
-	linkRepo repo.LinkRepository,
+	noteS *NoteServer,
+	projS *ProjectServer,
+	folderS *FolderServer,
+	contextS *ContextServer,
+	linkS *LinkServer,
 	log *slog.Logger,
 ) (*Server, error) {
 	opts := []grpc.ServerOption{
@@ -63,23 +70,14 @@ func NewServer(
 
 	gs := grpc.NewServer(opts...)
 
-	noteS := NewNoteServer(r, cfg.DefaultPageSize, cfg.MaxPageSize)
-	projS := NewProjectServer(projRepo, cfg.DefaultPageSize, cfg.MaxPageSize)
-	folderS := NewFolderServer(projRepo, cfg.DefaultPageSize, cfg.MaxPageSize)
-
 	pb.RegisterNoteServiceServer(gs, noteS)
 	pb.RegisterProjectServiceServer(gs, projS)
 	pb.RegisterFolderServiceServer(gs, folderS)
 
-	var contextS *ContextServer
-	if contextRepo != nil {
-		contextS = NewContextServer(contextRepo, cfg.DefaultPageSize, cfg.MaxPageSize)
+	if contextS != nil {
 		pb.RegisterContextServiceServer(gs, contextS)
 	}
-
-	var linkS *LinkServer
-	if linkRepo != nil {
-		linkS = NewLinkServer(linkRepo)
+	if linkS != nil {
 		pb.RegisterLinkServiceServer(gs, linkS)
 	}
 
@@ -131,6 +129,36 @@ func (s *Server) Shutdown(ctx context.Context) {
 		s.gs.Stop()
 	case <-stopped:
 		s.log.Info("grpc: graceful shutdown complete")
+	}
+}
+
+// ── Shared error mapping ─────────────────────────────────────────────────────
+
+// svcErrToStatus converts a service-layer error to an appropriate gRPC status
+// error. id is the resource identifier (e.g. URN) to include in the message;
+// pass an empty string when there is no meaningful identifier.
+func svcErrToStatus(err error, id string) error {
+	switch {
+	case errors.Is(err, service.ErrInvalidInput):
+		return status.Errorf(codes.InvalidArgument, "%v", err)
+	case errors.Is(err, repo.ErrNotFound):
+		if id != "" {
+			return status.Errorf(codes.NotFound, "%q not found", id)
+		}
+		return status.Error(codes.NotFound, "not found")
+	case errors.Is(err, repo.ErrAlreadyExists):
+		if id != "" {
+			return status.Errorf(codes.AlreadyExists, "%q already exists", id)
+		}
+		return status.Error(codes.AlreadyExists, "already exists")
+	case errors.Is(err, repo.ErrSequenceConflict):
+		return status.Errorf(codes.Aborted, "sequence conflict: %v", err)
+	case errors.Is(err, repo.ErrNoteTypeImmutable):
+		return status.Errorf(codes.InvalidArgument, "note_type is immutable: %v", err)
+	case errors.Is(err, repo.ErrInvalidURN):
+		return status.Errorf(codes.InvalidArgument, "invalid URN: %v", err)
+	default:
+		return status.Errorf(codes.Internal, "internal error: %v", err)
 	}
 }
 

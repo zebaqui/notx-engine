@@ -15,6 +15,7 @@ import (
 	httpsvc "github.com/zebaqui/notx-engine/http"
 	grpcsvc "github.com/zebaqui/notx-engine/internal/server/grpc"
 	"github.com/zebaqui/notx-engine/repo"
+	"github.com/zebaqui/notx-engine/service"
 	"github.com/zebaqui/notx-engine/snip"
 )
 
@@ -26,6 +27,7 @@ type Server struct {
 	projRepo    repo.ProjectRepository
 	contextRepo repo.ContextRepository
 	linkRepo    repo.LinkRepository
+	propRepo    repo.PropSchemaRepo
 	log         *slog.Logger
 
 	httpHandler *httpsvc.Handler
@@ -43,6 +45,7 @@ func New(
 	linkRepo repo.LinkRepository,
 	log *slog.Logger,
 	plugins []snip.SnipPlugin,
+	propRepo repo.PropSchemaRepo,
 ) (*Server, error) {
 	if log == nil {
 		log = slog.New(slog.NewTextHandler(os.Stderr, nil))
@@ -54,41 +57,44 @@ func New(
 		projRepo:    projRepo,
 		contextRepo: contextRepo,
 		linkRepo:    linkRepo,
+		propRepo:    propRepo,
 		log:         log,
 	}
 
-	// ── Build gRPC service instances (shared by both HTTP and gRPC layers) ───
-	noteSvc := grpcsvc.NewNoteServerWithContext(r, contextRepo, cfg.DefaultPageSize, cfg.MaxPageSize)
-	projSvc := grpcsvc.NewProjectServer(projRepo, cfg.DefaultPageSize, cfg.MaxPageSize)
-	folderSvc := grpcsvc.NewFolderServer(projRepo, cfg.DefaultPageSize, cfg.MaxPageSize)
+	// ── Build service engine ─────────────────────────────────────────────────
+	eng := service.New(r, projRepo, contextRepo, linkRepo, propRepo, cfg.DefaultPageSize, cfg.MaxPageSize)
 
-	var contextSvc *grpcsvc.ContextServer
-	if contextRepo != nil {
-		contextSvc = grpcsvc.NewContextServer(contextRepo, cfg.DefaultPageSize, cfg.MaxPageSize)
-	}
-
-	var linkSvc *grpcsvc.LinkServer
-	if linkRepo != nil {
-		linkSvc = grpcsvc.NewLinkServer(linkRepo)
-	}
-
-	// ── Build HTTP handler ───────────────────────────────────────────────────
+	// ── Build HTTP handler (talks directly to the service layer) ─────────────
 	if cfg.EnableHTTP {
 		s.httpHandler = httpsvc.New(
 			cfg,
-			noteSvc,
-			projSvc,
-			folderSvc,
-			contextSvc,
-			linkSvc,
+			eng.Notes,
+			eng.Projects,
+			eng.Folders,
+			eng.Context,
+			eng.Links,
 			log,
 			plugins,
+			eng.Props,
 		)
 	}
 
-	// ── Build gRPC server ────────────────────────────────────────────────────
+	// ── Build gRPC server (thin proto adapters over the service layer) ────────
 	if cfg.EnableGRPC {
-		grpcSrv, err := grpcsvc.NewServer(cfg, r, projRepo, contextRepo, linkRepo, log)
+		noteS := grpcsvc.NewNoteServer(eng.Notes)
+		projS := grpcsvc.NewProjectServer(eng.Projects)
+		folderS := grpcsvc.NewFolderServer(eng.Folders)
+
+		var contextS *grpcsvc.ContextServer
+		if eng.Context != nil {
+			contextS = grpcsvc.NewContextServer(eng.Context)
+		}
+		var linkS *grpcsvc.LinkServer
+		if eng.Links != nil {
+			linkS = grpcsvc.NewLinkServer(eng.Links)
+		}
+
+		grpcSrv, err := grpcsvc.NewServer(cfg, noteS, projS, folderS, contextS, linkS, log)
 		if err != nil {
 			return nil, fmt.Errorf("server: build gRPC server: %w", err)
 		}
@@ -117,7 +123,7 @@ func New(
 			}
 			registry.Register(p)
 		}
-		noteSvc.SetSnipRegistry(registry)
+		eng.WireSnipRegistry(registry)
 		s.plugins = plugins
 	}
 

@@ -1,10 +1,10 @@
 package http
 
 import (
-	"fmt"
 	"net/http"
+	"strconv"
 
-	pb "github.com/zebaqui/notx-engine/proto"
+	"github.com/zebaqui/notx-engine/repo"
 )
 
 // routeSnips handles GET /v1/snips — list snips with optional filters.
@@ -15,28 +15,34 @@ func (h *Handler) routeSnips(w http.ResponseWriter, r *http.Request) {
 	}
 
 	q := r.URL.Query()
-	req := &pb.ListSnipsRequest{
+	opts := repo.ListSnipsOptions{
 		SnipType:     q.Get("snip_type"),
-		ProjectUrn:   q.Get("project_urn"),
-		ParentUrn:    q.Get("parent_urn"),
+		ProjectURN:   q.Get("project_urn"),
+		ParentURN:    q.Get("parent_urn"),
 		ParentAnchor: q.Get("parent_anchor"),
 		PageToken:    q.Get("page_token"),
 	}
-	if v := q.Get("include_deleted"); v == "true" {
-		req.IncludeDeleted = true
+	if q.Get("include_deleted") == "true" {
+		opts.IncludeDeleted = true
 	}
 	if v := q.Get("page_size"); v != "" {
-		var ps int32
-		if _, err := fmt.Sscanf(v, "%d", &ps); err == nil {
-			req.PageSize = ps
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			opts.PageSize = n
 		}
 	}
 
-	resp, err := h.noteSvc.ListSnips(r.Context(), req)
+	result, err := h.noteSvc.ListSnips(r.Context(), opts)
 	if err != nil {
-		grpcErrToHTTP(w, r, h, err, "ListSnips")
+		svcErrToHTTP(w, r, h, err, "list snips")
 		return
 	}
 
-	writeJSON(w, http.StatusOK, resp)
+	out := make([]*noteHeaderJSON, 0, len(result.Notes))
+	for _, n := range result.Notes {
+		out = append(out, coreNoteToJSON(n))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"snips":           out,
+		"next_page_token": result.NextPageToken,
+	})
 }

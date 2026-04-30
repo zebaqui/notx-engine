@@ -2,8 +2,6 @@ package grpc
 
 import (
 	"context"
-	"errors"
-	"time"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -11,17 +9,19 @@ import (
 
 	pb "github.com/zebaqui/notx-engine/proto"
 	"github.com/zebaqui/notx-engine/repo"
+	"github.com/zebaqui/notx-engine/service"
 )
 
-// LinkServer implements pb.LinkServiceServer backed by a repo.LinkRepository.
+// LinkServer implements pb.LinkServiceServer by delegating all business
+// logic to service.LinkService.
 type LinkServer struct {
 	pb.UnimplementedLinkServiceServer
-	repo repo.LinkRepository
+	svc service.LinkService
 }
 
 // NewLinkServer returns a ready-to-register LinkServer.
-func NewLinkServer(r repo.LinkRepository) *LinkServer {
-	return &LinkServer{repo: r}
+func NewLinkServer(svc service.LinkService) *LinkServer {
+	return &LinkServer{svc: svc}
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -29,80 +29,45 @@ func NewLinkServer(r repo.LinkRepository) *LinkServer {
 // ─────────────────────────────────────────────────────────────────────────────
 
 func (s *LinkServer) UpsertAnchor(ctx context.Context, req *pb.UpsertAnchorRequest) (*pb.UpsertAnchorResponse, error) {
-	if req.NoteUrn == "" {
-		return nil, status.Error(codes.InvalidArgument, "note_urn is required")
-	}
-	if req.AnchorId == "" {
-		return nil, status.Error(codes.InvalidArgument, "anchor_id is required")
-	}
-
-	st := req.Status
-	if st == "" {
-		st = "ok"
-	}
-
-	a := repo.AnchorRecord{
+	record := repo.AnchorRecord{
 		NoteURN:   req.NoteUrn,
 		AnchorID:  req.AnchorId,
 		Line:      int(req.Line),
 		CharStart: int(req.CharStart),
 		CharEnd:   int(req.CharEnd),
 		Preview:   req.Preview,
-		Status:    st,
-		UpdatedAt: time.Now().UTC(),
+		Status:    req.Status,
 	}
 
-	if err := s.repo.UpsertAnchor(ctx, a); err != nil {
-		return nil, linkRepoErrToStatus(err, req.AnchorId)
-	}
-
-	stored, err := s.repo.GetAnchor(ctx, req.NoteUrn, req.AnchorId)
+	stored, err := s.svc.UpsertAnchor(ctx, record)
 	if err != nil {
-		return nil, linkRepoErrToStatus(err, req.AnchorId)
+		return nil, svcErrToStatus(err, req.AnchorId)
 	}
 
 	return &pb.UpsertAnchorResponse{Anchor: anchorToProto(stored)}, nil
 }
 
 func (s *LinkServer) DeleteAnchor(ctx context.Context, req *pb.DeleteAnchorRequest) (*pb.DeleteAnchorResponse, error) {
-	if req.NoteUrn == "" {
-		return nil, status.Error(codes.InvalidArgument, "note_urn is required")
-	}
-	if req.AnchorId == "" {
-		return nil, status.Error(codes.InvalidArgument, "anchor_id is required")
-	}
-
-	if err := s.repo.DeleteAnchor(ctx, req.NoteUrn, req.AnchorId, req.Tombstone); err != nil {
-		return nil, linkRepoErrToStatus(err, req.AnchorId)
+	if err := s.svc.DeleteAnchor(ctx, req.NoteUrn, req.AnchorId, req.Tombstone); err != nil {
+		return nil, svcErrToStatus(err, req.AnchorId)
 	}
 
 	return &pb.DeleteAnchorResponse{Deleted: true}, nil
 }
 
 func (s *LinkServer) GetAnchor(ctx context.Context, req *pb.GetAnchorRequest) (*pb.GetAnchorResponse, error) {
-	if req.NoteUrn == "" {
-		return nil, status.Error(codes.InvalidArgument, "note_urn is required")
-	}
-	if req.AnchorId == "" {
-		return nil, status.Error(codes.InvalidArgument, "anchor_id is required")
-	}
-
-	a, err := s.repo.GetAnchor(ctx, req.NoteUrn, req.AnchorId)
+	a, err := s.svc.GetAnchor(ctx, req.NoteUrn, req.AnchorId)
 	if err != nil {
-		return nil, linkRepoErrToStatus(err, req.AnchorId)
+		return nil, svcErrToStatus(err, req.AnchorId)
 	}
 
 	return &pb.GetAnchorResponse{Anchor: anchorToProto(a)}, nil
 }
 
 func (s *LinkServer) ListAnchors(ctx context.Context, req *pb.ListAnchorsRequest) (*pb.ListAnchorsResponse, error) {
-	if req.NoteUrn == "" {
-		return nil, status.Error(codes.InvalidArgument, "note_urn is required")
-	}
-
-	anchors, err := s.repo.ListAnchors(ctx, req.NoteUrn)
+	anchors, err := s.svc.ListAnchors(ctx, req.NoteUrn)
 	if err != nil {
-		return nil, linkRepoErrToStatus(err, req.NoteUrn)
+		return nil, svcErrToStatus(err, req.NoteUrn)
 	}
 
 	pbAnchors := make([]*pb.AnchorRecord, 0, len(anchors))
@@ -118,51 +83,33 @@ func (s *LinkServer) ListAnchors(ctx context.Context, req *pb.ListAnchorsRequest
 // ─────────────────────────────────────────────────────────────────────────────
 
 func (s *LinkServer) UpsertBacklink(ctx context.Context, req *pb.UpsertBacklinkRequest) (*pb.UpsertBacklinkResponse, error) {
-	if req.SourceUrn == "" {
-		return nil, status.Error(codes.InvalidArgument, "source_urn is required")
-	}
-	if req.TargetUrn == "" {
-		return nil, status.Error(codes.InvalidArgument, "target_urn is required")
-	}
-
-	b := repo.BacklinkRecord{
+	record := repo.BacklinkRecord{
 		SourceURN:    req.SourceUrn,
 		TargetURN:    req.TargetUrn,
 		TargetAnchor: req.TargetAnchor,
 		Label:        req.Label,
-		CreatedAt:    time.Now().UTC(),
 	}
 
-	if err := s.repo.UpsertBacklink(ctx, b); err != nil {
-		return nil, linkRepoErrToStatus(err, req.SourceUrn)
+	stored, err := s.svc.UpsertBacklink(ctx, record)
+	if err != nil {
+		return nil, svcErrToStatus(err, req.SourceUrn)
 	}
 
-	return &pb.UpsertBacklinkResponse{Backlink: backlinkToProto(b)}, nil
+	return &pb.UpsertBacklinkResponse{Backlink: backlinkToProto(stored)}, nil
 }
 
 func (s *LinkServer) DeleteBacklink(ctx context.Context, req *pb.DeleteBacklinkRequest) (*pb.DeleteBacklinkResponse, error) {
-	if req.SourceUrn == "" {
-		return nil, status.Error(codes.InvalidArgument, "source_urn is required")
-	}
-	if req.TargetUrn == "" {
-		return nil, status.Error(codes.InvalidArgument, "target_urn is required")
-	}
-
-	if err := s.repo.DeleteBacklink(ctx, req.SourceUrn, req.TargetUrn, req.TargetAnchor); err != nil {
-		return nil, linkRepoErrToStatus(err, req.SourceUrn)
+	if err := s.svc.DeleteBacklink(ctx, req.SourceUrn, req.TargetUrn, req.TargetAnchor); err != nil {
+		return nil, svcErrToStatus(err, req.SourceUrn)
 	}
 
 	return &pb.DeleteBacklinkResponse{Deleted: true}, nil
 }
 
 func (s *LinkServer) ListBacklinks(ctx context.Context, req *pb.ListBacklinksRequest) (*pb.ListBacklinksResponse, error) {
-	if req.TargetUrn == "" {
-		return nil, status.Error(codes.InvalidArgument, "target_urn is required")
-	}
-
-	backlinks, err := s.repo.ListBacklinks(ctx, req.TargetUrn, req.AnchorId)
+	backlinks, err := s.svc.ListBacklinks(ctx, req.TargetUrn, req.AnchorId)
 	if err != nil {
-		return nil, linkRepoErrToStatus(err, req.TargetUrn)
+		return nil, svcErrToStatus(err, req.TargetUrn)
 	}
 
 	pbBacklinks := make([]*pb.BacklinkRecord, 0, len(backlinks))
@@ -174,13 +121,9 @@ func (s *LinkServer) ListBacklinks(ctx context.Context, req *pb.ListBacklinksReq
 }
 
 func (s *LinkServer) ListOutboundLinks(ctx context.Context, req *pb.ListOutboundLinksRequest) (*pb.ListOutboundLinksResponse, error) {
-	if req.SourceUrn == "" {
-		return nil, status.Error(codes.InvalidArgument, "source_urn is required")
-	}
-
-	links, err := s.repo.ListOutboundLinks(ctx, req.SourceUrn)
+	links, err := s.svc.ListOutboundLinks(ctx, req.SourceUrn)
 	if err != nil {
-		return nil, linkRepoErrToStatus(err, req.SourceUrn)
+		return nil, svcErrToStatus(err, req.SourceUrn)
 	}
 
 	pbLinks := make([]*pb.BacklinkRecord, 0, len(links))
@@ -192,19 +135,16 @@ func (s *LinkServer) ListOutboundLinks(ctx context.Context, req *pb.ListOutbound
 }
 
 func (s *LinkServer) GetReferrers(ctx context.Context, req *pb.GetReferrersRequest) (*pb.GetReferrersResponse, error) {
-	if req.TargetUrn == "" {
-		return nil, status.Error(codes.InvalidArgument, "target_urn is required")
-	}
-
-	urns, err := s.repo.GetReferrers(ctx, req.TargetUrn, req.AnchorId)
+	urns, err := s.svc.GetReferrers(ctx, req.TargetUrn, req.AnchorId)
 	if err != nil {
-		return nil, linkRepoErrToStatus(err, req.TargetUrn)
+		return nil, svcErrToStatus(err, req.TargetUrn)
 	}
 
 	return &pb.GetReferrersResponse{SourceUrns: urns}, nil
 }
 
 // RecentBacklinks returns recently created backlinks with optional filters.
+// Limit clamping (1-200, default 50) lives here in the gRPC layer.
 func (s *LinkServer) RecentBacklinks(ctx context.Context, req *pb.RecentBacklinksRequest) (*pb.RecentBacklinksResponse, error) {
 	limit := int(req.Limit)
 	if limit <= 0 {
@@ -214,11 +154,13 @@ func (s *LinkServer) RecentBacklinks(ctx context.Context, req *pb.RecentBacklink
 		limit = 200
 	}
 
-	records, err := s.repo.RecentBacklinks(ctx, repo.RecentBacklinksOptions{
+	opts := repo.RecentBacklinksOptions{
 		NoteURN: req.NoteUrn,
 		Label:   req.Label,
 		Limit:   limit,
-	})
+	}
+
+	records, err := s.svc.RecentBacklinks(ctx, opts)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "recent backlinks: %v", err)
 	}
@@ -227,6 +169,7 @@ func (s *LinkServer) RecentBacklinks(ctx context.Context, req *pb.RecentBacklink
 	for i := range records {
 		out = append(out, backlinkToProto(records[i]))
 	}
+
 	return &pb.RecentBacklinksResponse{Backlinks: out}, nil
 }
 
@@ -235,50 +178,32 @@ func (s *LinkServer) RecentBacklinks(ctx context.Context, req *pb.RecentBacklink
 // ─────────────────────────────────────────────────────────────────────────────
 
 func (s *LinkServer) UpsertExternalLink(ctx context.Context, req *pb.UpsertExternalLinkRequest) (*pb.UpsertExternalLinkResponse, error) {
-	if req.SourceUrn == "" {
-		return nil, status.Error(codes.InvalidArgument, "source_urn is required")
-	}
-	if req.Uri == "" {
-		return nil, status.Error(codes.InvalidArgument, "uri is required")
-	}
-
-	e := repo.ExternalLinkRecord{
+	record := repo.ExternalLinkRecord{
 		SourceURN: req.SourceUrn,
 		URI:       req.Uri,
 		Label:     req.Label,
-		CreatedAt: time.Now().UTC(),
 	}
 
-	if err := s.repo.UpsertExternalLink(ctx, e); err != nil {
-		return nil, linkRepoErrToStatus(err, req.Uri)
+	stored, err := s.svc.UpsertExternalLink(ctx, record)
+	if err != nil {
+		return nil, svcErrToStatus(err, req.Uri)
 	}
 
-	return &pb.UpsertExternalLinkResponse{Link: externalLinkToProto(e)}, nil
+	return &pb.UpsertExternalLinkResponse{Link: externalLinkToProto(stored)}, nil
 }
 
 func (s *LinkServer) DeleteExternalLink(ctx context.Context, req *pb.DeleteExternalLinkRequest) (*pb.DeleteExternalLinkResponse, error) {
-	if req.SourceUrn == "" {
-		return nil, status.Error(codes.InvalidArgument, "source_urn is required")
-	}
-	if req.Uri == "" {
-		return nil, status.Error(codes.InvalidArgument, "uri is required")
-	}
-
-	if err := s.repo.DeleteExternalLink(ctx, req.SourceUrn, req.Uri); err != nil {
-		return nil, linkRepoErrToStatus(err, req.Uri)
+	if err := s.svc.DeleteExternalLink(ctx, req.SourceUrn, req.Uri); err != nil {
+		return nil, svcErrToStatus(err, req.Uri)
 	}
 
 	return &pb.DeleteExternalLinkResponse{Deleted: true}, nil
 }
 
 func (s *LinkServer) ListExternalLinks(ctx context.Context, req *pb.ListExternalLinksRequest) (*pb.ListExternalLinksResponse, error) {
-	if req.SourceUrn == "" {
-		return nil, status.Error(codes.InvalidArgument, "source_urn is required")
-	}
-
-	links, err := s.repo.ListExternalLinks(ctx, req.SourceUrn)
+	links, err := s.svc.ListExternalLinks(ctx, req.SourceUrn)
 	if err != nil {
-		return nil, linkRepoErrToStatus(err, req.SourceUrn)
+		return nil, svcErrToStatus(err, req.SourceUrn)
 	}
 
 	pbLinks := make([]*pb.ExternalLinkRecord, 0, len(links))
@@ -323,15 +248,4 @@ func externalLinkToProto(e repo.ExternalLinkRecord) *pb.ExternalLinkRecord {
 		Label:     e.Label,
 		CreatedAt: timestamppb.New(e.CreatedAt),
 	}
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Error mapping
-// ─────────────────────────────────────────────────────────────────────────────
-
-func linkRepoErrToStatus(err error, id string) error {
-	if errors.Is(err, repo.ErrNotFound) {
-		return status.Errorf(codes.NotFound, "%q not found", id)
-	}
-	return status.Errorf(codes.Internal, "internal error: %v", err)
 }

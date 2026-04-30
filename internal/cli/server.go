@@ -338,7 +338,7 @@ func runDaemonWorker(cmd *cobra.Command, _ []string) error {
 		}
 	}()
 
-	srv, err := server.New(cfg, provider, provider, provider, provider, log, nil)
+	srv, err := server.New(cfg, provider, provider, provider, provider, log, nil, provider)
 	if err != nil {
 		return fmt.Errorf("build server: %w", err)
 	}

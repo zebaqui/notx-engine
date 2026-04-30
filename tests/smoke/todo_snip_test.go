@@ -51,7 +51,7 @@ func startTodoServer(t *testing.T) (baseURL string, stop func()) {
 
 	plugins := []snip.SnipPlugin{todo.New()}
 
-	srv, err := server.New(cfg, provider, provider, provider, provider, log, plugins)
+	srv, err := server.New(cfg, provider, provider, provider, provider, log, plugins, provider)
 	if err != nil {
 		provider.Close()
 		t.Fatalf("startTodoServer: server.New: %v", err)

@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	pb "github.com/zebaqui/notx-engine/proto"
+	"github.com/zebaqui/notx-engine/repo"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -78,55 +78,46 @@ type deleteExternalLinkRequest struct {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Proto → JSON conversion helpers
+// Repo → JSON conversion helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-func anchorProtoToJSON(a *pb.AnchorRecord) *anchorJSON {
-	if a == nil {
-		return nil
-	}
+func anchorRepoToJSON(a repo.AnchorRecord) *anchorJSON {
 	j := &anchorJSON{
-		NoteURN:   a.NoteUrn,
-		AnchorID:  a.AnchorId,
-		Line:      a.Line,
-		CharStart: a.CharStart,
-		CharEnd:   a.CharEnd,
+		NoteURN:   a.NoteURN,
+		AnchorID:  a.AnchorID,
+		Line:      int32(a.Line),
+		CharStart: int32(a.CharStart),
+		CharEnd:   int32(a.CharEnd),
 		Preview:   a.Preview,
 		Status:    a.Status,
 	}
-	if a.UpdatedAt != nil {
-		j.UpdatedAt = a.UpdatedAt.AsTime().UTC().Format(time.RFC3339)
+	if !a.UpdatedAt.IsZero() {
+		j.UpdatedAt = a.UpdatedAt.UTC().Format(time.RFC3339)
 	}
 	return j
 }
 
-func backlinkProtoToJSON(b *pb.BacklinkRecord) *backlinkJSON {
-	if b == nil {
-		return nil
-	}
+func backlinkRepoToJSON(b repo.BacklinkRecord) *backlinkJSON {
 	j := &backlinkJSON{
-		SourceURN:    b.SourceUrn,
-		TargetURN:    b.TargetUrn,
+		SourceURN:    b.SourceURN,
+		TargetURN:    b.TargetURN,
 		TargetAnchor: b.TargetAnchor,
 		Label:        b.Label,
 	}
-	if b.CreatedAt != nil {
-		j.CreatedAt = b.CreatedAt.AsTime().UTC().Format(time.RFC3339)
+	if !b.CreatedAt.IsZero() {
+		j.CreatedAt = b.CreatedAt.UTC().Format(time.RFC3339)
 	}
 	return j
 }
 
-func externalLinkProtoToJSON(e *pb.ExternalLinkRecord) *externalLinkJSON {
-	if e == nil {
-		return nil
-	}
+func externalLinkRepoToJSON(e repo.ExternalLinkRecord) *externalLinkJSON {
 	j := &externalLinkJSON{
-		SourceURN: e.SourceUrn,
-		URI:       e.Uri,
+		SourceURN: e.SourceURN,
+		URI:       e.URI,
 		Label:     e.Label,
 	}
-	if e.CreatedAt != nil {
-		j.CreatedAt = e.CreatedAt.AsTime().UTC().Format(time.RFC3339)
+	if !e.CreatedAt.IsZero() {
+		j.CreatedAt = e.CreatedAt.UTC().Format(time.RFC3339)
 	}
 	return j
 }
@@ -262,17 +253,15 @@ func (h *Handler) handleListAnchors(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp, err := h.linkSvc.ListAnchors(r.Context(), &pb.ListAnchorsRequest{
-		NoteUrn: noteURN,
-	})
+	anchors, err := h.linkSvc.ListAnchors(r.Context(), noteURN)
 	if err != nil {
-		grpcErrToHTTP(w, r, h, err, "list anchors")
+		svcErrToHTTP(w, r, h, err, "list anchors")
 		return
 	}
 
-	out := make([]*anchorJSON, 0, len(resp.Anchors))
-	for _, a := range resp.Anchors {
-		out = append(out, anchorProtoToJSON(a))
+	out := make([]*anchorJSON, 0, len(anchors))
+	for _, a := range anchors {
+		out = append(out, anchorRepoToJSON(a))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"anchors": out})
 }
@@ -282,15 +271,12 @@ func (h *Handler) handleListAnchors(w http.ResponseWriter, r *http.Request) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 func (h *Handler) handleGetAnchor(w http.ResponseWriter, r *http.Request, noteURN, anchorID string) {
-	resp, err := h.linkSvc.GetAnchor(r.Context(), &pb.GetAnchorRequest{
-		NoteUrn:  noteURN,
-		AnchorId: anchorID,
-	})
+	a, err := h.linkSvc.GetAnchor(r.Context(), noteURN, anchorID)
 	if err != nil {
-		grpcErrToHTTP(w, r, h, err, "get anchor")
+		svcErrToHTTP(w, r, h, err, "get anchor")
 		return
 	}
-	writeJSON(w, http.StatusOK, anchorProtoToJSON(resp.Anchor))
+	writeJSON(w, http.StatusOK, anchorRepoToJSON(a))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -311,24 +297,23 @@ func (h *Handler) handleUpsertAnchor(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "anchor_id is required")
 		return
 	}
-	if req.Status == "" {
-		req.Status = "ok"
-	}
 
-	resp, err := h.linkSvc.UpsertAnchor(r.Context(), &pb.UpsertAnchorRequest{
-		NoteUrn:   req.NoteURN,
-		AnchorId:  req.AnchorID,
-		Line:      req.Line,
-		CharStart: req.CharStart,
-		CharEnd:   req.CharEnd,
+	record := repo.AnchorRecord{
+		NoteURN:   req.NoteURN,
+		AnchorID:  req.AnchorID,
+		Line:      int(req.Line),
+		CharStart: int(req.CharStart),
+		CharEnd:   int(req.CharEnd),
 		Preview:   req.Preview,
 		Status:    req.Status,
-	})
+	}
+
+	stored, err := h.linkSvc.UpsertAnchor(r.Context(), record)
 	if err != nil {
-		grpcErrToHTTP(w, r, h, err, "upsert anchor")
+		svcErrToHTTP(w, r, h, err, "upsert anchor")
 		return
 	}
-	writeJSON(w, http.StatusOK, anchorProtoToJSON(resp.Anchor))
+	writeJSON(w, http.StatusOK, anchorRepoToJSON(stored))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -338,13 +323,8 @@ func (h *Handler) handleUpsertAnchor(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) handleDeleteAnchor(w http.ResponseWriter, r *http.Request, noteURN, anchorID string) {
 	tombstone := r.URL.Query().Get("tombstone") == "true"
 
-	_, err := h.linkSvc.DeleteAnchor(r.Context(), &pb.DeleteAnchorRequest{
-		NoteUrn:   noteURN,
-		AnchorId:  anchorID,
-		Tombstone: tombstone,
-	})
-	if err != nil {
-		grpcErrToHTTP(w, r, h, err, "delete anchor")
+	if err := h.linkSvc.DeleteAnchor(r.Context(), noteURN, anchorID, tombstone); err != nil {
+		svcErrToHTTP(w, r, h, err, "delete anchor")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"deleted": true})
@@ -363,18 +343,15 @@ func (h *Handler) handleListBacklinks(w http.ResponseWriter, r *http.Request) {
 	}
 	anchorID := q.Get("anchor_id")
 
-	resp, err := h.linkSvc.ListBacklinks(r.Context(), &pb.ListBacklinksRequest{
-		TargetUrn: targetURN,
-		AnchorId:  anchorID,
-	})
+	backlinks, err := h.linkSvc.ListBacklinks(r.Context(), targetURN, anchorID)
 	if err != nil {
-		grpcErrToHTTP(w, r, h, err, "list backlinks")
+		svcErrToHTTP(w, r, h, err, "list backlinks")
 		return
 	}
 
-	out := make([]*backlinkJSON, 0, len(resp.Backlinks))
-	for _, b := range resp.Backlinks {
-		out = append(out, backlinkProtoToJSON(b))
+	out := make([]*backlinkJSON, 0, len(backlinks))
+	for _, b := range backlinks {
+		out = append(out, backlinkRepoToJSON(b))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"backlinks": out})
 }
@@ -390,17 +367,15 @@ func (h *Handler) handleListOutbound(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp, err := h.linkSvc.ListOutboundLinks(r.Context(), &pb.ListOutboundLinksRequest{
-		SourceUrn: sourceURN,
-	})
+	links, err := h.linkSvc.ListOutboundLinks(r.Context(), sourceURN)
 	if err != nil {
-		grpcErrToHTTP(w, r, h, err, "list outbound links")
+		svcErrToHTTP(w, r, h, err, "list outbound links")
 		return
 	}
 
-	out := make([]*backlinkJSON, 0, len(resp.Links))
-	for _, b := range resp.Links {
-		out = append(out, backlinkProtoToJSON(b))
+	out := make([]*backlinkJSON, 0, len(links))
+	for _, b := range links {
+		out = append(out, backlinkRepoToJSON(b))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"links": out})
 }
@@ -421,20 +396,26 @@ func (h *Handler) handleRecentBacklinks(w http.ResponseWriter, r *http.Request) 
 	if l := q.Get("limit"); l != "" {
 		fmt.Sscanf(l, "%d", &limit)
 	}
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
+	}
 
-	resp, err := h.linkSvc.RecentBacklinks(r.Context(), &pb.RecentBacklinksRequest{
-		NoteUrn: noteURN,
+	backlinks, err := h.linkSvc.RecentBacklinks(r.Context(), repo.RecentBacklinksOptions{
+		NoteURN: noteURN,
 		Label:   label,
-		Limit:   limit,
+		Limit:   int(limit),
 	})
 	if err != nil {
-		grpcErrToHTTP(w, r, h, err, "recent backlinks")
+		svcErrToHTTP(w, r, h, err, "recent backlinks")
 		return
 	}
 
-	out := make([]*backlinkJSON, 0, len(resp.Backlinks))
-	for _, b := range resp.Backlinks {
-		out = append(out, backlinkProtoToJSON(b))
+	out := make([]*backlinkJSON, 0, len(backlinks))
+	for _, b := range backlinks {
+		out = append(out, backlinkRepoToJSON(b))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"backlinks": out})
 }
@@ -456,16 +437,12 @@ func (h *Handler) handleGetReferrers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp, err := h.linkSvc.GetReferrers(r.Context(), &pb.GetReferrersRequest{
-		TargetUrn: targetURN,
-		AnchorId:  anchorID,
-	})
+	urns, err := h.linkSvc.GetReferrers(r.Context(), targetURN, anchorID)
 	if err != nil {
-		grpcErrToHTTP(w, r, h, err, "get referrers")
+		svcErrToHTTP(w, r, h, err, "get referrers")
 		return
 	}
 
-	urns := resp.SourceUrns
 	if urns == nil {
 		urns = []string{}
 	}
@@ -491,17 +468,19 @@ func (h *Handler) handleUpsertBacklink(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp, err := h.linkSvc.UpsertBacklink(r.Context(), &pb.UpsertBacklinkRequest{
-		SourceUrn:    req.SourceURN,
-		TargetUrn:    req.TargetURN,
+	record := repo.BacklinkRecord{
+		SourceURN:    req.SourceURN,
+		TargetURN:    req.TargetURN,
 		TargetAnchor: req.TargetAnchor,
 		Label:        req.Label,
-	})
+	}
+
+	stored, err := h.linkSvc.UpsertBacklink(r.Context(), record)
 	if err != nil {
-		grpcErrToHTTP(w, r, h, err, "upsert backlink")
+		svcErrToHTTP(w, r, h, err, "upsert backlink")
 		return
 	}
-	writeJSON(w, http.StatusOK, backlinkProtoToJSON(resp.Backlink))
+	writeJSON(w, http.StatusOK, backlinkRepoToJSON(stored))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -523,13 +502,8 @@ func (h *Handler) handleDeleteBacklink(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_, err := h.linkSvc.DeleteBacklink(r.Context(), &pb.DeleteBacklinkRequest{
-		SourceUrn:    req.SourceURN,
-		TargetUrn:    req.TargetURN,
-		TargetAnchor: req.TargetAnchor,
-	})
-	if err != nil {
-		grpcErrToHTTP(w, r, h, err, "delete backlink")
+	if err := h.linkSvc.DeleteBacklink(r.Context(), req.SourceURN, req.TargetURN, req.TargetAnchor); err != nil {
+		svcErrToHTTP(w, r, h, err, "delete backlink")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"deleted": true})
@@ -546,17 +520,15 @@ func (h *Handler) handleListExternalLinks(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	resp, err := h.linkSvc.ListExternalLinks(r.Context(), &pb.ListExternalLinksRequest{
-		SourceUrn: sourceURN,
-	})
+	links, err := h.linkSvc.ListExternalLinks(r.Context(), sourceURN)
 	if err != nil {
-		grpcErrToHTTP(w, r, h, err, "list external links")
+		svcErrToHTTP(w, r, h, err, "list external links")
 		return
 	}
 
-	out := make([]*externalLinkJSON, 0, len(resp.Links))
-	for _, e := range resp.Links {
-		out = append(out, externalLinkProtoToJSON(e))
+	out := make([]*externalLinkJSON, 0, len(links))
+	for _, e := range links {
+		out = append(out, externalLinkRepoToJSON(e))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"links": out})
 }
@@ -580,16 +552,18 @@ func (h *Handler) handleUpsertExternalLink(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	resp, err := h.linkSvc.UpsertExternalLink(r.Context(), &pb.UpsertExternalLinkRequest{
-		SourceUrn: req.SourceURN,
-		Uri:       req.URI,
+	record := repo.ExternalLinkRecord{
+		SourceURN: req.SourceURN,
+		URI:       req.URI,
 		Label:     req.Label,
-	})
+	}
+
+	stored, err := h.linkSvc.UpsertExternalLink(r.Context(), record)
 	if err != nil {
-		grpcErrToHTTP(w, r, h, err, "upsert external link")
+		svcErrToHTTP(w, r, h, err, "upsert external link")
 		return
 	}
-	writeJSON(w, http.StatusOK, externalLinkProtoToJSON(resp.Link))
+	writeJSON(w, http.StatusOK, externalLinkRepoToJSON(stored))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -611,12 +585,8 @@ func (h *Handler) handleDeleteExternalLink(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	_, err := h.linkSvc.DeleteExternalLink(r.Context(), &pb.DeleteExternalLinkRequest{
-		SourceUrn: req.SourceURN,
-		Uri:       req.URI,
-	})
-	if err != nil {
-		grpcErrToHTTP(w, r, h, err, "delete external link")
+	if err := h.linkSvc.DeleteExternalLink(r.Context(), req.SourceURN, req.URI); err != nil {
+		svcErrToHTTP(w, r, h, err, "delete external link")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"deleted": true})

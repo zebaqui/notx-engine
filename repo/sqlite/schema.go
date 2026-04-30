@@ -13,7 +13,7 @@ import (
 // currentSchemaVersion must match len(migrations).
 // Bump it by 1 every time you add a migration to the slice below.
 // NEVER edit or remove existing migrations — only append new ones.
-const currentSchemaVersion = 12
+const currentSchemaVersion = 13
 
 // currentProjectionVersion is incremented when projection logic changes
 // (i.e. existing rows need recomputing from the event log even though
@@ -275,6 +275,19 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_inferences_note_pending
 CREATE INDEX IF NOT EXISTS idx_inferences_status
     ON note_context_inferences(status, created_at DESC);
 
+-- Prop schemas: user-defined front-matter field definitions.
+CREATE TABLE IF NOT EXISTS prop_schemas (
+    id         TEXT    PRIMARY KEY,
+    name       TEXT    NOT NULL,
+    key        TEXT    NOT NULL UNIQUE,
+    type       TEXT    NOT NULL DEFAULT 'free',
+    options    TEXT    NOT NULL DEFAULT '[]',
+    position   INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_prop_schemas_position ON prop_schemas(position ASC);
+
 -- Schema version tracking.
 CREATE TABLE IF NOT EXISTS schema_version (
     version    INTEGER PRIMARY KEY,
@@ -327,6 +340,7 @@ CREATE INDEX IF NOT EXISTS idx_sync_log_note   ON sync_log(note_urn, synced_at D
 //	v10 — pending_sync table for real-time event bus
 //	v11 — sync_log table for admin sync history
 //	v12 — snips: add snip_type, parent_anchor, parent_urn columns to notes
+//	v13 — prop_schemas table for user-defined front-matter field definitions
 var migrations = []string{
 	// v1: initial schema — ddl already handles this on new installs.
 	"SELECT 1",
@@ -532,6 +546,19 @@ CREATE INDEX IF NOT EXISTS idx_sync_log_note   ON sync_log(note_urn, synced_at D
 	`CREATE INDEX IF NOT EXISTS idx_notes_snip_type     ON notes(snip_type)    WHERE snip_type IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_notes_parent_anchor ON notes(parent_anchor) WHERE parent_anchor IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_notes_parent_urn    ON notes(parent_urn)   WHERE parent_urn != '';`,
+
+	// v13: prop_schemas table for user-defined front-matter field definitions
+	`CREATE TABLE IF NOT EXISTS prop_schemas (
+    id         TEXT    PRIMARY KEY,
+    name       TEXT    NOT NULL,
+    key        TEXT    NOT NULL UNIQUE,
+    type       TEXT    NOT NULL DEFAULT 'free',
+    options    TEXT    NOT NULL DEFAULT '[]',
+    position   INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_prop_schemas_position ON prop_schemas(position ASC);`,
 }
 
 // applySchema creates all tables/indexes on a fresh DB and seeds meta rows.

@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	pb "github.com/zebaqui/notx-engine/proto"
 	"github.com/zebaqui/notx-engine/repo"
+	"github.com/zebaqui/notx-engine/service"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -140,90 +140,73 @@ type promoteResponse struct {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Proto → JSON conversion helpers
+// repo → JSON conversion helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-func burstProtoToJSON(b *pb.BurstRecord) *burstRecordJSON {
-	if b == nil {
-		return nil
-	}
+func burstRepoToJSON(b repo.BurstRecord) *burstRecordJSON {
 	j := &burstRecordJSON{
-		ID:         b.Id,
-		NoteURN:    b.NoteUrn,
-		ProjectURN: b.ProjectUrn,
-		FolderURN:  b.FolderUrn,
-		AuthorURN:  b.AuthorUrn,
-		Sequence:   b.Sequence,
-		LineStart:  b.LineStart,
-		LineEnd:    b.LineEnd,
+		ID:         b.ID,
+		NoteURN:    b.NoteURN,
+		ProjectURN: b.ProjectURN,
+		FolderURN:  b.FolderURN,
+		AuthorURN:  b.AuthorURN,
+		Sequence:   int32(b.Sequence),
+		LineStart:  int32(b.LineStart),
+		LineEnd:    int32(b.LineEnd),
 		Text:       b.Text,
 		Tokens:     b.Tokens,
 		Truncated:  b.Truncated,
 	}
-	if b.CreatedAt != nil {
-		j.CreatedAt = b.CreatedAt.AsTime().UTC().Format(time.RFC3339)
+	if !b.CreatedAt.IsZero() {
+		j.CreatedAt = b.CreatedAt.UTC().Format(time.RFC3339)
 	}
 	return j
 }
 
-func candidateProtoToJSON(c *pb.CandidateRecord) *candidateRecordJSON {
-	if c == nil {
-		return nil
-	}
+func candidateRepoToJSON(c repo.CandidateRecord) *candidateRecordJSON {
 	j := &candidateRecordJSON{
-		ID:           c.Id,
-		BurstAID:     c.BurstAId,
-		BurstBID:     c.BurstBId,
-		NoteURN_A:    c.NoteUrnA,
-		NoteURN_B:    c.NoteUrnB,
-		ProjectURN:   c.ProjectUrn,
+		ID:           c.ID,
+		BurstAID:     c.BurstAID,
+		BurstBID:     c.BurstBID,
+		NoteURN_A:    c.NoteURN_A,
+		NoteURN_B:    c.NoteURN_B,
+		ProjectURN:   c.ProjectURN,
 		OverlapScore: c.OverlapScore,
-		BM25Score:    c.Bm25Score,
+		BM25Score:    c.BM25Score,
 		Status:       c.Status,
 		ReviewedBy:   c.ReviewedBy,
 		PromotedLink: c.PromotedLink,
 	}
-	if c.CreatedAt != nil {
-		j.CreatedAt = c.CreatedAt.AsTime().UTC().Format(time.RFC3339)
+	if !c.CreatedAt.IsZero() {
+		j.CreatedAt = c.CreatedAt.UTC().Format(time.RFC3339)
 	}
 	if c.ReviewedAt != nil {
-		j.ReviewedAt = c.ReviewedAt.AsTime().UTC().Format(time.RFC3339)
-	}
-	if c.BurstA != nil {
-		j.BurstA = burstProtoToJSON(c.BurstA)
-	}
-	if c.BurstB != nil {
-		j.BurstB = burstProtoToJSON(c.BurstB)
+		j.ReviewedAt = c.ReviewedAt.UTC().Format(time.RFC3339)
 	}
 	return j
 }
 
-func statsProtoToJSON(s *pb.ContextStats) *contextStatsJSON {
-	if s == nil {
-		return nil
+func candidateWithBurstsToJSON(c service.CandidateWithBursts) *candidateRecordJSON {
+	j := candidateRepoToJSON(c.Candidate)
+	if c.BurstA != nil {
+		j.BurstA = burstRepoToJSON(*c.BurstA)
 	}
-	return &contextStatsJSON{
-		BurstsTotal:                 int(s.BurstsTotal),
-		BurstsToday:                 int(s.BurstsToday),
-		CandidatesPending:           int(s.CandidatesPending),
-		CandidatesPendingUnenriched: int(s.CandidatesPendingUnenriched),
-		CandidatesPromoted:          int(s.CandidatesPromoted),
-		CandidatesDismissed:         int(s.CandidatesDismissed),
-		OldestPendingAgeDays:        s.OldestPendingAgeDays,
+	if c.BurstB != nil {
+		j.BurstB = burstRepoToJSON(*c.BurstB)
 	}
+	return j
 }
 
-func projectConfigProtoToJSON(c *pb.ProjectContextConfig) *projectContextConfigJSON {
-	if c == nil {
-		return nil
+func projectConfigRepoToJSON(c repo.ProjectContextConfig) *projectContextConfigJSON {
+	j := &projectContextConfigJSON{ProjectURN: c.ProjectURN}
+	if c.BurstMaxPerNotePerDay != nil {
+		j.BurstMaxPerNotePerDay = int32(*c.BurstMaxPerNotePerDay)
 	}
-	j := &projectContextConfigJSON{
-		ProjectURN:               c.ProjectUrn,
-		BurstMaxPerNotePerDay:    c.BurstMaxPerNotePerDay,
-		BurstMaxPerProjectPerDay: c.BurstMaxPerProjectPerDay,
+	if c.BurstMaxPerProjectPerDay != nil {
+		j.BurstMaxPerProjectPerDay = int32(*c.BurstMaxPerProjectPerDay)
 	}
-	if c.UpdatedAt != nil {
-		j.UpdatedAt = c.UpdatedAt.AsTime().UTC().Format(time.RFC3339)
+	if !c.UpdatedAt.IsZero() {
+		j.UpdatedAt = c.UpdatedAt.UTC().Format(time.RFC3339)
 	}
 	return j
 }
@@ -398,9 +381,9 @@ func (h *Handler) routeContextConfig(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) handleGetContextStats(w http.ResponseWriter, r *http.Request) {
 	projectURN := r.URL.Query().Get("project_urn")
 
-	stats, err := h.contextSvc.GetFullStats(r.Context(), projectURN)
+	stats, err := h.contextSvc.GetStats(r.Context(), projectURN)
 	if err != nil {
-		h.internalError(w, r, "get context stats", err)
+		svcErrToHTTP(w, r, h, err, "get context stats")
 		return
 	}
 
@@ -437,27 +420,27 @@ func (h *Handler) handleListCandidates(w http.ResponseWriter, r *http.Request) {
 	}
 	pageToken := q.Get("page_token")
 
-	resp, err := h.contextSvc.ListCandidates(r.Context(), &pb.ListCandidatesRequest{
-		ProjectUrn:    projectURN,
-		NoteUrn:       noteURN,
-		Status:        statusStr,
-		MinScore:      minScore,
-		IncludeBursts: includeBursts,
-		PageSize:      pageSize,
-		PageToken:     pageToken,
-	})
+	opts := repo.CandidateListOptions{
+		ProjectURN: projectURN,
+		NoteURN:    noteURN,
+		Status:     statusStr,
+		MinScore:   minScore,
+		PageSize:   int(pageSize),
+		PageToken:  pageToken,
+	}
+	candidates, nextToken, err := h.contextSvc.ListCandidates(r.Context(), opts, includeBursts)
 	if err != nil {
-		grpcErrToHTTP(w, r, h, err, "list candidates")
+		svcErrToHTTP(w, r, h, err, "list candidates")
 		return
 	}
 
-	out := make([]*candidateRecordJSON, 0, len(resp.Candidates))
-	for _, c := range resp.Candidates {
-		out = append(out, candidateProtoToJSON(c))
+	out := make([]*candidateRecordJSON, 0, len(candidates))
+	for _, c := range candidates {
+		out = append(out, candidateWithBurstsToJSON(c))
 	}
 	writeJSON(w, http.StatusOK, &listCandidatesResponse{
 		Candidates:    out,
-		NextPageToken: resp.NextPageToken,
+		NextPageToken: nextToken,
 	})
 }
 
@@ -466,19 +449,14 @@ func (h *Handler) handleListCandidates(w http.ResponseWriter, r *http.Request) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 func (h *Handler) handleGetCandidate(w http.ResponseWriter, r *http.Request, id string) {
-	// include_bursts defaults to true when not explicitly set to "false".
-	includeBursts := r.URL.Query().Get("include_bursts") != "false"
-
-	resp, err := h.contextSvc.GetCandidate(r.Context(), &pb.GetCandidateRequest{
-		Id:            id,
-		IncludeBursts: includeBursts,
-	})
+	// Service always embeds bursts for GetCandidate; ignore include_bursts param.
+	c, err := h.contextSvc.GetCandidate(r.Context(), id)
 	if err != nil {
-		grpcErrToHTTP(w, r, h, err, "get candidate")
+		svcErrToHTTP(w, r, h, err, "get candidate")
 		return
 	}
 
-	writeJSON(w, http.StatusOK, candidateProtoToJSON(resp.Candidate))
+	writeJSON(w, http.StatusOK, candidateWithBurstsToJSON(c))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -499,24 +477,27 @@ func (h *Handler) handlePromoteCandidate(w http.ResponseWriter, r *http.Request,
 		req.ReviewerURN = "urn:notx:usr:anon"
 	}
 
-	resp, err := h.contextSvc.PromoteCandidate(r.Context(), &pb.PromoteCandidateRequest{
-		Id:          id,
+	opts := repo.PromoteOptions{
 		Label:       req.Label,
 		Direction:   req.Direction,
-		ReviewerUrn: req.ReviewerURN,
-	})
+		ReviewerURN: req.ReviewerURN,
+	}
+	result, updated, err := h.contextSvc.PromoteCandidate(r.Context(), id, opts)
 	if err != nil {
-		grpcErrToHTTP(w, r, h, err, "promote candidate")
+		svcErrToHTTP(w, r, h, err, "promote candidate")
 		return
 	}
 
-	writeJSON(w, http.StatusOK, &promoteResponse{
-		AnchorAID: resp.AnchorAId,
-		AnchorBID: resp.AnchorBId,
-		LinkAToB:  resp.LinkAToB,
-		LinkBToA:  resp.LinkBToA,
-		Candidate: candidateProtoToJSON(resp.Candidate),
-	})
+	resp := &promoteResponse{
+		AnchorAID: result.AnchorAID,
+		AnchorBID: result.AnchorBID,
+		LinkAToB:  result.LinkAToB,
+		LinkBToA:  result.LinkBToA,
+	}
+	if updated != nil {
+		resp.Candidate = candidateRepoToJSON(*updated)
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -534,16 +515,17 @@ func (h *Handler) handleDismissCandidate(w http.ResponseWriter, r *http.Request,
 		req.ReviewerURN = "urn:notx:usr:anon"
 	}
 
-	resp, err := h.contextSvc.DismissCandidate(r.Context(), &pb.DismissCandidateRequest{
-		Id:          id,
-		ReviewerUrn: req.ReviewerURN,
-	})
+	updated, err := h.contextSvc.DismissCandidate(r.Context(), id, req.ReviewerURN)
 	if err != nil {
-		grpcErrToHTTP(w, r, h, err, "dismiss candidate")
+		svcErrToHTTP(w, r, h, err, "dismiss candidate")
 		return
 	}
 
-	writeJSON(w, http.StatusOK, candidateProtoToJSON(resp.Candidate))
+	var candidate *candidateRecordJSON
+	if updated != nil {
+		candidate = candidateRepoToJSON(*updated)
+	}
+	writeJSON(w, http.StatusOK, candidate)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -566,26 +548,20 @@ func (h *Handler) handleListBursts(w http.ResponseWriter, r *http.Request) {
 	if ps := q.Get("page_size"); ps != "" {
 		fmt.Sscanf(ps, "%d", &pageSize)
 	}
-	pageToken := q.Get("page_token")
 
-	resp, err := h.contextSvc.ListBursts(r.Context(), &pb.ListBurstsRequest{
-		NoteUrn:       noteURN,
-		SinceSequence: sinceSequence,
-		PageSize:      pageSize,
-		PageToken:     pageToken,
-	})
+	bursts, nextToken, err := h.contextSvc.ListBursts(r.Context(), noteURN, int(sinceSequence), int(pageSize))
 	if err != nil {
-		grpcErrToHTTP(w, r, h, err, "list bursts")
+		svcErrToHTTP(w, r, h, err, "list bursts")
 		return
 	}
 
-	out := make([]*burstRecordJSON, 0, len(resp.Bursts))
-	for _, b := range resp.Bursts {
-		out = append(out, burstProtoToJSON(b))
+	out := make([]*burstRecordJSON, 0, len(bursts))
+	for i := range bursts {
+		out = append(out, burstRepoToJSON(bursts[i]))
 	}
 	writeJSON(w, http.StatusOK, &listBurstsResponse{
 		Bursts:        out,
-		NextPageToken: resp.NextPageToken,
+		NextPageToken: nextToken,
 	})
 }
 
@@ -594,15 +570,13 @@ func (h *Handler) handleListBursts(w http.ResponseWriter, r *http.Request) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 func (h *Handler) handleGetBurst(w http.ResponseWriter, r *http.Request, id string) {
-	resp, err := h.contextSvc.GetBurst(r.Context(), &pb.GetBurstRequest{
-		Id: id,
-	})
+	burst, err := h.contextSvc.GetBurst(r.Context(), id)
 	if err != nil {
-		grpcErrToHTTP(w, r, h, err, "get burst")
+		svcErrToHTTP(w, r, h, err, "get burst")
 		return
 	}
 
-	writeJSON(w, http.StatusOK, burstProtoToJSON(resp.Burst))
+	writeJSON(w, http.StatusOK, burstRepoToJSON(burst))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -610,15 +584,13 @@ func (h *Handler) handleGetBurst(w http.ResponseWriter, r *http.Request, id stri
 // ─────────────────────────────────────────────────────────────────────────────
 
 func (h *Handler) handleGetProjectConfig(w http.ResponseWriter, r *http.Request, projectURN string) {
-	resp, err := h.contextSvc.GetProjectConfig(r.Context(), &pb.GetProjectConfigRequest{
-		ProjectUrn: projectURN,
-	})
+	cfg, err := h.contextSvc.GetProjectConfig(r.Context(), projectURN)
 	if err != nil {
-		grpcErrToHTTP(w, r, h, err, "get project config")
+		svcErrToHTTP(w, r, h, err, "get project config")
 		return
 	}
 
-	writeJSON(w, http.StatusOK, projectConfigProtoToJSON(resp.Config))
+	writeJSON(w, http.StatusOK, projectConfigRepoToJSON(cfg))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -632,17 +604,23 @@ func (h *Handler) handleSetProjectConfig(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	resp, err := h.contextSvc.SetProjectConfig(r.Context(), &pb.SetProjectConfigRequest{
-		ProjectUrn:               projectURN,
-		BurstMaxPerNotePerDay:    req.BurstMaxPerNotePerDay,
-		BurstMaxPerProjectPerDay: req.BurstMaxPerProjectPerDay,
-	})
+	cfg := repo.ProjectContextConfig{ProjectURN: projectURN}
+	if req.BurstMaxPerNotePerDay > 0 {
+		v := int(req.BurstMaxPerNotePerDay)
+		cfg.BurstMaxPerNotePerDay = &v
+	}
+	if req.BurstMaxPerProjectPerDay > 0 {
+		v := int(req.BurstMaxPerProjectPerDay)
+		cfg.BurstMaxPerProjectPerDay = &v
+	}
+
+	result, err := h.contextSvc.SetProjectConfig(r.Context(), cfg)
 	if err != nil {
-		grpcErrToHTTP(w, r, h, err, "set project config")
+		svcErrToHTTP(w, r, h, err, "set project config")
 		return
 	}
 
-	writeJSON(w, http.StatusOK, projectConfigProtoToJSON(resp.Config))
+	writeJSON(w, http.StatusOK, projectConfigRepoToJSON(result))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -739,7 +717,7 @@ func (h *Handler) handleListInferences(w http.ResponseWriter, r *http.Request) {
 
 	inferences, nextToken, err := h.contextSvc.ListInferences(r.Context(), opts)
 	if err != nil {
-		h.internalError(w, r, "list inferences", err)
+		svcErrToHTTP(w, r, h, err, "list inferences")
 		return
 	}
 
@@ -761,7 +739,7 @@ func (h *Handler) handleListInferences(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) handleGetInference(w http.ResponseWriter, r *http.Request, id string) {
 	inf, err := h.contextSvc.GetInference(r.Context(), id)
 	if err != nil {
-		grpcErrToHTTP(w, r, h, err, "get inference")
+		svcErrToHTTP(w, r, h, err, "get inference")
 		return
 	}
 	writeJSON(w, http.StatusOK, inferenceToJSON(&inf))
@@ -791,7 +769,7 @@ func (h *Handler) handleAcceptInference(w http.ResponseWriter, r *http.Request, 
 		ReviewerURN:   req.ReviewerURN,
 	}
 	if err := h.contextSvc.AcceptInference(r.Context(), id, opts); err != nil {
-		grpcErrToHTTP(w, r, h, err, "accept inference")
+		svcErrToHTTP(w, r, h, err, "accept inference")
 		return
 	}
 
@@ -818,7 +796,7 @@ func (h *Handler) handleRejectInference(w http.ResponseWriter, r *http.Request, 
 	}
 
 	if err := h.contextSvc.RejectInference(r.Context(), id, req.ReviewerURN); err != nil {
-		grpcErrToHTTP(w, r, h, err, "reject inference")
+		svcErrToHTTP(w, r, h, err, "reject inference")
 		return
 	}
 
@@ -864,7 +842,7 @@ func (h *Handler) handleSearchBursts(w http.ResponseWriter, r *http.Request) {
 
 	results, err := h.contextSvc.SearchBursts(r.Context(), q, pageSize)
 	if err != nil {
-		grpcErrToHTTP(w, r, h, err, "search bursts")
+		svcErrToHTTP(w, r, h, err, "search bursts")
 		return
 	}
 

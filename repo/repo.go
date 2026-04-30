@@ -761,3 +761,27 @@ type ContextRepository interface {
 	// Returns ErrNotFound if the inference does not exist or is not pending.
 	RejectInference(ctx context.Context, id, reviewerURN string) error
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Prop Schema
+// ─────────────────────────────────────────────────────────────────────────────
+
+// PropSchema defines a custom front-matter property schema entry.
+type PropSchema struct {
+	ID        string
+	Name      string    // display label, e.g. "Status"
+	Key       string    // YAML key, e.g. "status" (unique)
+	Type      string    // "free" | "multi" | "date"
+	Options   []string  // only used when Type == "multi"
+	Position  int       // display order (lower first)
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
+// PropSchemaRepo provides CRUD for prop schema definitions.
+type PropSchemaRepo interface {
+	ListPropSchemas(ctx context.Context) ([]PropSchema, error)
+	CreatePropSchema(ctx context.Context, s *PropSchema) error
+	UpdatePropSchema(ctx context.Context, s *PropSchema) error
+	DeletePropSchema(ctx context.Context, id string) error
+}

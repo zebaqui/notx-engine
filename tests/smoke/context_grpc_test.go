@@ -63,6 +63,7 @@ func startSQLiteServer(t *testing.T) (grpcAddr string, p *sqlite.Provider, stop 
 		provider, // LinkRepository     ← enables LinkService
 		log,
 		nil, // plugins — no snip plugins in smoke tests
+		provider, // propRepo
 	)
 	if err != nil {
 		provider.Close()

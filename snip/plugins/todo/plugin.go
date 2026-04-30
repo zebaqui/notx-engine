@@ -541,7 +541,13 @@ func (p *Plugin) queryTodos(ctx context.Context, f todoFilter) ([]todoItem, erro
 
 	var sb strings.Builder
 	var args []interface{}
+	argN := 0
+	nextArg := func() string {
+		argN++
+		return fmt.Sprintf("$%d", argN)
+	}
 
+	namespaceArg := nextArg()
 	sb.WriteString(`
 		SELECT t.note_urn, t.line_number, t.text, t.status, t.checkbox_state,
 		       t.file_path, COALESCE(t.anchor_id,''), t.orphaned,
@@ -549,12 +555,12 @@ func (p *Plugin) queryTodos(ctx context.Context, f todoFilter) ([]todoItem, erro
 		       COALESCE(n.parent_urn,''), COALESCE(t.due_date,''),
 		       n.created_at, n.updated_at
 		FROM engine_snips_todo t
-		JOIN notes n ON n.urn = t.note_urn
-		WHERE t.namespace = ? AND n.deleted = 0`)
+		JOIN engine_notes n ON n.urn = t.note_urn
+		WHERE t.namespace = ` + namespaceArg + ` AND n.deleted = false`)
 	args = append(args, "")
 
 	add := func(cond string, val interface{}) {
-		sb.WriteString(" AND " + cond + " ?")
+		sb.WriteString(" AND " + cond + " " + nextArg())
 		args = append(args, val)
 	}
 
@@ -568,7 +574,7 @@ func (p *Plugin) queryTodos(ctx context.Context, f todoFilter) ([]todoItem, erro
 		add("t.status =", f.status)
 	}
 	if f.overdue {
-		sb.WriteString(" AND t.due_date <> '' AND t.due_date < DATE('now') AND t.status <> 'done'")
+		sb.WriteString(" AND t.due_date <> '' AND t.due_date < TO_CHAR(CURRENT_DATE, 'YYYY-MM-DD') AND t.status <> 'done'")
 	}
 	if f.orphaned {
 		sb.WriteString(" AND t.orphaned = 1")
@@ -578,13 +584,14 @@ func (p *Plugin) queryTodos(ctx context.Context, f todoFilter) ([]todoItem, erro
 	if f.pageToken != "" {
 		ts, noteURN, lineNum, err := decodePageToken(f.pageToken)
 		if err == nil {
-			sb.WriteString(" AND (n.updated_at, t.note_urn, t.line_number) < (?, ?, ?)")
-			args = append(args, ts.UnixMilli(), noteURN, lineNum)
+			p1, p2, p3 := nextArg(), nextArg(), nextArg()
+			sb.WriteString(fmt.Sprintf(" AND (n.updated_at, t.note_urn, t.line_number) < (%s, %s, %s)", p1, p2, p3))
+			args = append(args, ts, noteURN, lineNum)
 		}
 	}
 
 	sb.WriteString(" ORDER BY n.updated_at DESC, t.note_urn, t.line_number")
-	sb.WriteString(" LIMIT ?")
+	sb.WriteString(fmt.Sprintf(" LIMIT %s", nextArg()))
 	args = append(args, pageSize+1)
 
 	rows, err := p.env.DB.QueryContext(ctx, sb.String(), args...)
@@ -597,19 +604,19 @@ func (p *Plugin) queryTodos(ctx context.Context, f todoFilter) ([]todoItem, erro
 	for rows.Next() {
 		var item todoItem
 		var orphaned bool
-		var createdAtMs, updatedAtMs int64
+		var createdAt, updatedAt time.Time
 		if err := rows.Scan(
 			&item.NoteURN, &item.LineNumber, &item.Text,
 			&item.Status, &item.CheckboxState,
 			&item.FilePath, &item.AnchorID, &orphaned,
 			&item.ProjectURN, &item.FolderURN, &item.ParentURN, &item.DueDate,
-			&createdAtMs, &updatedAtMs,
+			&createdAt, &updatedAt,
 		); err != nil {
 			continue
 		}
 		item.Orphaned = orphaned
-		item.CreatedAt = time.UnixMilli(createdAtMs).UTC()
-		item.UpdatedAt = time.UnixMilli(updatedAtMs).UTC()
+		item.CreatedAt = createdAt.UTC()
+		item.UpdatedAt = updatedAt.UTC()
 		items = append(items, item)
 	}
 	if err := rows.Err(); err != nil {
@@ -1032,7 +1039,7 @@ func (p *Plugin) handleUpdateTodoStatus(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	result, err := p.env.DB.ExecContext(r.Context(),
-		`UPDATE engine_snips_todo SET status = ? WHERE namespace = ? AND note_urn = ? AND line_number = ?`,
+		`UPDATE engine_snips_todo SET status = $1 WHERE namespace = $2 AND note_urn = $3 AND line_number = $4`,
 		req.Status, "", req.NoteURN, req.LineNumber,
 	)
 	if err != nil {

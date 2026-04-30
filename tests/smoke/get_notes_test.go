@@ -56,7 +56,7 @@ func startServer(t *testing.T) (baseURL string, stop func()) {
 		Level: slog.LevelError, // keep test output clean
 	}))
 
-	srv, err := server.New(cfg, provider, provider, nil, nil, log, nil)
+	srv, err := server.New(cfg, provider, provider, nil, nil, log, nil, provider)
 	if err != nil {
 		t.Fatalf("server.New: %v", err)
 	}

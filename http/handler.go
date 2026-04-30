@@ -13,12 +13,9 @@ import (
 	"strconv"
 	"time"
 
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
-
 	"github.com/zebaqui/notx-engine/config"
-	grpcsvc "github.com/zebaqui/notx-engine/internal/server/grpc"
-	pb "github.com/zebaqui/notx-engine/proto"
+	"github.com/zebaqui/notx-engine/repo"
+	"github.com/zebaqui/notx-engine/service"
 	"github.com/zebaqui/notx-engine/snip"
 )
 
@@ -28,16 +25,17 @@ import (
 
 // Handler wires all HTTP routes and holds the dependencies needed to serve them.
 // It implements http.Handler so it can be passed directly to http.Server.
-// All business logic is delegated to the gRPC service structs — the HTTP layer
-// is a pure translation layer: decode JSON → call gRPC method → encode JSON.
+// All business logic is delegated to service interfaces — the HTTP layer is a
+// pure translation layer: decode JSON → call service method → encode JSON.
 type Handler struct {
 	cfg        *config.Config
-	noteSvc    pb.NoteServiceServer
-	projSvc    pb.ProjectServiceServer
-	folderSvc  pb.FolderServiceServer
-	contextSvc *grpcsvc.ContextServer // optional
-	linkSvc    *grpcsvc.LinkServer    // optional
+	noteSvc    service.NoteService
+	projSvc    service.ProjectService
+	folderSvc  service.FolderService
+	contextSvc service.ContextService // optional; nil when context not wired
+	linkSvc    service.LinkService    // optional; nil when links not wired
 	plugins    []snip.SnipPlugin
+	propSvc    service.PropService // optional; nil when props not wired
 
 	log    *slog.Logger
 	mux    *http.ServeMux
@@ -48,13 +46,14 @@ type Handler struct {
 // The caller must call Serve to start accepting connections.
 func New(
 	cfg *config.Config,
-	noteSvc pb.NoteServiceServer,
-	projSvc pb.ProjectServiceServer,
-	folderSvc pb.FolderServiceServer,
-	contextSvc *grpcsvc.ContextServer,
-	linkSvc *grpcsvc.LinkServer,
+	noteSvc service.NoteService,
+	projSvc service.ProjectService,
+	folderSvc service.FolderService,
+	contextSvc service.ContextService,
+	linkSvc service.LinkService,
 	log *slog.Logger,
 	plugins []snip.SnipPlugin,
+	propSvc service.PropService,
 ) *Handler {
 	addr := fmt.Sprintf("127.0.0.1:%d", cfg.HTTPPort)
 	h := &Handler{
@@ -65,6 +64,7 @@ func New(
 		contextSvc: contextSvc,
 		linkSvc:    linkSvc,
 		plugins:    plugins,
+		propSvc:    propSvc,
 		log:        log,
 		mux:        http.NewServeMux(),
 	}
@@ -168,6 +168,10 @@ func (h *Handler) routes() {
 		p.RegisterHTTP(h.mux, h.withMiddleware)
 	}
 
+	// Prop schemas — user-defined front-matter field definitions
+	h.mux.HandleFunc("/v1/props/schemas", h.withMiddleware(h.routePropSchemas))
+	h.mux.HandleFunc("/v1/props/schemas/", h.withMiddleware(h.routePropSchema))
+
 	// Links — anchors, backlinks, external links
 	h.mux.HandleFunc("/v1/links/anchors", h.withMiddleware(h.routeLinkAnchors))
 	h.mux.HandleFunc("/v1/links/anchors/", h.withMiddleware(h.routeLinkAnchor))
@@ -253,28 +257,18 @@ func decodeJSON(r *http.Request, v any) error {
 	return nil
 }
 
-// grpcErrToHTTP maps a gRPC status error to the appropriate HTTP response.
-func grpcErrToHTTP(w http.ResponseWriter, r *http.Request, h *Handler, err error, op string) {
-	st, ok := status.FromError(err)
-	if !ok {
-		h.internalError(w, r, op, err)
-		return
-	}
-	switch st.Code() {
-	case codes.NotFound:
-		writeError(w, http.StatusNotFound, st.Message())
-	case codes.AlreadyExists:
-		writeError(w, http.StatusConflict, st.Message())
-	case codes.InvalidArgument:
-		writeError(w, http.StatusBadRequest, st.Message())
-	case codes.PermissionDenied:
-		writeError(w, http.StatusForbidden, st.Message())
-	case codes.Unauthenticated:
-		writeError(w, http.StatusUnauthorized, st.Message())
-	case codes.Aborted:
-		writeError(w, http.StatusConflict, st.Message())
-	case codes.FailedPrecondition:
-		writeError(w, http.StatusConflict, st.Message())
+// svcErrToHTTP maps a service/repo sentinel error to the appropriate HTTP
+// response and logs unexpected errors as internal server errors.
+func svcErrToHTTP(w http.ResponseWriter, r *http.Request, h *Handler, err error, op string) {
+	switch {
+	case errors.Is(err, service.ErrInvalidInput):
+		writeError(w, http.StatusBadRequest, err.Error())
+	case errors.Is(err, repo.ErrNotFound):
+		writeError(w, http.StatusNotFound, "not found")
+	case errors.Is(err, repo.ErrAlreadyExists):
+		writeError(w, http.StatusConflict, "already exists")
+	case errors.Is(err, repo.ErrSequenceConflict):
+		writeError(w, http.StatusConflict, err.Error())
 	default:
 		h.internalError(w, r, op, err)
 	}
