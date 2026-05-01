@@ -27,7 +27,7 @@ func NewFromRepos(
 		log = slog.Default()
 	}
 
-	eng := service.New(notes, projects, ctxRepo, links, props, 0, 0)
+	eng := service.New(notes, projects, ctxRepo, links, props, nil, 0, 0)
 
-	return New(cfg, eng.Notes, eng.Projects, eng.Folders, eng.Context, eng.Links, log, plugins, eng.Props)
+	return New(cfg, eng.Notes, eng.Projects, eng.Folders, eng.Context, eng.Links, log, plugins, eng.Props, nil)
 }

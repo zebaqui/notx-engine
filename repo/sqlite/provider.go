@@ -78,6 +78,7 @@ type Provider struct {
 	scorerCtxCancel    context.CancelFunc // cancels the scorer goroutine
 	inferenceCh        chan<- string      // channel to send note URNs for metadata inference
 	inferenceCtxCancel context.CancelFunc // cancels the inference runner goroutine
+	paragraphCtxCancel context.CancelFunc // cancels the paragraph runner goroutine
 	burstCfg           core.BurstConfig   // burst extraction config
 }
 
@@ -113,6 +114,11 @@ func New(dataDir string, rebuild func(ctx context.Context, notesDir string, db *
 	p.inferenceCtxCancel = inferenceCancel
 	p.inferenceCh = StartInferenceRunner(inferenceCtx, p.db, p.write, p.burstCfg, DefaultInferenceConfig())
 
+	// Start the background paragraph runner goroutine.
+	paragraphCtx, paragraphCancel := context.WithCancel(context.Background())
+	p.paragraphCtxCancel = paragraphCancel
+	StartParagraphRunner(paragraphCtx, p.db, p.write, DefaultParagraphRunnerConfig())
+
 	return p, nil
 }
 
@@ -123,6 +129,9 @@ func (p *Provider) DB() *sql.DB { return p.db }
 
 func (p *Provider) Close() error {
 	p.closeOnce.Do(func() {
+		if p.paragraphCtxCancel != nil {
+			p.paragraphCtxCancel()
+		}
 		if p.scorerCtxCancel != nil {
 			p.scorerCtxCancel()
 		}

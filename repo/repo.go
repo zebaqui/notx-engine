@@ -769,11 +769,11 @@ type ContextRepository interface {
 // PropSchema defines a custom front-matter property schema entry.
 type PropSchema struct {
 	ID        string
-	Name      string    // display label, e.g. "Status"
-	Key       string    // YAML key, e.g. "status" (unique)
-	Type      string    // "free" | "multi" | "date"
-	Options   []string  // only used when Type == "multi"
-	Position  int       // display order (lower first)
+	Name      string   // display label, e.g. "Status"
+	Key       string   // YAML key, e.g. "status" (unique)
+	Type      string   // "free" | "multi" | "date"
+	Options   []string // only used when Type == "multi"
+	Position  int      // display order (lower first)
 	CreatedAt time.Time
 	UpdatedAt time.Time
 }
@@ -784,4 +784,148 @@ type PropSchemaRepo interface {
 	CreatePropSchema(ctx context.Context, s *PropSchema) error
 	UpdatePropSchema(ctx context.Context, s *PropSchema) error
 	DeletePropSchema(ctx context.Context, id string) error
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Paragraph Role System
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ParagraphRecord is one identified paragraph inside a note, with its
+// classified role and normalized extracted concepts.
+type ParagraphRecord struct {
+	ID                 string
+	NoteURN            string
+	ProjectURN         string // metadata; not a filter boundary
+	FolderURN          string // metadata; for folder-level queries
+	Sequence           int    // note head_seq at time of processing
+	Position           int    // 0-based paragraph index in note
+	LineStart          int
+	LineEnd            int
+	Text               string
+	Role               string   // definition|example|contrast|cause_effect|question|claim
+	MainConcepts       []string // normalized form
+	SupportingConcepts []string // normalized form
+	ConceptFamilies    []string // normalized form
+	CreatedAt          time.Time
+	UpdatedAt          time.Time
+}
+
+// ParagraphRelationRecord is a scored directional relation between two
+// paragraphs. Relations are global — they cross project and folder boundaries.
+type ParagraphRelationRecord struct {
+	ID                string
+	SourceParagraphID string
+	TargetParagraphID string
+	NoteURNSource     string
+	NoteURNTarget     string
+	ProjectURNSource  string
+	ProjectURNTarget  string
+	FolderURNSource   string
+	FolderURNTarget   string
+	ProximityTier     string // same_doc|same_folder|same_project|global
+	RelationType      string // elaborates|supports|contrasts_with|answers|causes|illustrates
+	Score             float64
+	ReasonSignals     []string
+	PatternHash       string // anonymous structural fingerprint
+	Version           string
+	FeedbackVote      *string // "up" | "down" | nil
+	FeedbackAt        *time.Time
+	CreatedAt         time.Time
+}
+
+// ParagraphWeights is a global singleton row of adaptive scoring weights.
+type ParagraphWeights struct {
+	// Signal dimension weights (should sum to ~1.0)
+	WProximityTier float64
+	WRolePair      float64
+	WOverlap       float64
+	WCue           float64
+	WPattern       float64
+	// Per-tier proximity multipliers
+	TierSameDoc     float64
+	TierSameFolder  float64
+	TierSameProject float64
+	TierGlobal      float64
+	UpdatedAt       time.Time
+}
+
+// PatternScoreRecord is an anonymous feedback fingerprint keyed on a
+// structural hash. No note content is stored here.
+type PatternScoreRecord struct {
+	PatternHash   string
+	RoleA         string
+	RoleB         string
+	RelationType  string
+	ProximityTier string
+	CuePresent    bool
+	UpCount       int
+	DownCount     int
+	NetScore      float64 // (up-down)/(up+down+smoothing), clamped to [-1,1]
+	UpdatedAt     time.Time
+}
+
+// ParagraphListOptions controls pagination and filtering for ListParagraphs.
+type ParagraphListOptions struct {
+	NoteURN   string
+	FolderURN string // optional; filter by folder (metadata)
+	PageSize  int
+	PageToken string
+}
+
+// ParagraphRelationListOptions controls pagination and filtering for ListRelations.
+type ParagraphRelationListOptions struct {
+	NoteURN           string
+	FolderURN         string // optional; filter by source folder (metadata)
+	SourceParagraphID string
+	MinScore          float64
+	PageSize          int
+	PageToken         string
+}
+
+// ParagraphRepository persists the paragraph role graph.
+// The graph is global — it spans all notes, folders, and projects.
+type ParagraphRepository interface {
+	// ── Paragraphs ────────────────────────────────────────────────────────────
+
+	UpsertParagraphs(ctx context.Context, paragraphs []ParagraphRecord) error
+	ListParagraphs(ctx context.Context, opts ParagraphListOptions) ([]ParagraphRecord, string, error)
+	GetParagraph(ctx context.Context, id string) (ParagraphRecord, error)
+	DeleteParagraphsForNote(ctx context.Context, noteURN string) error
+
+	// ── Relations ─────────────────────────────────────────────────────────────
+
+	UpsertRelations(ctx context.Context, relations []ParagraphRelationRecord) error
+	ListRelations(ctx context.Context, opts ParagraphRelationListOptions) ([]ParagraphRelationRecord, string, error)
+	GetRelation(ctx context.Context, id string) (ParagraphRelationRecord, error)
+	// RecordFeedback stores a vote on the relation and returns the updated record.
+	RecordFeedback(ctx context.Context, relationID, vote string) (ParagraphRelationRecord, error)
+
+	// ── Pattern scores ────────────────────────────────────────────────────────
+
+	// GetPatternScore returns the pattern score for the given hash.
+	// Returns ErrNotFound when the hash has no entry yet.
+	GetPatternScore(ctx context.Context, patternHash string) (PatternScoreRecord, error)
+	UpsertPatternScore(ctx context.Context, p PatternScoreRecord) error
+
+	// ── Weights (global singleton) ────────────────────────────────────────────
+
+	// GetWeights returns the global weights row, or default weights when no
+	// row exists yet.
+	GetWeights(ctx context.Context) (ParagraphWeights, error)
+	UpsertWeights(ctx context.Context, w ParagraphWeights) error
+
+	// ── Processing queue ──────────────────────────────────────────────────────
+
+	// ListNotesNeedingParagraphProcessing returns URNs of notes whose
+	// paragraph_head_seq < head_seq (i.e. they have unprocessed changes).
+	ListNotesNeedingParagraphProcessing(ctx context.Context, limit int) ([]string, error)
+	// MarkNoteProcessed sets paragraph_head_seq = sequence for the note.
+	MarkNoteProcessed(ctx context.Context, noteURN string, sequence int) error
+
+	// ── Full rebuild ──────────────────────────────────────────────────────────
+
+	// ResetGraph deletes all paragraphs and relations, then sets
+	// paragraph_head_seq = -1 on every note so the runner reprocesses all.
+	// Weights and pattern scores are preserved.
+	ResetGraph(ctx context.Context) error
 }

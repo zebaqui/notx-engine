@@ -28,14 +28,15 @@ import (
 // All business logic is delegated to service interfaces — the HTTP layer is a
 // pure translation layer: decode JSON → call service method → encode JSON.
 type Handler struct {
-	cfg        *config.Config
-	noteSvc    service.NoteService
-	projSvc    service.ProjectService
-	folderSvc  service.FolderService
-	contextSvc service.ContextService // optional; nil when context not wired
-	linkSvc    service.LinkService    // optional; nil when links not wired
-	plugins    []snip.SnipPlugin
-	propSvc    service.PropService // optional; nil when props not wired
+	cfg          *config.Config
+	noteSvc      service.NoteService
+	projSvc      service.ProjectService
+	folderSvc    service.FolderService
+	contextSvc   service.ContextService // optional; nil when context not wired
+	linkSvc      service.LinkService    // optional; nil when links not wired
+	plugins      []snip.SnipPlugin
+	propSvc      service.PropService      // optional; nil when props not wired
+	paragraphSvc service.ParagraphService // optional; nil when not wired
 
 	log    *slog.Logger
 	mux    *http.ServeMux
@@ -54,19 +55,21 @@ func New(
 	log *slog.Logger,
 	plugins []snip.SnipPlugin,
 	propSvc service.PropService,
+	paragraphSvc service.ParagraphService,
 ) *Handler {
 	addr := fmt.Sprintf("127.0.0.1:%d", cfg.HTTPPort)
 	h := &Handler{
-		cfg:        cfg,
-		noteSvc:    noteSvc,
-		projSvc:    projSvc,
-		folderSvc:  folderSvc,
-		contextSvc: contextSvc,
-		linkSvc:    linkSvc,
-		plugins:    plugins,
-		propSvc:    propSvc,
-		log:        log,
-		mux:        http.NewServeMux(),
+		cfg:          cfg,
+		noteSvc:      noteSvc,
+		projSvc:      projSvc,
+		folderSvc:    folderSvc,
+		contextSvc:   contextSvc,
+		linkSvc:      linkSvc,
+		plugins:      plugins,
+		propSvc:      propSvc,
+		paragraphSvc: paragraphSvc,
+		log:          log,
+		mux:          http.NewServeMux(),
 	}
 	h.server = &http.Server{
 		Addr:         addr,
@@ -171,6 +174,14 @@ func (h *Handler) routes() {
 	// Prop schemas — user-defined front-matter field definitions
 	h.mux.HandleFunc("/v1/props/schemas", h.withMiddleware(h.routePropSchemas))
 	h.mux.HandleFunc("/v1/props/schemas/", h.withMiddleware(h.routePropSchema))
+
+	// Paragraph role graph
+	h.mux.HandleFunc("/v1/paragraphs", h.withMiddleware(h.routeParagraphs))
+	h.mux.HandleFunc("/v1/paragraphs/", h.withMiddleware(h.routeParagraph))
+	h.mux.HandleFunc("/v1/paragraph-relations", h.withMiddleware(h.routeParagraphRelations))
+	h.mux.HandleFunc("/v1/paragraph-relations/", h.withMiddleware(h.routeParagraphRelation))
+	h.mux.HandleFunc("/v1/paragraph-weights", h.withMiddleware(h.routeParagraphWeights))
+	h.mux.HandleFunc("/v1/paragraph-graph/rebuild", h.withMiddleware(h.handleParagraphRebuild))
 
 	// Links — anchors, backlinks, external links
 	h.mux.HandleFunc("/v1/links/anchors", h.withMiddleware(h.routeLinkAnchors))

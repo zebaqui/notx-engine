@@ -13,7 +13,7 @@ import (
 // currentSchemaVersion must match len(migrations).
 // Bump it by 1 every time you add a migration to the slice below.
 // NEVER edit or remove existing migrations — only append new ones.
-const currentSchemaVersion = 13
+const currentSchemaVersion = 14
 
 // currentProjectionVersion is incremented when projection logic changes
 // (i.e. existing rows need recomputing from the event log even though
@@ -41,7 +41,8 @@ CREATE TABLE IF NOT EXISTS notes (
     extra             TEXT    NOT NULL DEFAULT '{}',
     snip_type         TEXT,                           -- NULL for regular notes
     parent_anchor     TEXT,                           -- NULL for non-sidecar snips
-    parent_urn        TEXT    NOT NULL DEFAULT ''     -- URN of parent note (snips only)
+    parent_urn        TEXT    NOT NULL DEFAULT '',     -- URN of parent note (snips only)
+    paragraph_head_seq INTEGER NOT NULL DEFAULT -1       -- processing queue: -1 means needs processing
 );
 
 CREATE INDEX IF NOT EXISTS idx_notes_updated ON notes(updated_at DESC);
@@ -287,6 +288,93 @@ CREATE TABLE IF NOT EXISTS prop_schemas (
     updated_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_prop_schemas_position ON prop_schemas(position ASC);
+
+-- ── Paragraph Role System ─────────────────────────────────────────────────────────────────────────────
+
+-- One row per identified paragraph in a note.
+CREATE TABLE IF NOT EXISTS note_paragraphs (
+    id                  TEXT    PRIMARY KEY,
+    note_urn            TEXT    NOT NULL,
+    project_urn         TEXT    NOT NULL DEFAULT '',
+    folder_urn          TEXT    NOT NULL DEFAULT '',
+    sequence            INTEGER NOT NULL,
+    position            INTEGER NOT NULL,
+    line_start          INTEGER NOT NULL,
+    line_end            INTEGER NOT NULL,
+    text                TEXT    NOT NULL,
+    role                TEXT    NOT NULL DEFAULT 'claim',
+    main_concepts       TEXT    NOT NULL DEFAULT '[]',
+    supporting_concepts TEXT    NOT NULL DEFAULT '[]',
+    concept_families    TEXT    NOT NULL DEFAULT '[]',
+    created_at          INTEGER NOT NULL,
+    updated_at          INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_paragraphs_note
+    ON note_paragraphs(note_urn, position ASC);
+CREATE INDEX IF NOT EXISTS idx_paragraphs_project
+    ON note_paragraphs(project_urn, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_paragraphs_folder
+    ON note_paragraphs(folder_urn, created_at DESC)
+    WHERE folder_urn != '';
+
+-- Scored directional relations between paragraphs (global — crosses project/folder).
+CREATE TABLE IF NOT EXISTS paragraph_relations (
+    id                  TEXT    PRIMARY KEY,
+    source_paragraph_id TEXT    NOT NULL,
+    target_paragraph_id TEXT    NOT NULL,
+    note_urn_source     TEXT    NOT NULL,
+    note_urn_target     TEXT    NOT NULL,
+    project_urn_source  TEXT    NOT NULL DEFAULT '',
+    project_urn_target  TEXT    NOT NULL DEFAULT '',
+    folder_urn_source   TEXT    NOT NULL DEFAULT '',
+    folder_urn_target   TEXT    NOT NULL DEFAULT '',
+    proximity_tier      TEXT    NOT NULL DEFAULT 'same_doc',
+    relation_type       TEXT    NOT NULL,
+    score               REAL    NOT NULL DEFAULT 0,
+    reason_signals      TEXT    NOT NULL DEFAULT '[]',
+    pattern_hash        TEXT    NOT NULL DEFAULT '',
+    version             TEXT    NOT NULL DEFAULT 'heuristic_v1',
+    feedback_vote       TEXT,
+    feedback_at         INTEGER,
+    created_at          INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_para_relations_source
+    ON paragraph_relations(source_paragraph_id, score DESC);
+CREATE INDEX IF NOT EXISTS idx_para_relations_note_source
+    ON paragraph_relations(note_urn_source, score DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_para_relations_pair
+    ON paragraph_relations(source_paragraph_id, target_paragraph_id, relation_type);
+
+-- Global singleton row of adaptive scoring weights.
+CREATE TABLE IF NOT EXISTS paragraph_weights (
+    id                  INTEGER PRIMARY KEY CHECK (id = 1),
+    w_proximity_tier    REAL    NOT NULL DEFAULT 0.20,
+    w_role_pair         REAL    NOT NULL DEFAULT 0.25,
+    w_overlap           REAL    NOT NULL DEFAULT 0.20,
+    w_cue               REAL    NOT NULL DEFAULT 0.20,
+    w_pattern           REAL    NOT NULL DEFAULT 0.15,
+    tier_same_doc       REAL    NOT NULL DEFAULT 1.00,
+    tier_same_folder    REAL    NOT NULL DEFAULT 0.75,
+    tier_same_project   REAL    NOT NULL DEFAULT 0.50,
+    tier_global         REAL    NOT NULL DEFAULT 0.25,
+    updated_at          INTEGER NOT NULL
+);
+
+-- Anonymous feedback fingerprints (no content stored).
+CREATE TABLE IF NOT EXISTS paragraph_pattern_scores (
+    pattern_hash    TEXT    PRIMARY KEY,
+    role_a          TEXT    NOT NULL DEFAULT '',
+    role_b          TEXT    NOT NULL DEFAULT '',
+    relation_type   TEXT    NOT NULL DEFAULT '',
+    proximity_tier  TEXT    NOT NULL DEFAULT '',
+    cue_present     INTEGER NOT NULL DEFAULT 0,
+    up_count        INTEGER NOT NULL DEFAULT 0,
+    down_count      INTEGER NOT NULL DEFAULT 0,
+    net_score       REAL    NOT NULL DEFAULT 0.0,
+    updated_at      INTEGER NOT NULL
+);
 
 -- Schema version tracking.
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -559,6 +647,85 @@ CREATE INDEX IF NOT EXISTS idx_notes_parent_urn    ON notes(parent_urn)   WHERE 
     updated_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_prop_schemas_position ON prop_schemas(position ASC);`,
+
+	// v14: paragraph role system — four new tables + paragraph_head_seq column on notes.
+	// ALTER TABLE is handled idempotently by ensureParagraphQueueColumn (called as
+	// a pre-step in runMigrations). Only the CREATE TABLE/INDEX statements live here.
+	`CREATE TABLE IF NOT EXISTS note_paragraphs (
+    id                  TEXT    PRIMARY KEY,
+    note_urn            TEXT    NOT NULL,
+    project_urn         TEXT    NOT NULL DEFAULT '',
+    folder_urn          TEXT    NOT NULL DEFAULT '',
+    sequence            INTEGER NOT NULL,
+    position            INTEGER NOT NULL,
+    line_start          INTEGER NOT NULL,
+    line_end            INTEGER NOT NULL,
+    text                TEXT    NOT NULL,
+    role                TEXT    NOT NULL DEFAULT 'claim',
+    main_concepts       TEXT    NOT NULL DEFAULT '[]',
+    supporting_concepts TEXT    NOT NULL DEFAULT '[]',
+    concept_families    TEXT    NOT NULL DEFAULT '[]',
+    created_at          INTEGER NOT NULL,
+    updated_at          INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_paragraphs_note
+    ON note_paragraphs(note_urn, position ASC);
+CREATE INDEX IF NOT EXISTS idx_paragraphs_project
+    ON note_paragraphs(project_urn, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_paragraphs_folder
+    ON note_paragraphs(folder_urn, created_at DESC)
+    WHERE folder_urn != '';
+CREATE TABLE IF NOT EXISTS paragraph_relations (
+    id                  TEXT    PRIMARY KEY,
+    source_paragraph_id TEXT    NOT NULL,
+    target_paragraph_id TEXT    NOT NULL,
+    note_urn_source     TEXT    NOT NULL,
+    note_urn_target     TEXT    NOT NULL,
+    project_urn_source  TEXT    NOT NULL DEFAULT '',
+    project_urn_target  TEXT    NOT NULL DEFAULT '',
+    folder_urn_source   TEXT    NOT NULL DEFAULT '',
+    folder_urn_target   TEXT    NOT NULL DEFAULT '',
+    proximity_tier      TEXT    NOT NULL DEFAULT 'same_doc',
+    relation_type       TEXT    NOT NULL,
+    score               REAL    NOT NULL DEFAULT 0,
+    reason_signals      TEXT    NOT NULL DEFAULT '[]',
+    pattern_hash        TEXT    NOT NULL DEFAULT '',
+    version             TEXT    NOT NULL DEFAULT 'heuristic_v1',
+    feedback_vote       TEXT,
+    feedback_at         INTEGER,
+    created_at          INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_para_relations_source
+    ON paragraph_relations(source_paragraph_id, score DESC);
+CREATE INDEX IF NOT EXISTS idx_para_relations_note_source
+    ON paragraph_relations(note_urn_source, score DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_para_relations_pair
+    ON paragraph_relations(source_paragraph_id, target_paragraph_id, relation_type);
+CREATE TABLE IF NOT EXISTS paragraph_weights (
+    id                  INTEGER PRIMARY KEY CHECK (id = 1),
+    w_proximity_tier    REAL    NOT NULL DEFAULT 0.20,
+    w_role_pair         REAL    NOT NULL DEFAULT 0.25,
+    w_overlap           REAL    NOT NULL DEFAULT 0.20,
+    w_cue               REAL    NOT NULL DEFAULT 0.20,
+    w_pattern           REAL    NOT NULL DEFAULT 0.15,
+    tier_same_doc       REAL    NOT NULL DEFAULT 1.00,
+    tier_same_folder    REAL    NOT NULL DEFAULT 0.75,
+    tier_same_project   REAL    NOT NULL DEFAULT 0.50,
+    tier_global         REAL    NOT NULL DEFAULT 0.25,
+    updated_at          INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS paragraph_pattern_scores (
+    pattern_hash    TEXT    PRIMARY KEY,
+    role_a          TEXT    NOT NULL DEFAULT '',
+    role_b          TEXT    NOT NULL DEFAULT '',
+    relation_type   TEXT    NOT NULL DEFAULT '',
+    proximity_tier  TEXT    NOT NULL DEFAULT '',
+    cue_present     INTEGER NOT NULL DEFAULT 0,
+    up_count        INTEGER NOT NULL DEFAULT 0,
+    down_count      INTEGER NOT NULL DEFAULT 0,
+    net_score       REAL    NOT NULL DEFAULT 0.0,
+    updated_at      INTEGER NOT NULL
+);`,
 }
 
 // applySchema creates all tables/indexes on a fresh DB and seeds meta rows.
@@ -633,6 +800,13 @@ func runMigrations(ctx context.Context, db *sql.DB, appliedVersion int) error {
 		if version == 12 {
 			if err := ensureSnipColumns(ctx, db); err != nil {
 				return fmt.Errorf("sqlite schema: migration %d pre-step: %w", version, err)
+			}
+		}
+
+		// Pre-step for v14: add paragraph_head_seq column if not present.
+		if version == 14 {
+			if err := ensureParagraphQueueColumn(db); err != nil {
+				return fmt.Errorf("runMigrations: pre-v14: %w", err)
 			}
 		}
 
@@ -770,6 +944,37 @@ func ensurePairKeyColumn(ctx context.Context, db *sql.DB) error {
 		`ALTER TABLE candidate_relations ADD COLUMN pair_key TEXT NOT NULL DEFAULT ''`)
 	if err != nil {
 		return fmt.Errorf("alter table add pair_key: %w", err)
+	}
+	return nil
+}
+
+// ensureParagraphQueueColumn adds paragraph_head_seq to the notes table when
+// it does not already exist. Called as a pre-step in runMigrations for v14.
+func ensureParagraphQueueColumn(db *sql.DB) error {
+	const col = "paragraph_head_seq"
+	rows, err := db.Query(`PRAGMA table_info(notes)`)
+	if err != nil {
+		return fmt.Errorf("ensureParagraphQueueColumn: pragma: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull, pk int
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &dflt, &pk); err != nil {
+			continue
+		}
+		if name == col {
+			return nil // already present
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("ensureParagraphQueueColumn: scan: %w", err)
+	}
+	_, err = db.Exec(`ALTER TABLE notes ADD COLUMN paragraph_head_seq INTEGER NOT NULL DEFAULT -1`)
+	if err != nil {
+		return fmt.Errorf("ensureParagraphQueueColumn: alter table: %w", err)
 	}
 	return nil
 }

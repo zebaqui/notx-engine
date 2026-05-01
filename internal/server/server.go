@@ -62,7 +62,7 @@ func New(
 	}
 
 	// ── Build service engine ─────────────────────────────────────────────────
-	eng := service.New(r, projRepo, contextRepo, linkRepo, propRepo, cfg.DefaultPageSize, cfg.MaxPageSize)
+	eng := service.New(r, projRepo, contextRepo, linkRepo, propRepo, nil, cfg.DefaultPageSize, cfg.MaxPageSize)
 
 	// ── Build HTTP handler (talks directly to the service layer) ─────────────
 	if cfg.EnableHTTP {
@@ -76,6 +76,7 @@ func New(
 			log,
 			plugins,
 			eng.Props,
+			nil,
 		)
 	}
 

@@ -14,7 +14,7 @@ import (
 //
 // Example (embedded use without HTTP or gRPC):
 //
-//	eng := service.New(noteRepo, projRepo, ctxRepo, linkRepo, propRepo, 0, 0)
+//	eng := service.New(noteRepo, projRepo, ctxRepo, linkRepo, propRepo, nil, 0, 0)
 //	note, events, err := eng.Notes.Get(ctx, urn)
 type Engine struct {
 	// Notes handles note lifecycle, event history, content search, and snip hooks.
@@ -37,6 +37,11 @@ type Engine struct {
 	// Props handles prop schema CRUD.
 	// Nil when no PropSchemaRepo is provided.
 	Props PropService
+
+	// Paragraphs handles the paragraph role graph: classification, relations,
+	// feedback, and weight management.
+	// Nil when no ParagraphRepository is provided.
+	Paragraphs ParagraphService
 }
 
 // New constructs an Engine from the provided repositories.
@@ -52,6 +57,7 @@ func New(
 	context repo.ContextRepository,
 	links repo.LinkRepository,
 	props repo.PropSchemaRepo,
+	paragraphs repo.ParagraphRepository,
 	defaultPage, maxPage int,
 ) *Engine {
 	e := &Engine{}
@@ -71,6 +77,9 @@ func New(
 	}
 	if props != nil {
 		e.Props = newPropService(props)
+	}
+	if paragraphs != nil {
+		e.Paragraphs = newParagraphService(paragraphs, defaultPage, maxPage)
 	}
 
 	return e
