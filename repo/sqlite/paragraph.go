@@ -572,11 +572,24 @@ func (p *Provider) ResetGraph(ctx context.Context) error {
 
 // ParagraphRunnerConfig controls the background paragraph processing runner.
 type ParagraphRunnerConfig struct {
-	PollInterval      time.Duration // default: 30s
-	SameDocWindowSize int           // look-ahead/behind within same note (default: 3)
-	CrossDocEnabled   bool          // Phase 2 flag — false for MVP
-	TopN              int           // max relations per paragraph to keep (default: 3)
-	MinScore          float64       // minimum score threshold (default: 0.55)
+	// PollInterval is how often the runner checks for unprocessed notes.
+	PollInterval time.Duration // default: 30s
+	// SameDocWindowSize is the look-ahead/behind within the same note.
+	SameDocWindowSize int // default: 3
+	// CrossDocEnabled enables cross-note scoring (Phase 2 — disabled for SQLite MVP).
+	CrossDocEnabled bool
+	// TopN is the maximum number of relations to keep per source paragraph.
+	TopN int // default: 3
+	// MinScore is the minimum score threshold for same-doc relations.
+	MinScore float64 // default: 0.55
+	// CrossDocMinScore is the minimum score threshold for cross-doc relations.
+	// Lower than MinScore because cross-doc tier multipliers reduce max achievable scores.
+	CrossDocMinScore float64 // default: 0.20
+	// MinNoteOverlap is the minimum Jaccard similarity between two notes' concept
+	// sets required before paragraph-level cross-doc scoring is attempted.
+	// Prevents unrelated notes (e.g. French vocabulary vs. penguin biology)
+	// from generating spurious cross-doc relations.
+	MinNoteOverlap float64 // default: 0.05
 }
 
 // DefaultParagraphRunnerConfig returns spec-recommended defaults.
@@ -587,6 +600,8 @@ func DefaultParagraphRunnerConfig() ParagraphRunnerConfig {
 		CrossDocEnabled:   false,
 		TopN:              3,
 		MinScore:          0.55,
+		CrossDocMinScore:  0.20,
+		MinNoteOverlap:    0.05,
 	}
 }
 
@@ -609,6 +624,12 @@ func StartParagraphRunner(
 	}
 	if cfg.MinScore == 0 {
 		cfg.MinScore = 0.55
+	}
+	if cfg.CrossDocMinScore == 0 {
+		cfg.CrossDocMinScore = 0.20
+	}
+	if cfg.MinNoteOverlap == 0 {
+		cfg.MinNoteOverlap = 0.05
 	}
 	go runParagraphRunner(ctx, db, writeFn, cfg)
 }

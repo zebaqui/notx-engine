@@ -212,12 +212,14 @@ var conceptFamilySeed = map[string]string{
 var nonAlpha = regexp.MustCompile(`[^a-z0-9\s]`)
 
 // NormalizeConcept lowercases s, strips non-alphanumeric characters, and trims
-// whitespace. Returns "" for stop words and single-character tokens.
+// whitespace. Returns "" for stop words and tokens shorter than 3 characters.
+// The 3-char minimum filters noise like "il", "va", "au", "hi", "tu" etc.
+// that appear in multilingual content and create false cross-doc relations.
 func NormalizeConcept(s string) string {
 	s = strings.ToLower(strings.TrimSpace(s))
 	s = nonAlpha.ReplaceAllString(s, "")
 	s = strings.TrimSpace(s)
-	if len(s) <= 1 || stopWords[s] {
+	if len(s) < 3 || stopWords[s] {
 		return ""
 	}
 	return s
