@@ -53,6 +53,11 @@ type LinkService interface {
 	// RecentBacklinks returns recently created backlinks with optional filters.
 	RecentBacklinks(ctx context.Context, opts repo.RecentBacklinksOptions) ([]repo.BacklinkRecord, error)
 
+	// RelabelLinks finds all source notes whose frontmatter `links:` block has an
+	// entry label==oldLabel pointing to targetURN, and renames that label to
+	// newLabel. Returns the list of source note URNs that were updated.
+	RelabelLinks(ctx context.Context, targetURN, oldLabel, newLabel string) ([]string, error)
+
 	// ── External links ────────────────────────────────────────────────────────
 
 	// UpsertExternalLink creates or updates an external link from a note to a URI.
@@ -178,6 +183,19 @@ func (s *linkService) GetReferrers(ctx context.Context, targetURN, anchorID stri
 
 func (s *linkService) RecentBacklinks(ctx context.Context, opts repo.RecentBacklinksOptions) ([]repo.BacklinkRecord, error) {
 	return s.repo.RecentBacklinks(ctx, opts)
+}
+
+func (s *linkService) RelabelLinks(ctx context.Context, targetURN, oldLabel, newLabel string) ([]string, error) {
+	if targetURN == "" {
+		return nil, fmt.Errorf("%w: targetURN is required", ErrInvalidInput)
+	}
+	if oldLabel == "" {
+		return nil, fmt.Errorf("%w: oldLabel is required", ErrInvalidInput)
+	}
+	if newLabel == "" {
+		return nil, fmt.Errorf("%w: newLabel is required", ErrInvalidInput)
+	}
+	return s.repo.RelabelLinks(ctx, targetURN, oldLabel, newLabel)
 }
 
 // ── External links ────────────────────────────────────────────────────────────

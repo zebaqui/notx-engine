@@ -28,15 +28,17 @@ import (
 // All business logic is delegated to service interfaces — the HTTP layer is a
 // pure translation layer: decode JSON → call service method → encode JSON.
 type Handler struct {
-	cfg          *config.Config
-	noteSvc      service.NoteService
-	projSvc      service.ProjectService
-	folderSvc    service.FolderService
-	contextSvc   service.ContextService // optional; nil when context not wired
-	linkSvc      service.LinkService    // optional; nil when links not wired
-	plugins      []snip.SnipPlugin
-	propSvc      service.PropService      // optional; nil when props not wired
-	paragraphSvc service.ParagraphService // optional; nil when not wired
+	cfg              *config.Config
+	noteSvc          service.NoteService
+	projSvc          service.ProjectService
+	folderSvc        service.FolderService
+	contextSvc       service.ContextService // optional; nil when context not wired
+	linkSvc          service.LinkService    // optional; nil when links not wired
+	plugins          []snip.SnipPlugin
+	propSvc          service.PropService         // optional; nil when props not wired
+	paragraphSvc     service.ParagraphService    // optional; nil when not wired
+	noteAnalysisRepo    repo.NoteAnalysisRepository    // optional; nil when not wired
+	noteContentTypeRepo repo.NoteContentTypeRepository // optional; nil when not wired
 
 	log    *slog.Logger
 	mux    *http.ServeMux
@@ -183,6 +185,11 @@ func (h *Handler) routes() {
 	h.mux.HandleFunc("/v1/paragraph-weights", h.withMiddleware(h.routeParagraphWeights))
 	h.mux.HandleFunc("/v1/paragraph-graph/rebuild", h.withMiddleware(h.handleParagraphRebuild))
 
+	// Note-level analysis and relationships
+	h.mux.HandleFunc("/v1/note-analyses", h.withMiddleware(h.handleNoteAnalyses))
+	h.mux.HandleFunc("/v1/note-relations", h.withMiddleware(h.handleNoteRelations))
+	h.mux.HandleFunc("/v1/note-relations/", h.withMiddleware(h.handleNoteRelationsForNote))
+
 	// Links — anchors, backlinks, external links
 	h.mux.HandleFunc("/v1/links/anchors", h.withMiddleware(h.routeLinkAnchors))
 	h.mux.HandleFunc("/v1/links/anchors/", h.withMiddleware(h.routeLinkAnchor))
@@ -191,11 +198,24 @@ func (h *Handler) routes() {
 	h.mux.HandleFunc("/v1/links/outbound", h.withMiddleware(h.routeLinkOutbound))
 	h.mux.HandleFunc("/v1/links/referrers", h.withMiddleware(h.routeLinkReferrers))
 	h.mux.HandleFunc("/v1/links/external", h.withMiddleware(h.routeLinkExternal))
+	h.mux.HandleFunc("/v1/links/relabel", h.withMiddleware(h.handleRelabelLinks))
 }
 
 // Mux returns the HTTP mux so plugins can register their routes.
 func (h *Handler) Mux() *http.ServeMux {
 	return h.mux
+}
+
+// WithNoteAnalysisRepo sets the note analysis repository on the handler.
+// Call this after New() to wire up the note analysis endpoints.
+func (h *Handler) WithNoteAnalysisRepo(r repo.NoteAnalysisRepository) {
+	h.noteAnalysisRepo = r
+}
+
+// WithNoteContentTypeRepo sets the note content-type repository on the handler.
+// Call this after New() to enable engineKind hydration on list-notes responses.
+func (h *Handler) WithNoteContentTypeRepo(r repo.NoteContentTypeRepository) {
+	h.noteContentTypeRepo = r
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

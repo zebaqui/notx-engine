@@ -79,6 +79,7 @@ type Provider struct {
 	inferenceCh        chan<- string      // channel to send note URNs for metadata inference
 	inferenceCtxCancel context.CancelFunc // cancels the inference runner goroutine
 	paragraphCtxCancel context.CancelFunc // cancels the paragraph runner goroutine
+	noteCtxCancel      context.CancelFunc // cancels the note analysis runner goroutine
 	burstCfg           core.BurstConfig   // burst extraction config
 }
 
@@ -119,6 +120,11 @@ func New(dataDir string, rebuild func(ctx context.Context, notesDir string, db *
 	p.paragraphCtxCancel = paragraphCancel
 	StartParagraphRunner(paragraphCtx, p.db, p.write, DefaultParagraphRunnerConfig())
 
+	// Start the background note analysis runner goroutine.
+	noteCtx, noteCancel := context.WithCancel(context.Background())
+	p.noteCtxCancel = noteCancel
+	StartNoteRunner(noteCtx, p.db, p.write, DefaultNoteRunnerConfig())
+
 	return p, nil
 }
 
@@ -131,6 +137,9 @@ func (p *Provider) Close() error {
 	p.closeOnce.Do(func() {
 		if p.paragraphCtxCancel != nil {
 			p.paragraphCtxCancel()
+		}
+		if p.noteCtxCancel != nil {
+			p.noteCtxCancel()
 		}
 		if p.scorerCtxCancel != nil {
 			p.scorerCtxCancel()
@@ -534,6 +543,12 @@ func (p *Provider) AppendEvent(ctx context.Context, event *core.Event, opts repo
 		return err
 	}
 	noteURN := event.NoteURN.String()
+
+	// Capture old and new content outside the write callback so the async
+	// link-sync goroutine can reference them after the write is committed.
+	var capturedOldContent string
+	var capturedNewContent string
+
 	err := p.write(func(db *sql.DB) error {
 		var headSeq int
 		var noteTypeStr string
@@ -574,7 +589,9 @@ func (p *Provider) AppendEvent(ctx context.Context, event *core.Event, opts repo
 		if noteType == core.NoteTypeNormal {
 			var currentContent string
 			_ = db.QueryRow(`SELECT content FROM note_content WHERE urn=?`, noteURN).Scan(&currentContent)
+			capturedOldContent = currentContent // capture before applying entries
 			newContent := applyEntriesToContent(currentContent, event.Entries)
+			capturedNewContent = newContent // capture after applying entries
 			_, err = db.Exec(
 				`INSERT INTO note_content(urn, content) VALUES(?, ?)
 				 ON CONFLICT(urn) DO UPDATE SET content=excluded.content`,
@@ -588,7 +605,7 @@ func (p *Provider) AppendEvent(ctx context.Context, event *core.Event, opts repo
 				 ON CONFLICT(urn) DO UPDATE SET body=excluded.body`,
 				noteURN, event.Label, newContent,
 			)
-			// ── Context graph: burst extraction and candidate detection ────────
+			// ── Context graph: burst extraction and candidate detection ───────────────────
 			// This runs inside the write goroutine, after FTS update, before commit.
 			// Errors are logged and suppressed — never propagate to the caller.
 			p.extractBurstsForEvent(db, event, newContent)
@@ -614,6 +631,19 @@ func (p *Provider) AppendEvent(ctx context.Context, event *core.Event, opts repo
 	})
 	if err != nil {
 		return err
+	}
+
+	// Sync anchors/links from frontmatter and cascade any title change.
+	// Both run asynchronously and best-effort — errors never reach the caller.
+	if capturedNewContent != "" {
+		capturedURN := noteURN
+		oldC := capturedOldContent
+		newC := capturedNewContent
+		go func() {
+			bgCtx := context.Background()
+			p.syncLinksFromFrontmatter(bgCtx, capturedURN, newC)
+			p.cascadeTitleChange(bgCtx, capturedURN, oldC, newC)
+		}()
 	}
 
 	return nil

@@ -78,6 +78,10 @@ func New(
 			eng.Props,
 			nil,
 		)
+		// Wire note analysis repo if the underlying provider supports it.
+		if nar, ok := r.(repo.NoteAnalysisRepository); ok {
+			s.httpHandler.WithNoteAnalysisRepo(nar)
+		}
 	}
 
 	// ── Build gRPC server (thin proto adapters over the service layer) ────────

@@ -10,19 +10,20 @@ A position (line and character range) is how you _stamp_ an ID onto a specific p
 
 This document defines:
 
-1. How IDs are declared inside a `.notx` file (the header anchor table)
+1. How IDs are declared inside a `.notx` file (the frontmatter anchor table)
 2. The two internal link tokens: `notx:lnk:id` (cross-note) and `notx:lnk:id::` (same-note)
 3. The external link token: `world:lnk:uri`
-4. How the engine detects when an edit may break an existing ID reference
-5. Resolution semantics, validation, and the implementation checklist
+4. How named outbound links (`links:`) are declared in frontmatter
+5. How the engine detects when an edit may break an existing ID reference
+6. Resolution semantics, validation, and the implementation checklist
 
 ---
 
 ## Design Principles
 
 1. **IDs only, no positional links exposed** — `notx:lnk:line` is not a reference type authors use. Line and character information belongs to the _declaration_ of an ID, not to links between notes.
-2. **Declarations live in the file header** — Every `.notx` file owns an anchor table in its metadata header. This makes IDs discoverable without replaying the full event stream.
-3. **Positions are tracked, not assumed** — When content is edited, the engine updates anchor positions in the header. A position is a best-effort hint for UI scroll/highlight; the ID itself is what is stored in links.
+2. **Declarations live in frontmatter** — Every `.notx` file (or Markdown note) declares its anchors and named outbound links in YAML frontmatter at the top of the file, between `---` delimiters. This makes IDs discoverable without replaying the full event stream.
+3. **Positions are tracked, not assumed** — When content is edited, the engine updates anchor positions in the frontmatter. A position is a best-effort hint for UI scroll and highlight; the ID itself is what is stored in links.
 4. **Break detection is a first-class concern** — When an edit touches a region covered by an ID, the engine warns the author that existing references may be affected, and offers resolution paths.
 5. **Federated by default** — Cross-note links use the full note URN, so remote references work identically to local ones.
 6. **Graceful degradation** — If an ID cannot be found (note moved, anchor deleted), the renderer shows the raw token rather than crashing.
@@ -31,34 +32,45 @@ This document defines:
 
 ## Part 1 — ID Declaration
 
-### The Anchor Table
+### The `anchors:` Block in Frontmatter
 
-Every `.notx` file may contain an **anchor table** in its metadata header. The anchor table lives between the standard header fields and the event stream. It is a sequence of `# anchor:` lines, one per declared ID.
-
-```
-# notx/1.0
-# note_urn:      urn:notx:note:01HZX3K8J9X2M4P7R8T1Y6ZQ
-# name:          API Gateway Design
-# created_at:    2025-01-15T09:00:00Z
-# head_sequence: 12
-#
-# anchor: intro        line:1  char:0-0
-# anchor: auth-flow    line:6  char:5-7
-# anchor: req-001      line:14 char:0-0
-# anchor: node-reject  line:22 char:0-43
-```
-
-### Anchor Line Format
+Every `.notx` file (or Markdown note) may declare an **anchor table** in its YAML frontmatter. Frontmatter is the block at the very top of the file delimited by `---` lines. Alongside the standard metadata fields (`id`, `title`, etc.), the frontmatter contains an `anchors:` list — one item per declared ID — and an optional `links:` list of named outbound links.
 
 ```
-# anchor: <id>  line:<L>  char:<start>-<end>
+---
+id: post-001
+title: API Gateway Design
+anchors:
+  - intro line:1 char:0-0
+  - auth-flow line:6 char:5-7
+  - req-001 line:14 char:0-0
+  - node-reject line:22 char:0-43
+links:
+  - auth-decision=notx:lnk:id:urn:notx:note:01HZFLOWCHART123456:node-decision
+  - rejection-path=notx:lnk:id:urn:notx:note:01HZFLOWCHART123456:node-reject
+  - external-rfc=world:lnk:uri:https://www.rfc-editor.org/rfc/rfc9110
+---
 ```
 
-| Field          | Description                                                                                                                                         |
-| -------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `<id>`         | The anchor identifier. Lowercase alphanumeric, hyphens, underscores. `[a-z0-9_-]+`. Max 128 chars. Unique within the file.                          |
-| `line:<L>`     | 1-based line number in the note's **current materialized state** at the time of last update.                                                        |
-| `char:<S>-<E>` | 0-based inclusive character range on that line. `0-0` means the entire line (no specific range). A genuine single character at position 5 is `5-5`. |
+The frontmatter block is the **canonical, mutable metadata zone** for a note. Anchors are declared and updated here. The note body (everything after the closing `---`) is referred to as the **materialized body**, and all `line:` numbers in anchor items are 1-based line numbers within that body.
+
+### Anchor Item Format
+
+Each item in the `anchors:` list is a single string with space-separated fields:
+
+```
+<id>  line:<L>  char:<S>-<E>  [status:<status>]  [preview:<text>]
+```
+
+#### Field Reference
+
+| Field             | Description                                                                                                                                                                  |
+| ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `<id>`            | The anchor identifier. Lowercase alphanumeric, hyphens, underscores. Pattern: `[a-z0-9_-]+`. Max 128 characters. Must be unique within the note.                             |
+| `line:<L>`        | 1-based line number in the note's **materialized body** (the content after the closing `---` of the frontmatter block) at the time of last update.                           |
+| `char:<S>-<E>`    | 0-based inclusive character range on that line. `0-0` means the entire line (no specific sub-line range). A single character at position 5 is `5-5`. Must satisfy `S <= E`.  |
+| `status:<status>` | Optional. Omitted when the anchor is nominal (`ok`). Present only when `broken` or `deprecated`. See the status table in Part 4.                                             |
+| `preview:<text>`  | Optional. The text of the anchored span at last index time. Extends to the end of the item string (may contain spaces). Used by renderers as a tooltip and by the lint tool. |
 
 ### What "char range" means
 
@@ -70,19 +82,19 @@ The character range lets you pin an ID to a sub-line span. This is useful for:
 
 When `char:0-0` is used, the ID covers the whole line. This is the default for section headings, flowchart node lines, and any case where the full line is the logical unit.
 
-### Declaring an ID
+### How to Declare an Anchor
 
-An ID is declared by adding an `# anchor:` line to the header. This is done:
+An anchor is declared by adding an item to the `anchors:` list in frontmatter. This is done:
 
-- **By the editor/UI** — when the user selects a range of text and assigns it an ID (via a "Create anchor" action)
+- **By the editor/UI** — when the user selects a range of text and assigns it an ID via a "Create anchor" action. The editor appends an item to the `anchors:` list and saves the frontmatter.
 - **By the CLI** — `notx anchor add <note-urn> <id> --line <L> --char <S>-<E>`
-- **By the engine automatically** — for structured note types that have well-known anchor positions (e.g., every node in a flowchart note)
+- **By the engine automatically** — for structured note types that have well-known anchor positions (e.g., every node in a flowchart note is anchored automatically on creation)
 
-The act of adding an anchor line to the header does **not** modify the event stream. The header is a mutable metadata zone; anchors are updated in-place there. The event stream remains append-only and unaffected.
+The act of adding an anchor item to the frontmatter does **not** modify the note body. The frontmatter is a mutable metadata zone; anchors are updated in-place there. The note body and any underlying event stream remain unaffected.
 
 ### Example: Flowchart Note
 
-Given a flowchart note whose materialized content looks like this:
+Given a flowchart note whose materialized body (after the frontmatter block) looks like this:
 
 ```
 1  | [Start]
@@ -94,31 +106,40 @@ Given a flowchart note whose materialized content looks like this:
 7  | [Reject] --> [Return 401]
 ```
 
-The anchor table in the header would be:
+The complete frontmatter for this note would be:
 
 ```
-# anchor: node-start     line:1  char:0-0
-# anchor: node-auth      line:3  char:0-0
-# anchor: node-decision  line:3  char:0-0
-# anchor: node-process   line:4  char:0-0
-# anchor: node-reject    line:5  char:0-0
-# anchor: node-ok        line:6  char:0-0
-# anchor: node-fail      line:7  char:0-0
+---
+id: flowchart-001
+title: Auth Flow
+anchors:
+  - node-start line:1 char:0-0
+  - node-auth line:2 char:0-0
+  - node-decision line:3 char:0-0
+  - node-process line:4 char:0-0
+  - node-reject line:5 char:0-0
+  - node-ok line:6 char:0-0
+  - node-fail line:7 char:0-0
+---
 ```
 
-Any other note can now link to `node-reject` in this flowchart with a stable ID that will not break when lines are inserted above or below it — because the engine updates the `line:` hint in the header on each edit.
+Any other note can now link to `node-reject` in this flowchart with a stable ID that will not break when lines are inserted above or below it — because the engine updates the `line:` hint in the frontmatter on each edit.
 
 ### Example: Sub-line ID in a Paragraph
+
+Given a note body where line 14 reads:
 
 ```
 14 | The system MUST authenticate all requests (see RFC 9110 §4.2) before forwarding.
 ```
 
-To pin the ID `req-auth` to just the word "authenticate" (characters 18–28):
+To pin the anchor `req-auth` to just the word "authenticate" (characters 18–28), the frontmatter anchor item is:
 
 ```
-# anchor: req-auth  line:14  char:18-28
+- req-auth line:14 char:18-28 preview:authenticate
 ```
+
+The `preview:` field is optional but recommended — it helps the lint tool verify that the anchored text has not silently changed.
 
 ---
 
@@ -138,7 +159,7 @@ There are three link token types. All follow the envelope:
 | `notx:lnk:id::<anchor-id>`           | Named anchor in the same note (self-reference) |
 | `world:lnk:uri:<uri>`                | External resource at the given URI             |
 
-There is no `notx:lnk:line` token for use in links. Line numbers are only written inside the header anchor table by the engine. Authors and agents always use IDs.
+There is no `notx:lnk:line` token for use in links. Line numbers are only written inside the frontmatter `anchors:` list by the engine. Authors and agents always use IDs.
 
 ---
 
@@ -150,10 +171,10 @@ There is no `notx:lnk:line` token for use in links. Line numbers are only writte
 notx:lnk:id:<note-urn>:<anchor-id>
 ```
 
-| Segment       | Description                                                     |
-| ------------- | --------------------------------------------------------------- |
-| `<note-urn>`  | Full URN of the target note: `urn:notx:note:<uuid-v7>`          |
-| `<anchor-id>` | The declared anchor ID in the target note's header anchor table |
+| Segment       | Description                                                             |
+| ------------- | ----------------------------------------------------------------------- |
+| `<note-urn>`  | Full URN of the target note: `urn:notx:note:<uuid-v7>`                  |
+| `<anchor-id>` | The declared anchor ID in the target note's frontmatter `anchors:` list |
 
 #### Examples
 
@@ -172,13 +193,13 @@ notx:lnk:id:urn:notx:note:01HZX3K8J9X2M4P7R8T1Y6ZQ:req-auth
 
 #### Resolution Algorithm
 
-1. Split on `:` to extract `<note-urn>` (four segments: `urn`, `notx`, `note`, `<id>`) and `<anchor-id>` (everything after the fifth `:`).
+1. Split on `:` to extract `<note-urn>` (four segments: `urn`, `notx`, `note`, `<uuid>`) and `<anchor-id>` (everything after the fifth `:`).
 2. Resolve the note using the standard URN resolution algorithm: local storage → authority field → routing table → remote fetch.
-3. Parse the resolved note's metadata header anchor table.
-4. Find the entry where `id == <anchor-id>` (case-insensitive).
-5. Return the anchor record: `{ id, line, char_start, char_end, preview }`.
+3. Parse the resolved note's frontmatter. Extract the `anchors:` list.
+4. Find the item whose `<id>` field equals `<anchor-id>` (case-insensitive comparison).
+5. Return the anchor record: `{ id, line, char_start, char_end, preview, status }`.
    - `line` and `char` are used by the renderer for scroll and highlight; they are not part of the link's identity.
-6. If the anchor is not found in the header, materialize note content and do a full scan as a fallback (for notes written before the anchor table existed).
+6. If the anchor is not found in the frontmatter, materialize note content and do a full scan as a fallback (for notes written before the frontmatter anchor format existed).
 
 ---
 
@@ -190,7 +211,7 @@ notx:lnk:id:urn:notx:note:01HZX3K8J9X2M4P7R8T1Y6ZQ:req-auth
 notx:lnk:id::<anchor-id>
 ```
 
-The double colon (`::`) signals a self-reference. The resolver fills in the current note's URN automatically. This is syntactic sugar for `notx:lnk:id:<current-note-urn>:<anchor-id>` — it is expanded to the full form before storage in `node_links` or backlink records.
+The double colon (`::`) signals a self-reference. The resolver fills in the current note's URN automatically. This is syntactic sugar for `notx:lnk:id:<current-note-urn>:<anchor-id>` — it is expanded to the full form before storage in the frontmatter `links:` block or backlink records.
 
 #### Examples
 
@@ -239,7 +260,53 @@ world:lnk:uri:mailto:team@example.com
 
 ---
 
-## Part 3 — Break Detection and Editor Semantics
+## Part 3 — Named Outbound Links (`links:` in Frontmatter)
+
+The `links:` list in frontmatter is a **named map of outbound links** for the note. It is the frontmatter-based equivalent of the legacy `node_links` field on the note object. Each item assigns a human-readable label to a fully resolved link token.
+
+### Format
+
+```
+<label>=<token>
+```
+
+| Segment   | Description                                                                        |
+| --------- | ---------------------------------------------------------------------------------- |
+| `<label>` | A short alphanumeric label for this link. Pattern: `[a-z0-9_-]+`. Unique per note. |
+| `<token>` | A fully expanded link token: one of the three token types defined in Part 2.       |
+
+### Example
+
+```yaml
+links:
+  - auth-decision=notx:lnk:id:urn:notx:note:01HZFLOWCHART123456:node-decision
+  - rejection-path=notx:lnk:id:urn:notx:note:01HZFLOWCHART123456:node-reject
+  - external-rfc=world:lnk:uri:https://www.rfc-editor.org/rfc/rfc9110
+```
+
+### Self-Reference Expansion
+
+Self-reference tokens (`notx:lnk:id::`) are **expanded to their full form** before storage in the `links:` list. The engine replaces the `::` shorthand with the current note's URN at the time the link is written. This means the `links:` block always contains portable, fully qualified tokens — a reader of the file never needs to know which note they are looking at to resolve a link in the `links:` block.
+
+**Before storage (what the author types):**
+
+```yaml
+links:
+  - self-ref=notx:lnk:id::node-decision
+```
+
+**After engine expansion (what is written to frontmatter):**
+
+```yaml
+links:
+  - self-ref=notx:lnk:id:urn:notx:note:01HZFLOWCHART123456:node-decision
+```
+
+The expanded form is also what gets stored in the server-side backlink index (see Part 5).
+
+---
+
+## Part 4 — Break Detection and Editor Semantics
 
 This is the most critical operational concern for a link system built on IDs that track positions.
 
@@ -247,27 +314,27 @@ This is the most critical operational concern for a link system built on IDs tha
 
 An edit **may break** an existing ID reference when:
 
-1. The edited event **deletes or replaces** a line that is currently pointed to by one or more `# anchor:` entries.
-2. The edited event **modifies a line** and the change falls inside a sub-line character range (`char:<S>-<E>`) declared for an anchor on that line.
-3. The edited event **inserts or deletes lines above** an anchored line (this does not break the reference — the engine updates the `line:` hint — but it does mean the hint is now stale until the header is refreshed).
+1. The edited content **deletes or replaces** a line that is currently pointed to by one or more `anchors:` items.
+2. The edited content **modifies a line** and the change falls inside a sub-line character range (`char:<S>-<E>`) declared for an anchor on that line.
+3. The edited content **inserts or deletes lines above** an anchored line (this does not break the reference — the engine updates the `line:` hint in frontmatter — but it does mean the hint is stale until the frontmatter is refreshed).
 
-Cases 1 and 2 are **hard breaks** — the content the ID was pointing to is gone or changed beyond recognition. Case 3 is a **soft drift** — the ID is still valid, just at a different line.
+Cases 1 and 2 are **hard breaks** — the content the ID was pointing to is gone or changed beyond recognition. Case 3 is a **soft drift** — the ID is still valid, just at a different line number.
 
 ### Engine Behavior on Edit
 
-When a new event is appended to a `.notx` file, the engine runs **anchor impact analysis** before confirming the write:
+When the body of a `.notx` file is modified, the engine runs **anchor impact analysis** before confirming the write:
 
 #### Step 1 — Compute the delta
 
-From the incoming event's line entries, compute:
+From the incoming edit, compute:
 
-- Which lines are being deleted (`<L>|-`)
-- Which lines are being set to new content (`<L>|<content>`)
+- Which lines are being deleted
+- Which lines are being set to new content
 - How many lines are being inserted (net change in line count)
 
 #### Step 2 — Check each anchor
 
-For every anchor in the current header anchor table:
+For every item in the current `anchors:` list in frontmatter:
 
 | Condition                                                                                     | Classification  | Action                                                                  |
 | --------------------------------------------------------------------------------------------- | --------------- | ----------------------------------------------------------------------- |
@@ -275,7 +342,7 @@ For every anchor in the current header anchor table:
 | Anchor's line content changes AND the char range is `0-0` (whole line)                        | **Hard break**  | Emit a break warning                                                    |
 | Anchor's line content changes AND the new content still contains the original char range text | **Soft change** | Update the anchor's char range if the text shifted; update `line:` hint |
 | Anchor's line content changes AND the char range text is no longer present                    | **Hard break**  | Emit a break warning                                                    |
-| Lines are inserted/deleted above the anchor                                                   | **Drift**       | Update `line:` hint in header; no warning                               |
+| Lines are inserted or deleted above the anchor                                                | **Drift**       | Update `line:` hint in frontmatter; no warning emitted                  |
 
 #### Step 3 — Handle hard breaks
 
@@ -287,7 +354,7 @@ When a hard break is detected, the engine does **not silently proceed**. It retu
   "breaks": [
     {
       "anchor_id": "node-reject",
-      "note_urn": "urn:notx:note:01HZX3K8J9X2M4P7R8T1Y6ZQ",
+      "note_urn": "urn:notx:note:01HZFLOWCHART123456",
       "line": 5,
       "char": "0-0",
       "referrers": [
@@ -325,7 +392,7 @@ Move the anchor to a different line and character range in the same note. The an
 }
 ```
 
-The engine updates the `# anchor:` entry in the header and applies the original edit.
+The engine updates the matching item in the `anchors:` list in frontmatter and applies the original edit.
 
 #### `delete`
 
@@ -338,14 +405,15 @@ Remove the anchor entirely. All existing `notx:lnk:id` references that point to 
 }
 ```
 
-The engine removes the `# anchor:` line from the header, applies the original edit, and adds a tombstone record to the backlink index.
+The engine removes the item from the `anchors:` list in frontmatter, applies the original edit, and adds a tombstone record to the backlink index.
 
 #### `force`
 
-Apply the edit unconditionally without resolving the break. The anchor entry is left in the header but is now stale. The `line:` and `char:` values will no longer match live content. The engine marks the anchor as `status:broken` in the header:
+Apply the edit unconditionally without resolving the break. The anchor item is left in frontmatter but is now stale. The `line:` and `char:` values will no longer match live content. The engine marks the anchor as `status:broken` in the item:
 
-```
-# anchor: node-reject  line:5  char:0-0  status:broken
+```yaml
+anchors:
+  - node-reject line:5 char:0-0 status:broken
 ```
 
 Renderers and the lint tool will surface this as a broken anchor.
@@ -356,33 +424,40 @@ Renderers and the lint tool will surface this as a broken anchor.
 }
 ```
 
-### Header Anchor Update on Drift
+### Frontmatter Anchor Update on Drift
 
-When lines are inserted or deleted **above** an anchored line (no content change to the anchored line itself), the engine automatically updates the `line:` hints in the header as part of the event append. This is transparent to the caller — no warning is emitted, and no resolution is required.
+When lines are inserted or deleted **above** an anchored line (no content change to the anchored line itself), the engine automatically updates the `line:` hints in the `anchors:` list in frontmatter as part of the write. This is transparent to the caller — no warning is emitted, and no resolution is required.
 
+**Before edit (inserting 2 lines above line 5):**
+
+```yaml
+anchors:
+  - node-reject line:5 char:0-0
 ```
-Before edit (inserting 2 lines above line 5):
-# anchor: node-reject  line:5  char:0-0
 
-After edit:
-# anchor: node-reject  line:7  char:0-0
+**After edit:**
+
+```yaml
+anchors:
+  - node-reject line:7 char:0-0
 ```
 
 The anchor ID is unchanged; only the position hint is updated.
 
 ---
 
-## Part 4 — Storage and Indexing
+## Part 5 — Storage and Indexing
 
-### Anchor Table in the Header (Per-File)
+### Anchor Table in Frontmatter (Per-File)
 
-The canonical record of all anchors for a note lives in that note's `.notx` file header. The engine keeps this table up to date on every write.
+The canonical record of all anchors for a note lives in that note's frontmatter `anchors:` list. The engine keeps this list up to date on every write.
 
+```yaml
+anchors:
+  - <id> line:<L> char:<S>-<E> [status:<status>] [preview:<text>]
 ```
-# anchor: <id>  line:<L>  char:<S>-<E>  [status:<status>]
-```
 
-The optional `status` field is only present when non-nominal:
+The optional `status:` field is only present when non-nominal:
 
 | Status       | Meaning                                                                            |
 | ------------ | ---------------------------------------------------------------------------------- |
@@ -412,7 +487,7 @@ CREATE TABLE anchors (
 | ------------ | --------------------------------------------------------------------------------------------------------- |
 | `note_urn`   | The note that owns this anchor                                                                            |
 | `anchor_id`  | The anchor identifier (normalized lowercase)                                                              |
-| `line`       | Current 1-based line number in the materialized note                                                      |
+| `line`       | Current 1-based line number in the materialized note body                                                 |
 | `char_start` | Start of sub-line character range (0-based, inclusive)                                                    |
 | `char_end`   | End of sub-line character range (0-based, inclusive). Equal to `char_start` when covering the whole line. |
 | `preview`    | The text content of the anchored span at last index time                                                  |
@@ -458,27 +533,9 @@ CREATE TABLE external_links (
 
 ---
 
-## Part 5 — The `node_links` Field on the Note Object
-
-The note object's `node_links` field (from `NOTX_URN_SPEC.md`) is a **named map of outbound links** maintained by the engine. Its values are always fully expanded link tokens — never raw line numbers, never positional references.
-
-```json
-{
-  "node_links": {
-    "auth-decision": "notx:lnk:id:urn:notx:note:01HZFLOWCHART123456:node-decision",
-    "rejection-path": "notx:lnk:id:urn:notx:note:01HZFLOWCHART123456:node-reject",
-    "external-rfc": "world:lnk:uri:https://www.rfc-editor.org/rfc/rfc9110"
-  }
-}
-```
-
-Self-reference tokens (`notx:lnk:id::`) are expanded to their full form (`notx:lnk:id:<current-note-urn>:<anchor-id>`) before being stored in `node_links`.
-
----
-
 ## Part 6 — Inline Syntax in Note Content
 
-Link tokens appear verbatim in line content inside the event stream. No special escaping is required — the scheme prefixes (`notx:lnk:`, `world:lnk:`) are unambiguous in plain text.
+Link tokens appear verbatim in the note body (the content after the closing `---` of the frontmatter block). No special escaping is required — the scheme prefixes (`notx:lnk:`, `world:lnk:`) are unambiguous in plain text.
 
 ### Plain token
 
@@ -493,16 +550,24 @@ The rejection path is handled by notx:lnk:id:urn:notx:note:01HZFLOWCHART123456:n
 [RFC 9110](world:lnk:uri:https://www.rfc-editor.org/rfc/rfc9110)
 ```
 
-### Full example event with links
+### Full example note with frontmatter and body links
 
 ```
-3:2025-06-01T14:55:00Z:urn:notx:usr:01932c7b-1b4a-7e3f-9abc-0123456789ab
-->
-1 | Architecture Overview
-2 |
-3 | Requests flow through the [API Gateway](notx:lnk:id:urn:notx:note:01HZFLOWCHART123456:node-start).
-4 | Failed authentication ends at notx:lnk:id:urn:notx:note:01HZFLOWCHART123456:node-reject
-5 | Protocol reference: [RFC 9110](world:lnk:uri:https://www.rfc-editor.org/rfc/rfc9110)
+---
+id: overview-001
+title: Architecture Overview
+anchors:
+  - intro line:1 char:0-0
+links:
+  - gateway=notx:lnk:id:urn:notx:note:01HZFLOWCHART123456:node-start
+  - rejection=notx:lnk:id:urn:notx:note:01HZFLOWCHART123456:node-reject
+  - rfc9110=world:lnk:uri:https://www.rfc-editor.org/rfc/rfc9110
+---
+Architecture Overview
+
+Requests flow through the [API Gateway](notx:lnk:id:urn:notx:note:01HZFLOWCHART123456:node-start).
+Failed authentication ends at notx:lnk:id:urn:notx:note:01HZFLOWCHART123456:node-reject
+Protocol reference: [RFC 9110](world:lnk:uri:https://www.rfc-editor.org/rfc/rfc9110)
 ```
 
 ---
@@ -516,6 +581,8 @@ A link token begins at the first character of its scheme (`n` in `notx:lnk:` or 
 - The first unescaped whitespace character
 - End of line
 - A closing `)` when inside a `[label](token)` wrapper
+
+Tokens appearing in the frontmatter `links:` list are delimited by the `=` separator on the left and end of line on the right.
 
 ### Parsing `notx:lnk:id`
 
@@ -537,19 +604,33 @@ world : lnk : uri : <everything-else>
 
 Everything from segment 4 onward (joined back with `:`) is the URI verbatim. The URI may contain colons (e.g., `https://`, `doi:`).
 
+### Frontmatter Parsing Rules
+
+1. The frontmatter block must begin on line 1 of the file with exactly `---`.
+2. The block ends at the next line containing exactly `---`.
+3. The content between the delimiters is parsed as YAML.
+4. The `anchors:` key maps to a YAML sequence of strings. Each string is parsed according to the anchor item format in Part 1.
+5. The `links:` key maps to a YAML sequence of strings. Each string is split on the first `=` character; everything before `=` is the label, everything after is the token.
+6. Frontmatter parsing errors (malformed YAML, duplicate anchor IDs, invalid token syntax) are reported as file-level diagnostics. A parsing error in frontmatter does not prevent the note body from being rendered.
+7. The note body begins on the line immediately following the closing `---`. All `line:` numbers in anchor items are 1-based relative to this body start line.
+
 ---
 
 ## Part 8 — Validation Rules
 
-| Rule                                                               | Scope                       | On Violation                                             |
-| ------------------------------------------------------------------ | --------------------------- | -------------------------------------------------------- |
-| `<anchor-id>` must match `[a-z0-9_-]+` (case-normalized)           | Declaration and link tokens | Token marked malformed; raw text shown                   |
-| `<anchor-id>` must be unique within a note                         | `# anchor:` header table    | Engine rejects duplicate; writer must use a different ID |
-| `<note-urn>` must be a valid `urn:notx:note:<uuid-v7>`             | `notx:lnk:id`               | Token marked malformed                                   |
-| `<uri>` must be syntactically valid                                | `world:lnk:uri`             | Token marked malformed                                   |
-| `line` must be a positive integer                                  | `# anchor:` table           | File is malformed; parser rejects the anchor entry       |
-| `char:<S>-<E>` must satisfy `S <= E` and both must be non-negative | `# anchor:` table           | File is malformed; parser rejects the anchor entry       |
-| An anchor with `status:broken` must not silently resolve           | Resolution                  | Renderer shows broken-link indicator; lint reports it    |
+| Rule                                                               | Scope                       | On Violation                                                |
+| ------------------------------------------------------------------ | --------------------------- | ----------------------------------------------------------- |
+| `<anchor-id>` must match `[a-z0-9_-]+` (case-normalized)           | Declaration and link tokens | Token marked malformed; raw text shown                      |
+| `<anchor-id>` must be unique within a note                         | `anchors:` frontmatter list | Engine rejects duplicate; writer must use a different ID    |
+| `<note-urn>` must be a valid `urn:notx:note:<uuid-v7>`             | `notx:lnk:id`               | Token marked malformed                                      |
+| `<uri>` must be syntactically valid                                | `world:lnk:uri`             | Token marked malformed                                      |
+| `line` must be a positive integer                                  | `anchors:` frontmatter list | File is malformed; parser rejects the anchor item           |
+| `char:<S>-<E>` must satisfy `S <= E` and both must be non-negative | `anchors:` frontmatter list | File is malformed; parser rejects the anchor item           |
+| `<label>` in `links:` must match `[a-z0-9_-]+`                     | `links:` frontmatter list   | Item marked malformed; skipped by index                     |
+| `<label>` must be unique within the `links:` list                  | `links:` frontmatter list   | Engine rejects duplicate; writer must use a different label |
+| Self-reference tokens in `links:` must be expanded before storage  | `links:` frontmatter list   | Engine expands on write; un-expanded form is not stored     |
+| An anchor with `status:broken` must not silently resolve           | Resolution                  | Renderer shows broken-link indicator; lint reports it       |
+| Frontmatter must be valid YAML                                     | File level                  | File-level diagnostic; note body still rendered             |
 
 ---
 
@@ -561,7 +642,7 @@ Everything from segment 4 onward (joined back with `:`) is the URI verbatim. The
 | -------------- | ----------------------------------------------------------------------------------- |
 | `ok`           | Active hyperlink / clickable element                                                |
 | `drift`        | Link is valid; position hint was updated — no visual indicator needed               |
-| `broken`       | Broken-link indicator (strikethrough or ⚠ icon); tooltip shows last known position |
+| `broken`       | Broken-link indicator (strikethrough or ⚠ icon); tooltip shows last known position  |
 | `deprecated`   | Intentionally deleted anchor; renderer shows "this anchor no longer exists" message |
 | `not_found`    | Anchor ID not in target note at all; distinct from broken — may be a typo           |
 | `malformed`    | Raw token text, no link behavior                                                    |
@@ -613,21 +694,35 @@ For an external link:
 ## Part 11 — API Surface
 
 ```
-# Anchor management
-GET  /v1/notes/:urn/anchors                  → list all anchors declared in this note
-POST /v1/notes/:urn/anchors                  → declare a new anchor (id, line, char)
-PUT  /v1/notes/:urn/anchors/:anchor-id       → reassign anchor to new line/char
-DEL  /v1/notes/:urn/anchors/:anchor-id       → delete anchor (creates tombstone)
-GET  /v1/notes/:urn/anchors/:anchor-id       → resolve a single anchor
+# Anchor management (note-centric)
+GET    /v1/notes/:urn/anchors                → list all anchors for this note
+POST   /v1/notes/:urn/anchors                → declare a new anchor
+PUT    /v1/notes/:urn/anchors/:anchor-id     → reassign anchor position
+DELETE /v1/notes/:urn/anchors/:anchor-id     → delete anchor (tombstone)
+GET    /v1/notes/:urn/anchors/:anchor-id     → get a single anchor
 
-# Link graph
-GET  /v1/notes/:urn/links                    → outbound links from this note
-GET  /v1/notes/:urn/backlinks                → inbound links to this note
-GET  /v1/notes/:urn/backlinks/:anchor-id     → inbound links to a specific anchor
-GET  /v1/notes/:urn/related                  → union of outbound + backlinks
+# Link graph (note-centric)
+GET    /v1/notes/:urn/links                  → outbound links from this note
+GET    /v1/notes/:urn/backlinks              → inbound backlinks to this note
+GET    /v1/notes/:urn/backlinks/:anchor-id   → backlinks to a specific anchor
+
+# Low-level link index endpoints
+GET    /v1/links/anchors?note_urn=...        → list anchors by note URN
+PUT    /v1/links/anchors                     → upsert an anchor record
+GET    /v1/links/anchors/:note_urn/:anchor_id → get one anchor
+DELETE /v1/links/anchors/:note_urn/:anchor_id → delete anchor
+GET    /v1/links/backlinks?target_urn=...    → list inbound backlinks
+GET    /v1/links/backlinks/recent            → recently created backlinks
+PUT    /v1/links/backlinks                   → upsert a backlink
+DELETE /v1/links/backlinks                   → delete a backlink
+GET    /v1/links/outbound?source_urn=...     → outbound links from a note
+GET    /v1/links/referrers?target_urn=...    → referrers to an anchor
+GET    /v1/links/external?source_urn=...     → external links from a note
+PUT    /v1/links/external                    → upsert external link
+DELETE /v1/links/external                    → delete external link
 
 # Resolution
-GET  /v1/resolve?token=<link-token>          → resolve any link token to JSON
+GET    /v1/resolve?token=<link-token>        → resolve any link token to JSON
 ```
 
 ---
@@ -654,19 +749,30 @@ notx lint links   --all                      # project-wide link health check
 ## Quick Reference
 
 ```
-# Declare an anchor in a .notx file header
-# anchor: <id>  line:<L>  char:<S>-<E>
+# Frontmatter block (top of .notx or .md file)
+---
+id: <note-id>
+title: <Note Title>
+anchors:
+  - <id> line:<L> char:<S>-<E>
+  - <id> line:<L> char:<S>-<E> status:broken
+  - <id> line:<L> char:<S>-<E> preview:<anchored text>
+links:
+  - <label>=notx:lnk:id:urn:notx:note:<note-id>:<anchor-id>
+  - <label>=notx:lnk:id::<anchor-id>     (self-reference — expanded before storage)
+  - <label>=world:lnk:uri:<uri>
+---
 
-# Link to an anchor in another note
+# Link to an anchor in another note (in note body)
 notx:lnk:id:urn:notx:note:<note-id>:<anchor-id>
 
-# Link to an anchor in the same note
+# Link to an anchor in the same note (in note body)
 notx:lnk:id::<anchor-id>
 
-# Link to an external resource
+# Link to an external resource (in note body)
 world:lnk:uri:<uri>
 
-# Display-text wrapper (works for all types)
+# Display-text wrapper (works for all token types)
 [Display Text](<token>)
 ```
 
@@ -674,12 +780,13 @@ world:lnk:uri:<uri>
 
 ## Summary of Key Design Decisions
 
-| Decision                                                 | Rationale                                                                                                                                                                                                                                                                            |
-| -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **No `notx:lnk:line` reference type**                    | Line numbers are an internal position hint maintained by the engine. Exposing them as a link type would mean every edit that inserts a line above an anchored line would silently break every reference to it. IDs decouple the reference from the position entirely.                |
-| **Anchor table in the file header**                      | The `.notx` event stream is append-only and immutable. The header is the correct place for mutable, derived metadata like current positions. This keeps the event log clean while still making anchors discoverable without full replay.                                             |
-| **Line and char as hints, not identity**                 | When the anchored content moves due to edits, the engine updates `line:` and `char:` in the header. These are navigation aids for the UI. The `<anchor-id>` is what links store, so the reference is never affected by position drift.                                               |
-| **Hard break detection before write**                    | Silently writing over anchored content would create a class of invisible link rot that is impossible to diagnose. Surfacing breaks at write time — before the event is committed — gives the author an actionable choice rather than a mystery later.                                |
-| **Three resolution options (reassign / delete / force)** | The author knows best. Reassign is the safe path. Delete is intentional cleanup. Force is an escape hatch for cases where the author knows no other notes actually use the anchor yet. Giving the author these options respects their intent while making the consequences explicit. |
-| **`world:lnk:uri` not resolved at write time**           | External resources are outside the engine's authority. Fetching them at write time adds network coupling, latency, privacy exposure, and side effects. Resolution is the caller's responsibility.                                                                                    |
-| **Backlink index is server-side only**                   | The `.notx` file format stays pure — just the event log and header. Derived structures like backlinks and the anchor index are rebuilt from replay. This means the file format itself is never corrupted by index state, and indexes can always be regenerated from scratch.         |
+| Decision                                                 | Rationale                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **No `notx:lnk:line` reference type**                    | Line numbers are an internal position hint maintained by the engine. Exposing them as a link type would mean every edit that inserts a line above an anchored line would silently break every reference to it. IDs decouple the reference from the position entirely.                                                                                                                                                                                                                       |
+| **Frontmatter as the anchor declaration zone**           | YAML frontmatter is a widely understood, tooling-friendly format supported by most Markdown editors and static site generators. Placing anchor declarations in frontmatter keeps them structurally separate from note content, makes them machine-readable without custom parsers, and allows standard YAML libraries to read and update them. This replaces the earlier `# anchor:` header-line approach, which required a custom parser and was specific to the `.notx` event-log format. |
+| **Line and char as hints, not identity**                 | When the anchored content moves due to edits, the engine updates `line:` and `char:` in the frontmatter. These are navigation aids for the UI. The `<anchor-id>` is what links store, so the reference is never affected by position drift.                                                                                                                                                                                                                                                 |
+| **Hard break detection before write**                    | Silently writing over anchored content would create a class of invisible link rot that is impossible to diagnose. Surfacing breaks at write time — before the event is committed — gives the author an actionable choice rather than a mystery later.                                                                                                                                                                                                                                       |
+| **Three resolution options (reassign / delete / force)** | The author knows best. Reassign is the safe path. Delete is intentional cleanup. Force is an escape hatch for cases where the author knows no other notes actually use the anchor yet. Giving the author these options respects their intent while making the consequences explicit.                                                                                                                                                                                                        |
+| **`world:lnk:uri` not resolved at write time**           | External resources are outside the engine's authority. Fetching them at write time adds network coupling, latency, privacy exposure, and side effects. Resolution is the caller's responsibility.                                                                                                                                                                                                                                                                                           |
+| **Backlink index is server-side only**                   | The note file format stays pure — just the frontmatter and body. Derived structures like backlinks and the anchor index are rebuilt from replay. This means the file format itself is never corrupted by index state, and indexes can always be regenerated from scratch.                                                                                                                                                                                                                   |
+| **Self-references expanded before storage**              | Storing `notx:lnk:id::` shorthand in the `links:` block or backlink index would require the reader to know the current note's URN to resolve the token. Expanding to the full form at write time makes stored tokens portable and self-contained.                                                                                                                                                                                                                                           |

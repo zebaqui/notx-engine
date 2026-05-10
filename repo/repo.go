@@ -455,6 +455,13 @@ type LinkRepository interface {
 	// ordered by created_at DESC. All filter fields are optional — omit to browse
 	// all. limit=0 defaults to 50, max 200.
 	RecentBacklinks(ctx context.Context, opts RecentBacklinksOptions) ([]BacklinkRecord, error)
+
+	// RelabelLinks finds all source notes that have a frontmatter `links:` entry
+	// pointing to targetURN with label == oldLabel, and renames that label to
+	// newLabel. Returns the source URNs that were updated.
+	// This is a cross-domain operation: it reads and writes note content
+	// alongside the link index, which is safe because both live in the same DB.
+	RelabelLinks(ctx context.Context, targetURN, oldLabel, newLabel string) ([]string, error)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -928,4 +935,59 @@ type ParagraphRepository interface {
 	// paragraph_head_seq = -1 on every note so the runner reprocesses all.
 	// Weights and pattern scores are preserved.
 	ResetGraph(ctx context.Context) error
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Note-level analysis records
+// ─────────────────────────────────────────────────────────────────────────────
+
+// NoteAnalysisRecord is the persisted form of a note's holistic analysis.
+type NoteAnalysisRecord struct {
+	ID             string
+	NoteURN        string
+	ProjectURN     string
+	FolderURN      string
+	AllConcepts    []string
+	ThemeConcepts  []string
+	Families       []string
+	DominantRole   string
+	RoleCounts     map[string]int // serialized as JSON
+	ParagraphCount int
+	HeadSeq        int // note head_seq at time of analysis
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
+}
+
+// NoteRelationRecord represents a scored relationship between two notes.
+type NoteRelationRecord struct {
+	ID            string
+	SourceNoteURN string
+	TargetNoteURN string
+	ProjectURN    string
+	FolderURN     string // empty if cross-folder
+	RelationType  string // shares_theme|elaborates_on|contrasts_with|answers|causes
+	Score         float64
+	ReasonSignals []string
+	Version       string
+	CreatedAt     time.Time
+}
+
+// NoteAnalysisRepository persists note-level analyses and relationships.
+type NoteAnalysisRepository interface {
+	UpsertNoteAnalysis(ctx context.Context, records []NoteAnalysisRecord) error
+	GetNoteAnalysis(ctx context.Context, noteURN string) (NoteAnalysisRecord, error)
+	ListNoteAnalyses(ctx context.Context, projectURN string) ([]NoteAnalysisRecord, error)
+	DeleteNoteAnalysis(ctx context.Context, noteURN string) error
+
+	UpsertNoteRelations(ctx context.Context, records []NoteRelationRecord) error
+	ListNoteRelations(ctx context.Context, projectURN string, limit int) ([]NoteRelationRecord, error)
+	ListNoteRelationsForNote(ctx context.Context, noteURN string, limit int) ([]NoteRelationRecord, error)
+	DeleteNoteRelationsForNote(ctx context.Context, noteURN string) error
+}
+
+// NoteContentTypeRepository persists cached engine-kind (content-type) metadata
+// for notes. It is optional; when not wired the handler omits engineKind from
+// list-notes responses.
+type NoteContentTypeRepository interface {
+	GetNoteContentTypesStrings(ctx context.Context) (map[string]string, error)
 }

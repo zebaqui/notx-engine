@@ -43,11 +43,23 @@ func (h *Handler) routeNote(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "note URN is required")
 			return
 		}
-		switch sub {
-		case "events":
+		switch {
+		case sub == "events":
 			h.handleStreamEvents(w, r, urn)
-		case "content":
+		case sub == "content":
 			h.handleReplaceContent(w, r, urn)
+		case sub == "anchors":
+			h.handleNoteAnchors(w, r, urn)
+		case strings.HasPrefix(sub, "anchors/"):
+			anchorID := strings.TrimPrefix(sub, "anchors/")
+			h.handleNoteAnchor(w, r, urn, anchorID)
+		case sub == "links":
+			h.handleNoteLinks(w, r, urn)
+		case sub == "backlinks":
+			h.handleNoteBacklinks(w, r, urn, "")
+		case strings.HasPrefix(sub, "backlinks/"):
+			anchorID := strings.TrimPrefix(sub, "backlinks/")
+			h.handleNoteBacklinks(w, r, urn, anchorID)
 		default:
 			writeError(w, http.StatusNotFound, "unknown note sub-resource: "+sub)
 		}

@@ -77,6 +77,12 @@ type deleteExternalLinkRequest struct {
 	URI       string `json:"uri"`
 }
 
+type relabelLinksRequest struct {
+	NoteURN  string `json:"note_urn"`
+	OldLabel string `json:"old_label"`
+	NewLabel string `json:"new_label"`
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Repo → JSON conversion helpers
 // ─────────────────────────────────────────────────────────────────────────────
@@ -567,6 +573,101 @@ func (h *Handler) handleUpsertExternalLink(w http.ResponseWriter, r *http.Reques
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// Note-centric link endpoints — /v1/notes/{note_urn}/anchors[/{anchor_id}]
+//                               /v1/notes/{note_urn}/links
+//                               /v1/notes/{note_urn}/backlinks[/{anchor_id}]
+// ─────────────────────────────────────────────────────────────────────────────
+
+// handleNoteAnchors handles GET /v1/notes/{note_urn}/anchors.
+func (h *Handler) handleNoteAnchors(w http.ResponseWriter, r *http.Request, noteURN string) {
+	if h.linkSvc == nil {
+		writeError(w, http.StatusServiceUnavailable, "link service not available")
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		anchors, err := h.linkSvc.ListAnchors(r.Context(), noteURN)
+		if err != nil {
+			svcErrToHTTP(w, r, h, err, "list anchors")
+			return
+		}
+		out := make([]*anchorJSON, 0, len(anchors))
+		for _, a := range anchors {
+			out = append(out, anchorRepoToJSON(a))
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"anchors": out})
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+// handleNoteAnchor handles GET /v1/notes/{note_urn}/anchors/{anchor_id}.
+func (h *Handler) handleNoteAnchor(w http.ResponseWriter, r *http.Request, noteURN, anchorID string) {
+	if h.linkSvc == nil {
+		writeError(w, http.StatusServiceUnavailable, "link service not available")
+		return
+	}
+	if anchorID == "" {
+		writeError(w, http.StatusBadRequest, "anchor_id is required")
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		h.handleGetAnchor(w, r, noteURN, anchorID)
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+// handleNoteLinks handles GET /v1/notes/{note_urn}/links.
+func (h *Handler) handleNoteLinks(w http.ResponseWriter, r *http.Request, noteURN string) {
+	if h.linkSvc == nil {
+		writeError(w, http.StatusServiceUnavailable, "link service not available")
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		links, err := h.linkSvc.ListOutboundLinks(r.Context(), noteURN)
+		if err != nil {
+			svcErrToHTTP(w, r, h, err, "list outbound links")
+			return
+		}
+		out := make([]*backlinkJSON, 0, len(links))
+		for _, b := range links {
+			out = append(out, backlinkRepoToJSON(b))
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"links": out})
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+// handleNoteBacklinks handles GET /v1/notes/{note_urn}/backlinks[/{anchor_id}].
+// When anchorID is empty, all backlinks to the note are returned.
+// When anchorID is non-empty, only backlinks targeting that specific anchor are returned.
+func (h *Handler) handleNoteBacklinks(w http.ResponseWriter, r *http.Request, noteURN, anchorID string) {
+	if h.linkSvc == nil {
+		writeError(w, http.StatusServiceUnavailable, "link service not available")
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		backlinks, err := h.linkSvc.ListBacklinks(r.Context(), noteURN, anchorID)
+		if err != nil {
+			svcErrToHTTP(w, r, h, err, "list backlinks")
+			return
+		}
+		out := make([]*backlinkJSON, 0, len(backlinks))
+		for _, b := range backlinks {
+			out = append(out, backlinkRepoToJSON(b))
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"backlinks": out})
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
 // DELETE /v1/links/external
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -590,4 +691,45 @@ func (h *Handler) handleDeleteExternalLink(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"deleted": true})
+}
+func (h *Handler) handleRelabelLinks(w http.ResponseWriter, r *http.Request) {
+	if h.linkSvc == nil {
+		writeError(w, http.StatusServiceUnavailable, "link service not available")
+		return
+	}
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	var req relabelLinksRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if req.NoteURN == "" {
+		writeError(w, http.StatusBadRequest, "note_urn is required")
+		return
+	}
+	if req.OldLabel == "" {
+		writeError(w, http.StatusBadRequest, "old_label is required")
+		return
+	}
+	if req.NewLabel == "" {
+		writeError(w, http.StatusBadRequest, "new_label is required")
+		return
+	}
+
+	updated, err := h.linkSvc.RelabelLinks(r.Context(), req.NoteURN, req.OldLabel, req.NewLabel)
+	if err != nil {
+		svcErrToHTTP(w, r, h, err, "relabel links")
+		return
+	}
+	if updated == nil {
+		updated = []string{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"updated":       updated,
+		"updated_count": len(updated),
+	})
 }

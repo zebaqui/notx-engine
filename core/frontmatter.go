@@ -1,6 +1,8 @@
 package core
 
 import (
+	"fmt"
+	"sort"
 	"strings"
 	"time"
 	"unicode"
@@ -57,6 +59,12 @@ type FrontMatter struct {
 
 	// Draft indicates whether the document is still in draft state.
 	Draft bool
+
+	// Anchors is the list of anchors declared for this note.
+	Anchors []Anchor
+
+	// NodeLinks holds named outbound link tokens (key = label, value = full link token string).
+	NodeLinks map[string]string
 
 	// Extra holds any additional key/value pairs found in the front matter
 	// that are not covered by the fields above. Values are raw strings exactly
@@ -291,6 +299,22 @@ func assignFrontMatterField(fm *FrontMatter, key string, values []string) {
 		}
 	case "tags":
 		fm.Tags = append(fm.Tags, values...)
+	case "anchors":
+		for _, v := range values {
+			if a, ok := ParseAnchorItem(v); ok {
+				fm.Anchors = append(fm.Anchors, a)
+			}
+		}
+	case "links":
+		if fm.NodeLinks == nil {
+			fm.NodeLinks = make(map[string]string)
+		}
+		for _, v := range values {
+			eqIdx := strings.IndexByte(v, '=')
+			if eqIdx > 0 {
+				fm.NodeLinks[v[:eqIdx]] = v[eqIdx+1:]
+			}
+		}
 	default:
 		// Store unknown keys in Extra, joining list values with ", ".
 		fm.Extra[key] = strings.Join(values, ", ")
@@ -312,6 +336,97 @@ func parseFrontMatterDate(s string) (time.Time, error) {
 		}
 	}
 	return time.Time{}, &invalidDateError{s}
+}
+
+// FormatAnchorsForFrontMatter serializes a slice of Anchor values as
+// YAML block-sequence lines suitable for embedding inside a frontmatter block.
+// Returns lines WITHOUT the leading "anchors:" key — each line is "  - <item>".
+func FormatAnchorsForFrontMatter(anchors []Anchor) []string {
+	lines := make([]string, 0, len(anchors))
+	for _, a := range anchors {
+		lines = append(lines, "  - "+FormatAnchorItem(a))
+	}
+	return lines
+}
+
+// FormatNodeLinksForFrontMatter serializes a node-links map as YAML
+// block-sequence lines suitable for embedding inside a frontmatter block.
+// Returns lines WITHOUT the leading "links:" key — each line is "  - key=value".
+func FormatNodeLinksForFrontMatter(links map[string]string) []string {
+	keys := make([]string, 0, len(links))
+	for k := range links {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	lines := make([]string, 0, len(keys))
+	for _, k := range keys {
+		lines = append(lines, fmt.Sprintf("  - %s=%s", k, links[k]))
+	}
+	return lines
+}
+
+// FormatFrontMatter serializes a FrontMatter value back to a YAML frontmatter
+// string (including the opening and closing "---" delimiters).
+// Only non-zero fields are emitted.
+func FormatFrontMatter(fm FrontMatter) string {
+	var sb strings.Builder
+	sb.WriteString("---\n")
+	if fm.ID != "" {
+		fmt.Fprintf(&sb, "id: %s\n", fm.ID)
+	}
+	if fm.Title != "" {
+		fmt.Fprintf(&sb, "title: %s\n", fm.Title)
+	}
+	if fm.Slug != "" {
+		fmt.Fprintf(&sb, "slug: %s\n", fm.Slug)
+	}
+	if fm.Description != "" {
+		fmt.Fprintf(&sb, "description: %s\n", fm.Description)
+	}
+	if !fm.Date.IsZero() {
+		fmt.Fprintf(&sb, "date: %s\n", fm.Date.Format("2006-01-02"))
+	}
+	if !fm.Updated.IsZero() {
+		fmt.Fprintf(&sb, "updated: %s\n", fm.Updated.Format("2006-01-02"))
+	}
+	if fm.Author != "" {
+		fmt.Fprintf(&sb, "author: %s\n", fm.Author)
+	}
+	if len(fm.Tags) > 0 {
+		sb.WriteString("tags:\n")
+		for _, t := range fm.Tags {
+			fmt.Fprintf(&sb, "  - %s\n", t)
+		}
+	}
+	if fm.Status != "" {
+		fmt.Fprintf(&sb, "status: %s\n", fm.Status)
+	}
+	if fm.Draft {
+		sb.WriteString("draft: true\n")
+	}
+	if len(fm.Anchors) > 0 {
+		sb.WriteString("anchors:\n")
+		for _, line := range FormatAnchorsForFrontMatter(fm.Anchors) {
+			sb.WriteString(line + "\n")
+		}
+	}
+	if len(fm.NodeLinks) > 0 {
+		sb.WriteString("links:\n")
+		for _, line := range FormatNodeLinksForFrontMatter(fm.NodeLinks) {
+			sb.WriteString(line + "\n")
+		}
+	}
+	// Extra fields
+	extraKeys := make([]string, 0, len(fm.Extra))
+	for k := range fm.Extra {
+		extraKeys = append(extraKeys, k)
+	}
+	sort.Strings(extraKeys)
+	for _, k := range extraKeys {
+		fmt.Fprintf(&sb, "%s: %s\n", k, fm.Extra[k])
+	}
+	sb.WriteString("---")
+	return sb.String()
 }
 
 type invalidDateError struct{ raw string }

@@ -710,6 +710,62 @@ func cloneNoteWithEvents(base *core.Note, evts []*core.Event) (*core.Note, error
 // copyEvents returns a new slice containing the same event pointers.
 // The in-memory provider treats events as immutable once written, so pointer
 // sharing is safe here.
+// ─────────────────────────────────────────────────────────────────────────────
+// PropSchemaRepo stubs
+// ─────────────────────────────────────────────────────────────────────────────
+
+func (p *Provider) ListPropSchemas(_ context.Context) ([]repo.PropSchema, error) {
+	return nil, nil
+}
+
+func (p *Provider) CreatePropSchema(_ context.Context, _ *repo.PropSchema) error {
+	return nil
+}
+
+func (p *Provider) UpdatePropSchema(_ context.Context, _ *repo.PropSchema) error {
+	return nil
+}
+
+func (p *Provider) DeletePropSchema(_ context.Context, _ string) error {
+	return nil
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// NoteAnalysisRepository stubs
+// ─────────────────────────────────────────────────────────────────────────────
+
+func (p *Provider) UpsertNoteAnalysis(_ context.Context, _ []repo.NoteAnalysisRecord) error {
+	return nil
+}
+
+func (p *Provider) GetNoteAnalysis(_ context.Context, _ string) (repo.NoteAnalysisRecord, error) {
+	return repo.NoteAnalysisRecord{}, repo.ErrNotFound
+}
+
+func (p *Provider) ListNoteAnalyses(_ context.Context, _ string) ([]repo.NoteAnalysisRecord, error) {
+	return nil, nil
+}
+
+func (p *Provider) DeleteNoteAnalysis(_ context.Context, _ string) error {
+	return nil
+}
+
+func (p *Provider) UpsertNoteRelations(_ context.Context, _ []repo.NoteRelationRecord) error {
+	return nil
+}
+
+func (p *Provider) ListNoteRelations(_ context.Context, _ string, _ int) ([]repo.NoteRelationRecord, error) {
+	return nil, nil
+}
+
+func (p *Provider) ListNoteRelationsForNote(_ context.Context, _ string, _ int) ([]repo.NoteRelationRecord, error) {
+	return nil, nil
+}
+
+func (p *Provider) DeleteNoteRelationsForNote(_ context.Context, _ string) error {
+	return nil
+}
+
 func copyEvents(evts []*core.Event) []*core.Event {
 	if len(evts) == 0 {
 		return []*core.Event{}

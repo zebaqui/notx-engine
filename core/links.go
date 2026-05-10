@@ -110,22 +110,15 @@ func ValidateAnchorID(id string) bool {
 	return anchorIDRe.MatchString(id)
 }
 
-// ParseAnchorLine parses a single "# anchor: ..." header line.
-// Returns (anchor, true) on success, (Anchor{}, false) on failure.
-// Expected format: # anchor: <id>  line:<L>  char:<S>-<E>  [status:<status>]
-func ParseAnchorLine(line string) (Anchor, bool) {
-	// Strip the "# anchor:" prefix (allowing optional spaces around "#").
-	trimmed := strings.TrimSpace(line)
-	if !strings.HasPrefix(trimmed, "#") {
-		return Anchor{}, false
-	}
-	after := strings.TrimSpace(trimmed[1:])
-	if !strings.HasPrefix(after, "anchor:") {
-		return Anchor{}, false
-	}
-	rest := strings.TrimSpace(after[len("anchor:"):])
-
-	fields := strings.Fields(rest)
+// ParseAnchorItem parses a single anchor item string as it appears in
+// frontmatter block sequences. Format:
+//
+//	<id>  line:<L>  char:<S>-<E>  [status:<status>]  [preview:<text>]
+//
+// The preview field, if present, extends to the end of the string.
+// Returns (Anchor, true) on success.
+func ParseAnchorItem(item string) (Anchor, bool) {
+	fields := strings.Fields(item)
 	// Minimum required: <id> line:<L> char:<S>-<E>
 	if len(fields) < 3 {
 		return Anchor{}, false
@@ -138,10 +131,11 @@ func ParseAnchorLine(line string) (Anchor, bool) {
 
 	var lineNum, charStart, charEnd int
 	var status AnchorStatus = AnchorStatusOK
+	var preview string
 	lineFound := false
 	charFound := false
 
-	for _, f := range fields[1:] {
+	for i, f := range fields[1:] {
 		switch {
 		case strings.HasPrefix(f, "line:"):
 			val := f[len("line:"):]
@@ -175,9 +169,17 @@ func ParseAnchorLine(line string) (Anchor, bool) {
 			default:
 				return Anchor{}, false
 			}
+
+		case strings.HasPrefix(f, "preview:"):
+			// preview extends to end of item string; re-join remaining fields.
+			previewFields := fields[1+i:]
+			previewRaw := strings.Join(previewFields, " ")
+			preview = strings.TrimPrefix(previewRaw, "preview:")
+			// Stop processing further fields — preview consumes the rest.
+			goto done
 		}
 	}
-
+done:
 	if !lineFound || !charFound {
 		return Anchor{}, false
 	}
@@ -188,16 +190,20 @@ func ParseAnchorLine(line string) (Anchor, bool) {
 		CharStart: charStart,
 		CharEnd:   charEnd,
 		Status:    status,
+		Preview:   preview,
 	}, true
 }
 
-// FormatAnchorLine formats an Anchor as a .notx header line.
-// Returns e.g.: # anchor: node-reject  line:5  char:0-0
-// If status is non-ok and non-empty, appends  status:<status>
-func FormatAnchorLine(a Anchor) string {
-	s := fmt.Sprintf("# anchor: %s  line:%d  char:%d-%d", a.ID, a.Line, a.CharStart, a.CharEnd)
+// FormatAnchorItem formats an Anchor as a single-line string suitable for
+// embedding as a frontmatter block-sequence item (no leading "  - " prefix).
+// Example: "node-reject line:5 char:0-0 status:broken preview:Reject node"
+func FormatAnchorItem(a Anchor) string {
+	s := fmt.Sprintf("%s line:%d char:%d-%d", a.ID, a.Line, a.CharStart, a.CharEnd)
 	if a.Status != "" && a.Status != AnchorStatusOK {
-		s += fmt.Sprintf("  status:%s", a.Status)
+		s += fmt.Sprintf(" status:%s", a.Status)
+	}
+	if a.Preview != "" {
+		s += " preview:" + a.Preview
 	}
 	return s
 }

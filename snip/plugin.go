@@ -135,6 +135,12 @@ type PluginEnv struct {
 
 	// Log is the structured logger scoped to this plugin's snip type.
 	Log *slog.Logger
+
+	// Namespace is the tenant namespace this plugin instance is scoped to.
+	// Empty string means the default/global namespace (used in the embedded
+	// SQLite server). In the platform Postgres context it is always the tenant
+	// namespace passed to SnipPluginManager.PluginsForTenant.
+	Namespace string
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

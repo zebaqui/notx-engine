@@ -21,6 +21,8 @@ import (
 	"github.com/zebaqui/notx-engine/internal/clientconfig"
 	"github.com/zebaqui/notx-engine/internal/server"
 	"github.com/zebaqui/notx-engine/repo/sqlite"
+	"github.com/zebaqui/notx-engine/snip"
+	"github.com/zebaqui/notx-engine/snip/plugins/prompt"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -338,7 +340,8 @@ func runDaemonWorker(cmd *cobra.Command, _ []string) error {
 		}
 	}()
 
-	srv, err := server.New(cfg, provider, provider, provider, provider, log, nil, provider)
+	plugins := []snip.SnipPlugin{prompt.New()}
+	srv, err := server.New(cfg, provider, provider, provider, provider, log, plugins, provider)
 	if err != nil {
 		return fmt.Errorf("build server: %w", err)
 	}

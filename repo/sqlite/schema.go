@@ -13,7 +13,7 @@ import (
 // currentSchemaVersion must match len(migrations).
 // Bump it by 1 every time you add a migration to the slice below.
 // NEVER edit or remove existing migrations — only append new ones.
-const currentSchemaVersion = 14
+const currentSchemaVersion = 15
 
 // currentProjectionVersion is incremented when projection logic changes
 // (i.e. existing rows need recomputing from the event log even though
@@ -408,6 +408,41 @@ CREATE TABLE IF NOT EXISTS sync_log (
 );
 CREATE INDEX IF NOT EXISTS idx_sync_log_synced ON sync_log(synced_at DESC);
 CREATE INDEX IF NOT EXISTS idx_sync_log_note   ON sync_log(note_urn, synced_at DESC);
+
+-- Note-level holistic analysis (one row per note).
+CREATE TABLE IF NOT EXISTS note_analyses (
+    id              TEXT    PRIMARY KEY,
+    note_urn        TEXT    NOT NULL UNIQUE,
+    project_urn     TEXT    NOT NULL DEFAULT '',
+    folder_urn      TEXT    NOT NULL DEFAULT '',
+    all_concepts    TEXT    NOT NULL DEFAULT '[]',
+    theme_concepts  TEXT    NOT NULL DEFAULT '[]',
+    families        TEXT    NOT NULL DEFAULT '[]',
+    dominant_role   TEXT    NOT NULL DEFAULT '',
+    role_counts     TEXT    NOT NULL DEFAULT '{}',
+    paragraph_count INTEGER NOT NULL DEFAULT 0,
+    head_seq        INTEGER NOT NULL DEFAULT 0,
+    created_at      INTEGER NOT NULL,
+    updated_at      INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_note_analyses_project ON note_analyses(project_urn);
+
+-- Scored directional relationships between notes.
+CREATE TABLE IF NOT EXISTS note_relations (
+    id              TEXT    PRIMARY KEY,
+    source_note_urn TEXT    NOT NULL,
+    target_note_urn TEXT    NOT NULL,
+    project_urn     TEXT    NOT NULL DEFAULT '',
+    folder_urn      TEXT    NOT NULL DEFAULT '',
+    relation_type   TEXT    NOT NULL,
+    score           REAL    NOT NULL DEFAULT 0,
+    reason_signals  TEXT    NOT NULL DEFAULT '[]',
+    version         TEXT    NOT NULL DEFAULT 'heuristic_v1',
+    created_at      INTEGER NOT NULL,
+    UNIQUE(source_note_urn, target_note_urn)
+);
+CREATE INDEX IF NOT EXISTS idx_note_relations_project ON note_relations(project_urn);
+CREATE INDEX IF NOT EXISTS idx_note_relations_source  ON note_relations(source_note_urn);
 `
 
 // migrations is the ordered list of additive SQL migrations.
@@ -726,6 +761,39 @@ CREATE TABLE IF NOT EXISTS paragraph_pattern_scores (
     net_score       REAL    NOT NULL DEFAULT 0.0,
     updated_at      INTEGER NOT NULL
 );`,
+
+	// v15: note-level analysis — note_analyses and note_relations tables.
+	`CREATE TABLE IF NOT EXISTS note_analyses (
+    id              TEXT    PRIMARY KEY,
+    note_urn        TEXT    NOT NULL UNIQUE,
+    project_urn     TEXT    NOT NULL DEFAULT '',
+    folder_urn      TEXT    NOT NULL DEFAULT '',
+    all_concepts    TEXT    NOT NULL DEFAULT '[]',
+    theme_concepts  TEXT    NOT NULL DEFAULT '[]',
+    families        TEXT    NOT NULL DEFAULT '[]',
+    dominant_role   TEXT    NOT NULL DEFAULT '',
+    role_counts     TEXT    NOT NULL DEFAULT '{}',
+    paragraph_count INTEGER NOT NULL DEFAULT 0,
+    head_seq        INTEGER NOT NULL DEFAULT 0,
+    created_at      INTEGER NOT NULL,
+    updated_at      INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_note_analyses_project ON note_analyses(project_urn);
+CREATE TABLE IF NOT EXISTS note_relations (
+    id              TEXT    PRIMARY KEY,
+    source_note_urn TEXT    NOT NULL,
+    target_note_urn TEXT    NOT NULL,
+    project_urn     TEXT    NOT NULL DEFAULT '',
+    folder_urn      TEXT    NOT NULL DEFAULT '',
+    relation_type   TEXT    NOT NULL,
+    score           REAL    NOT NULL DEFAULT 0,
+    reason_signals  TEXT    NOT NULL DEFAULT '[]',
+    version         TEXT    NOT NULL DEFAULT 'heuristic_v1',
+    created_at      INTEGER NOT NULL,
+    UNIQUE(source_note_urn, target_note_urn)
+);
+CREATE INDEX IF NOT EXISTS idx_note_relations_project ON note_relations(project_urn);
+CREATE INDEX IF NOT EXISTS idx_note_relations_source  ON note_relations(source_note_urn);`,
 }
 
 // applySchema creates all tables/indexes on a fresh DB and seeds meta rows.
