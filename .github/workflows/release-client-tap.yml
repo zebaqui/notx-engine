@@ -49,7 +49,7 @@ jobs:
           cask "notx-desktop" do
             version "${VERSION_BARE}"
 
-            url "https://github.com/zebaqui/notx-engine/releases/download/client-${VERSION}/notx-${VERSION}-darwin-arm64.dmg"
+            url "https://github.com/zebaqui/notx-engine/releases/download/client-${VERSION}/notx-${VERSION_BARE}-arm64.dmg"
             sha256 "${DMG_ARM64}"
 
             name "notx"
